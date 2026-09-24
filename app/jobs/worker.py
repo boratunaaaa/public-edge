@@ -18,7 +18,7 @@ from app.db.session import get_engine
 from app.db.store import health_failure, health_mark, health_success, save_job_state
 from app.entities.registry import resolver, sync_registry
 from app.notifications import telegram
-from app.notifications.dispatch import dispatch, send_system
+from app.notifications.dispatch import deliver, dispatch, is_delivered
 from app.sources.registry import SOURCES
 
 log = logging.getLogger("worker")
@@ -32,17 +32,20 @@ def _sig(*_):
 
 
 def _alert_source_failure(engine, source: str, fails: int, err: str) -> None:
-    with engine.begin() as conn:
-        row = conn.execute(select(source_health.c.alerted).where(source_health.c.source == source)).first()
-        if row and row[0]:
-            return
-        conn.execute(source_health.update().where(source_health.c.source == source).values(alerted=True))
-    try:
-        send_system(engine, f"source_error:{source}:{datetime.now(timezone.utc):%Y%m%d%H}",
-                    f"⚠️ <b>PUBLIC EDGE source error</b>\nKaynak: {source}\nArdışık hata: {fails}\nSon hata: {err[:300]}",
-                    kind="source_error")
-    except Exception as e:
-        log.warning("could not send source error alert: %s", e)
+    """One alert per failure episode. `alerted` is set only after Telegram confirmed delivery;
+    a failed send is retried (with backoff) on the next failing run."""
+    with engine.connect() as conn:
+        row = conn.execute(select(source_health.c.alerted, source_health.c.last_success)
+                           .where(source_health.c.source == source)).first()
+    if row and row[0]:
+        return
+    episode = row[1].isoformat() if row and row[1] else "never"
+    key = f"source_error:{source}:{episode}"
+    r = deliver(engine, key, "source_error",
+                f"⚠️ <b>PUBLIC EDGE source error</b>\nKaynak: {source}\nArdışık hata: {fails}\nSon hata: {err[:300]}")
+    if r is True or (r is None and is_delivered(engine, key)):
+        with engine.begin() as conn:
+            conn.execute(source_health.update().where(source_health.c.source == source).values(alerted=True))
 
 
 def run_source(engine, src) -> None:

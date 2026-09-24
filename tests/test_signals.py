@@ -106,3 +106,31 @@ def test_money_format_boundaries():
 def test_contract_public_date_is_conservative_for_backfill():
     assert conservative_public_date(date(2025, 1, 10), "Department of Defense") == date(2025, 4, 10)
     assert conservative_public_date(date(2025, 1, 10), "Department of Energy") == date(2025, 1, 15)
+
+
+# ---------------- point-in-time shares outstanding ----------------
+
+def _f(acc, end, filed, val, form="10-Q"):
+    from app.marketdata.provider import ShareFact
+    return ShareFact(acc, date.fromisoformat(end), date.fromisoformat(filed), form, val)
+
+
+def test_shares_same_end_rereported_is_not_summed():
+    from app.marketdata.provider import shares_as_of
+    facts = [_f("A-10Q", "2025-06-30", "2025-08-01", 100), _f("B-10QA", "2025-06-30", "2025-09-15", 105, "10-Q/A")]
+    assert shares_as_of(facts, date(2025, 8, 10))[0] == 100  # amendment not yet filed -> invisible
+    assert shares_as_of(facts, date(2025, 9, 20))[0] == 105  # amendment replaces, never 205
+
+
+def test_shares_distinct_classes_in_one_filing_are_summed():
+    from app.marketdata.provider import shares_as_of
+    facts = [_f("A", "2025-06-30", "2025-08-01", 700), _f("A", "2025-06-30", "2025-08-01", 300)]
+    assert shares_as_of(facts, date(2025, 9, 1))[0] == 1000
+
+
+def test_shares_no_look_ahead_and_staleness():
+    from app.marketdata.provider import shares_as_of
+    facts = [_f("A", "2024-03-31", "2024-05-01", 100), _f("B", "2025-03-31", "2025-05-01", 400)]  # 4x issuance later
+    assert shares_as_of(facts, date(2024, 12, 1))[0] == 100  # future dilution not visible
+    assert shares_as_of(facts, date(2024, 4, 1)) is None  # nothing filed yet -> unknown
+    assert shares_as_of(facts, date(2026, 9, 1)) is None  # >400 days old -> unknown

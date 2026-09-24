@@ -63,12 +63,17 @@ def insert_rows(conn: Connection, table, rows: list[dict], conflict_cols: list[s
 def create_event(conn: Connection, *, event_type: str, dedupe_key: str, public_date: date, title: str, payload: dict,
                  source_url: str, ticker: str | None = None, company_name: str | None = None, issuer_cik: str | None = None,
                  public_at: datetime | None = None, transaction_date: date | None = None, priority: int = 0,
-                 is_backfill: bool = False, features: dict | None = None) -> int | None:
-    """Insert an event exactly once (dedupe_key). Returns the new id or None if it already existed."""
+                 is_backfill: bool = False, features: dict | None = None, date_quality: str | None = None) -> int | None:
+    """Insert an event exactly once (dedupe_key). Returns the new id or None if it already existed.
+
+    date_quality: exact (timestamp) | date (official date only) | first_seen (our observation) |
+    estimated (inferred - excluded from verified statistics and multi-signal)."""
+    if date_quality is None:
+        date_quality = "exact" if public_at is not None else "date"
     res = conn.execute(pg_insert(events).values(
         event_type=event_type, dedupe_key=dedupe_key[:200], ticker=ticker, company_name=company_name, issuer_cik=issuer_cik,
         public_date=public_date, public_at=public_at, transaction_date=transaction_date, priority=priority, title=title[:500],
-        payload=jsonable(payload), source_url=source_url, is_backfill=is_backfill,
+        payload=jsonable(payload), source_url=source_url, is_backfill=is_backfill, date_quality=date_quality,
     ).on_conflict_do_nothing(index_elements=["dedupe_key"]).returning(events.c.id)).first()
     if res is None:
         return None

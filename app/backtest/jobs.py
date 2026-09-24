@@ -12,10 +12,12 @@ from sqlalchemy.engine import Connection, Engine
 from app.backtest.engine import HORIZONS, compute_returns, summarize
 from app.config import settings
 from app.db.models import event_returns, events
-from app.marketdata.provider import BENCHMARK, ensure_prices, load_bars
+from app.marketdata.provider import BENCHMARK, PriceFetchError, ensure_prices
 
 log = logging.getLogger(__name__)
 PRICE_HISTORY_START = date(2015, 1, 1)
+RECHECK_HOURS = 20
+NO_DATA_RECHECK_DAYS = 30
 
 
 def _ensure_spy(conn: Connection) -> list:
@@ -26,33 +28,55 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
     """Compute/refresh returns for events whose horizons have (newly) elapsed."""
     t0 = time.time()
     today = date.today()
-    recheck_before = datetime.now(timezone.utc) - timedelta(hours=20)
+    now = datetime.now(timezone.utc)
+    due = or_(
+        and_(events.c.returns_status.in_(["pending", "partial", "retry"]),
+             or_(events.c.returns_checked_at.is_(None), events.c.returns_checked_at < now - timedelta(hours=RECHECK_HOURS))),
+        # confirmed no-data is re-verified monthly (symbol changes, provider backfills)
+        and_(events.c.returns_status == "no_data", events.c.returns_checked_at < now - timedelta(days=NO_DATA_RECHECK_DAYS)),
+    )
     with engine.connect() as conn:
         rows = conn.execute(select(events.c.id, events.c.ticker, events.c.public_date, events.c.public_at, events.c.returns_status)
-                            .where(and_(events.c.ticker.isnot(None), events.c.public_date <= today - timedelta(days=2),
-                                        events.c.returns_status.in_(["pending", "partial"]),
-                                        or_(events.c.returns_checked_at.is_(None), events.c.returns_checked_at < recheck_before)))
+                            .where(and_(events.c.ticker.isnot(None), events.c.public_date <= today - timedelta(days=2), due))
                             .order_by(events.c.ticker, events.c.public_date).limit(limit)).all()
     if not rows:
         return {"processed": 0}
-    with engine.begin() as conn:
-        spy = _ensure_spy(conn)
-    done = nodata = 0
+    try:
+        with engine.begin() as conn:
+            spy = _ensure_spy(conn)
+    except PriceFetchError as e:
+        return {"processed": 0, "error": f"benchmark unavailable: {e}"}
+    done = nodata = retry = 0
     cache: dict[str, list] = {}
+    failed_tickers: dict[str, str] = {}
     for eid, ticker, pdate, pat, _st in rows:
         if time.time() - t0 > time_budget_s:
             break
         with engine.begin() as conn:
+            now = datetime.now(timezone.utc)
+            if ticker in failed_tickers:
+                conn.execute(events.update().where(events.c.id == eid).values(
+                    returns_status="retry", returns_checked_at=now, returns_error=failed_tickers[ticker]))
+                retry += 1
+                continue
             if ticker not in cache:
                 cache.clear()  # rows are ticker-ordered; keep memory bounded
-                cache[ticker] = ensure_prices(conn, ticker, min(pdate, today) - timedelta(days=10), today)
+                try:
+                    cache[ticker] = ensure_prices(conn, ticker, min(pdate, today) - timedelta(days=10), today)
+                except PriceFetchError as e:
+                    # transient: keep the event retryable, never mark it as "no data"
+                    failed_tickers[ticker] = str(e)[:500]
+                    conn.execute(events.update().where(events.c.id == eid).values(
+                        returns_status="retry", returns_checked_at=now, returns_error=failed_tickers[ticker]))
+                    retry += 1
+                    continue
             bars = [b for b in cache[ticker] if b.date >= pdate - timedelta(days=10) and b.date <= pdate + timedelta(days=400)]
             res = compute_returns(bars, spy, pdate, pat, as_of=today)
-            now = datetime.now(timezone.utc)
             if not res:
                 status = "no_data" if (today - pdate).days > 10 else "pending"
                 nodata += status == "no_data"
-                conn.execute(events.update().where(events.c.id == eid).values(returns_status=status, returns_checked_at=now))
+                conn.execute(events.update().where(events.c.id == eid).values(
+                    returns_status=status, returns_checked_at=now, returns_error=None))
                 continue
             for r in res:
                 vals = dict(entry_date=r.entry_date, entry_price=r.entry_price, exit_date=r.exit_date, exit_price=r.exit_price,
@@ -60,9 +84,10 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                 conn.execute(pg_insert(event_returns).values(event_id=eid, horizon_days=r.horizon_days, **vals)
                              .on_conflict_do_update(index_elements=["event_id", "horizon_days"], set_=vals))
             status = "complete" if len(res) == len(HORIZONS) else "partial"
-            conn.execute(events.update().where(events.c.id == eid).values(returns_status=status, returns_checked_at=now))
+            conn.execute(events.update().where(events.c.id == eid).values(
+                returns_status=status, returns_checked_at=now, returns_error=None))
             done += 1
-    return {"processed": done, "no_data": nodata, "candidates": len(rows)}
+    return {"processed": done, "no_data": nodata, "retry": retry, "candidates": len(rows)}
 
 
 # ---------------- statistics ----------------
@@ -84,8 +109,10 @@ def event_type_stats(conn: Connection, event_type: str, subgroup: str = "all", h
     cond = SUBGROUPS.get(subgroup, "TRUE")
     out = {}
     for h in horizons:
+        # estimated public dates are never part of verified statistics
         q = text(f"""SELECT r.ret, r.excess_ret, r.mae, r.mfe FROM event_returns r JOIN events e ON e.id = r.event_id
-                     WHERE e.event_type = :et AND r.horizon_days = :h AND {cond} {extra_where}""")
+                     WHERE e.event_type = :et AND r.horizon_days = :h AND e.date_quality <> 'estimated'
+                       AND {cond} {extra_where}""")
         rows = [dict(x._mapping) for x in conn.execute(q, {"et": event_type, "h": h, **(params or {})})]
         out[h] = summarize(rows, settings.min_sample_size).as_dict()
     return out
@@ -117,10 +144,11 @@ def subgroup_for(event_type: str, payload: dict) -> str:
 
 def stats_overview(conn: Connection) -> list[dict]:
     rows = conn.execute(text("""
-        SELECT e.event_type, r.horizon_days, count(*) n, avg(r.ret) mean, percentile_cont(0.5) WITHIN GROUP (ORDER BY r.ret) median,
+        SELECT e.event_type || CASE WHEN e.date_quality = 'estimated' THEN ' (estimated date - unverified)' ELSE '' END event_type,
+               r.horizon_days, count(*) n, avg(r.ret) mean, percentile_cont(0.5) WITHIN GROUP (ORDER BY r.ret) median,
                avg((r.ret > 0)::int)::float8 win_rate,
                (avg((r.excess_ret > 0)::int) FILTER (WHERE r.excess_ret IS NOT NULL))::float8 spy_beat,
                avg(r.excess_ret) mean_excess, stddev_samp(r.ret) std, avg(r.mae) mae, avg(r.mfe) mfe
         FROM event_returns r JOIN events e ON e.id = r.event_id
-        GROUP BY e.event_type, r.horizon_days ORDER BY e.event_type, r.horizon_days""")).mappings().all()
+        GROUP BY 1, r.horizon_days ORDER BY 1, r.horizon_days""")).mappings().all()
     return [dict(r) | {"sufficient": r["n"] >= settings.min_sample_size} for r in rows]

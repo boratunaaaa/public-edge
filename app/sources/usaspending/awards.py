@@ -69,11 +69,22 @@ def process_award(conn: Connection, a: dict, *, is_backfill: bool, first_seen: d
         parent = parent_name(gid)
         if parent and parent.strip().upper() != name.strip().upper():
             ticker = resolver.ticker_for_name(parent)
-    public_date = conservative_public_date(award_date, a.get("Awarding Agency")) if (is_backfill and award_date) else first_seen
+    # Live: the documented date is the day this system first saw the record, with the amount
+    # shown on that day. Backfill: USAspending exposes neither the original publication date nor
+    # the amount known back then -> the date is ESTIMATED and kept out of verified stats/multi-signal.
+    if is_backfill:
+        if not award_date:
+            return []
+        public_date, date_quality = conservative_public_date(award_date, a.get("Awarding Agency")), "estimated"
+        basis, amount_basis = "estimated", "current_total_at_backfill"
+    else:
+        public_date, date_quality = first_seen, "first_seen"
+        basis, amount_basis = "first_seen", "amount_at_first_seen"
     mcap = ratio = None
     if ticker:
         try:
-            mcap = get_market_cap(conn, ticker, award_date or public_date)
+            # point-in-time: shares known on the public date x price on that date (None = unknown)
+            mcap = get_market_cap(conn, ticker, public_date)
         except Exception as e:
             log.warning("market cap %s failed: %s", ticker, e)
         ratio = (amount / mcap) if mcap else None
@@ -85,8 +96,9 @@ def process_award(conn: Connection, a: dict, *, is_backfill: bool, first_seen: d
         "parent_name": parent, "amount": amount, "award_date": award_date, "start_date": to_date(a.get("Start Date")),
         "end_date": to_date(a.get("End Date")), "agency": a.get("Awarding Agency"), "subagency": a.get("Awarding Sub Agency"),
         "description": (a.get("Description") or "")[:4000], "ticker": ticker, "market_cap": mcap, "value_to_mcap": ratio,
-        "mcap_level": level, "source_url": url,
-    }], ["award_key"])
+        "mcap_level": level, "first_seen_date": first_seen, "public_date_basis": basis, "amount_basis": amount_basis,
+        "source_url": url,
+    }], ["award_key"])  # first observation wins: later amount changes never rewrite history
     created = []
     if ticker and ratio is not None and ratio >= EVENT_MIN_RATIO:
         eid = create_event(
@@ -98,8 +110,8 @@ def process_award(conn: Connection, a: dict, *, is_backfill: bool, first_seen: d
                      "agency": a.get("Awarding Agency"), "subagency": a.get("Awarding Sub Agency"),
                      "description": (a.get("Description") or "")[:500], "period": [a.get("Start Date"), a.get("End Date")],
                      "market_cap": mcap, "value_to_mcap": ratio, "level": level, "award_id": a.get("Award ID"),
-                     "public_date_basis": "first_seen" if not is_backfill else "award_date+publication_lag"},
-            source_url=url, is_backfill=is_backfill,
+                     "public_date_basis": basis, "amount_basis": amount_basis},
+            source_url=url, is_backfill=is_backfill, date_quality=date_quality,
         )
         if eid:
             created.append(eid)

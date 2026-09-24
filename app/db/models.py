@@ -32,8 +32,24 @@ companies = Table(
     Column("name_norm", Text, nullable=False, index=True),
     Column("shares_outstanding", BigInteger),
     Column("shares_outstanding_date", Date),
+    _ts("shares_checked_at"),  # last time the point-in-time share facts were fetched
     _created(),
 )
+
+# Point-in-time cover-page share counts (dei:EntityCommonStockSharesOutstanding) with the
+# filing that disclosed them, so a historical date only sees facts filed on/before it.
+shares_outstanding_facts = Table(
+    "shares_outstanding_facts", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False),
+    Column("accession", String(25), nullable=False),
+    Column("end_date", Date, nullable=False),
+    Column("filed", Date, nullable=False),
+    Column("form", String(16)),
+    Column("val", BigInteger, nullable=False),
+    UniqueConstraint("cik", "accession", "end_date", "val", name="uq_shares_facts_cik_acc_end_val"),
+)
+Index("ix_shares_facts_cik_filed", shares_outstanding_facts.c.cik, shares_outstanding_facts.c.filed)
 
 tickers = Table(
     "tickers", metadata,
@@ -160,6 +176,9 @@ government_awards = Table(
     Column("market_cap", Numeric(22, 2)),
     Column("value_to_mcap", Float),
     Column("mcap_level", String(8)),
+    Column("first_seen_date", Date),  # date this system first observed the record (documented)
+    Column("public_date_basis", String(16)),  # first_seen | estimated
+    Column("amount_basis", String(24)),  # amount_at_first_seen | current_total_at_backfill
     Column("source_url", Text, nullable=False),
     _created(),
 )
@@ -259,8 +278,12 @@ events = Table(
     Column("payload", JSONB, nullable=False),
     Column("source_url", Text, nullable=False),
     Column("is_backfill", Boolean, nullable=False, server_default="false"),
-    Column("returns_status", String(16), nullable=False, server_default="pending"),  # pending|partial|complete|no_data
+    # exact = public timestamp known | date = public date known | first_seen = our observation date
+    # estimated = inferred (never used in verified stats or multi-signal)
+    Column("date_quality", String(12), nullable=False, server_default="date"),
+    Column("returns_status", String(16), nullable=False, server_default="pending"),  # pending|partial|complete|retry|no_data
     _ts("returns_checked_at"),
+    Column("returns_error", Text),
     _created(),
 )
 Index("ix_events_type_public", events.c.event_type, events.c.public_date)
@@ -295,8 +318,12 @@ notifications = Table(
     Column("dedupe_key", String(200), nullable=False, unique=True),
     Column("event_id", BigInteger, ForeignKey("events.id", ondelete="SET NULL")),
     Column("kind", String(24), nullable=False),  # event | source_error | system
-    Column("status", String(16), nullable=False),  # sent | failed | suppressed
+    # sending (claimed) -> sent | failed (retry after next_retry_at) -> dead ; merged = folded into another alert
+    Column("status", String(16), nullable=False),
     Column("error", Text),
+    Column("attempts", Integer, nullable=False, server_default="0"),
+    _ts("claimed_at"),
+    _ts("next_retry_at"),
     _ts("sent_at"),
     _created(),
 )

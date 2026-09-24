@@ -134,8 +134,11 @@ class HousePtrSource(Source):
     interval_seconds = 3 * 3600
     slow = True
 
-    def _run_year(self, engine: Engine, year: int, *, is_backfill: bool) -> RunResult:
+    def _run_year(self, engine: Engine, year: int, *, is_backfill: bool) -> tuple[RunResult, dict[str, str]]:
+        """Process every not-yet-stored PTR of a year. Returns (result, {doc_id: error}) - a failed
+        document is NOT stored, so any later run retries it."""
         res = RunResult()
+        failures: dict[str, str] = {}
         idx = fetch_index(year)
         with engine.connect() as conn:
             resolver.load(conn)
@@ -147,34 +150,46 @@ class HousePtrSource(Source):
                     res.events += process_ptr(conn, m, pdf, is_backfill=is_backfill)
                 res.items += 1
             except Exception as e:
+                failures[m["doc_id"]] = f"{type(e).__name__}: {e}"[:300]
                 log.warning("house PTR %s failed: %s", m["doc_id"], e)
-        return res
+        return res, failures
 
     def run_live(self, engine: Engine) -> RunResult:
         y = date.today().year
-        res = self._run_year(engine, y, is_backfill=False)
+        res, fails = self._run_year(engine, y, is_backfill=False)
         if date.today().month == 1:  # late filings for the previous year
-            r2 = self._run_year(engine, y - 1, is_backfill=False)
+            r2, f2 = self._run_year(engine, y - 1, is_backfill=False)
             res.items += r2.items
             res.events += r2.events
+            fails.update(f2)
+        if fails and not res.items:
+            raise RuntimeError(f"{len(fails)} PTR documents failed, none processed")
         return res
 
     def run_backfill(self, engine: Engine, years: int = 5) -> RunResult:
+        """A year is marked complete only when no document is left in its failure (retry) list."""
         name = "backfill_house"
         with engine.begin() as conn:
             st = job_state(conn, name)
         done = set(st.get("done", []))
+        pending: dict[str, dict[str, str]] = st.get("failed", {})
         total = RunResult()
         for y in range(date.today().year - years, date.today().year):
             if str(y) in done:
                 continue
-            r = self._run_year(engine, y, is_backfill=True)
+            r, fails = self._run_year(engine, y, is_backfill=True)
             total.items += r.items
-            done.add(str(y))
+            if fails:
+                pending[str(y)] = fails
+            else:
+                pending.pop(str(y), None)
+                done.add(str(y))
             with engine.begin() as conn:
-                save_job_state(conn, name, {"done": sorted(done), "last_year": y, "docs": r.items}, status="running")
+                save_job_state(conn, name, {"done": sorted(done), "failed": pending, "last_year": y, "docs": r.items},
+                               status="running")
         with engine.begin() as conn:
-            save_job_state(conn, name, {"done": sorted(done)}, status="done")
+            save_job_state(conn, name, {"done": sorted(done), "failed": pending},
+                           status="incomplete" if pending else "done")
         return total
 
 

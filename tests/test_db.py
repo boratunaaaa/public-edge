@@ -186,3 +186,186 @@ def test_source_health_failure_counter(engine):
     with engine.connect() as c:
         row = c.execute(select(source_health).where(source_health.c.source == "x")).mappings().first()
     assert row["consecutive_failures"] == 0 and row["status"] == "WORKING"
+
+
+# ---------------- reliable notification delivery ----------------
+
+def _mk_event(engine, key="E1", priority=9, ticker="ZBIO", **kw):
+    from app.db.store import create_event
+    with engine.begin() as c:
+        return create_event(c, event_type="INSIDER_OPEN_MARKET_BUY", dedupe_key=key, public_date=date.today(), ticker=ticker,
+                            title="t", payload={"is_ceo": True, "value": 1}, source_url="u", priority=priority, **kw)
+
+
+def _notif(engine, key):
+    with engine.connect() as c:
+        return c.execute(select(notifications).where(notifications.c.dedupe_key == key)).mappings().first()
+
+
+def test_dispatch_failure_is_retried_not_lost(engine, monkeypatch):
+    from app.notifications import dispatch, telegram
+    monkeypatch.setattr(telegram, "configured", lambda: True)
+    eid = _mk_event(engine)
+    calls = []
+
+    def boom(t):
+        calls.append(t)
+        raise RuntimeError("telegram 502")
+    monkeypatch.setattr(telegram, "send", boom)
+    r = dispatch.dispatch(engine)
+    assert r["failed"] == 1 and _notif(engine, f"event:{eid}")["status"] == "failed"
+    # before next_retry_at: not retried
+    assert dispatch.dispatch(engine)["candidates"] == 0
+    with engine.begin() as c:
+        c.execute(notifications.update().values(next_retry_at=text("now() - interval '1 second'")))
+    monkeypatch.setattr(telegram, "send", lambda t: calls.append(t))
+    r = dispatch.dispatch(engine)
+    n = _notif(engine, f"event:{eid}")
+    assert r["sent"] == 1 and n["status"] == "sent" and n["attempts"] == 2 and n["sent_at"] is not None
+    assert dispatch.dispatch(engine)["candidates"] == 0  # delivered exactly once
+    assert len(calls) == 2
+
+
+def test_dispatch_recovers_stale_claim_after_crash(engine, monkeypatch):
+    from app.notifications import dispatch, telegram
+    monkeypatch.setattr(telegram, "configured", lambda: True)
+    eid = _mk_event(engine)
+    with engine.begin() as c:  # simulate: claimed, then the process died before sending
+        c.execute(notifications.insert().values(dedupe_key=f"event:{eid}", event_id=eid, kind="event", status="sending",
+                                                attempts=1, claimed_at=text("now() - interval '10 minutes'")))
+    sent = []
+    monkeypatch.setattr(telegram, "send", lambda t: sent.append(t))
+    assert dispatch.dispatch(engine)["sent"] == 1 and len(sent) == 1
+    assert _notif(engine, f"event:{eid}")["status"] == "sent"
+
+
+def test_fresh_claim_is_not_double_sent(engine, monkeypatch):
+    from app.notifications import dispatch
+    with engine.begin() as c:
+        assert dispatch.claim(c, "k", "event") is True
+        assert dispatch.claim(c, "k", "event") is False  # another worker holds a fresh claim
+
+
+def test_send_system_failure_then_retry(engine, monkeypatch):
+    from app.notifications import dispatch, telegram
+
+    def boom(t):
+        raise RuntimeError("down")
+    monkeypatch.setattr(telegram, "send", boom)
+    with pytest.raises(RuntimeError):
+        dispatch.send_system(engine, "system:x", "hello")
+    assert _notif(engine, "system:x")["status"] == "failed"
+    with engine.begin() as c:
+        c.execute(notifications.update().values(next_retry_at=text("now() - interval '1 second'")))
+    got = []
+    monkeypatch.setattr(telegram, "send", lambda t: got.append(t))
+    assert dispatch.send_system(engine, "system:x", "hello") is True and got == ["hello"]
+    assert dispatch.send_system(engine, "system:x", "hello") is False
+
+
+# ---------------- estimated dates are segregated ----------------
+
+def test_estimated_dates_excluded_from_verified_stats_and_multi_signal(engine):
+    from app.backtest.jobs import event_type_stats
+    from app.db.store import create_event
+    from app.signals.detect import multi_signal_check
+    d = date(2025, 5, 1)
+    with engine.begin() as c:
+        g = create_event(c, event_type="GOV_CONTRACT", dedupe_key="AWARD:est", public_date=d, ticker="ZBIO", title="c",
+                         payload={"value_to_mcap": 0.3}, source_url="u", priority=5, is_backfill=True, date_quality="estimated")
+        i = create_event(c, event_type="INSIDER_OPEN_MARKET_BUY", dedupe_key="B1", public_date=d, ticker="ZBIO", title="b",
+                         payload={"is_ceo": True}, source_url="u", priority=5)
+        assert multi_signal_check(c, "ZBIO", d) is None  # estimated contract cannot form a multi-signal
+        for eid in (g, i):
+            c.execute(event_returns.insert().values(event_id=eid, horizon_days=30, entry_date=d, entry_price=1, exit_date=d,
+                                                    exit_price=1.1, ret=0.1))
+        assert event_type_stats(c, "GOV_CONTRACT", "all", horizons=(30,))[30]["n"] == 0
+        assert event_type_stats(c, "INSIDER_OPEN_MARKET_BUY", "all", horizons=(30,))[30]["n"] == 1
+
+
+# ---------------- house backfill failure queue ----------------
+
+def test_house_year_not_done_while_documents_failed(engine, monkeypatch):
+    from app import http as apphttp
+    from app.db.store import job_state
+    from app.sources.congress import house
+    metas = [{"doc_id": d, "name": "Test Member", "state_district": "NY03", "filing_date": date(2023, 3, 1), "year": 2023}
+             for d in ("111", "222")]
+    monkeypatch.setattr(house, "fetch_index", lambda y: metas if y == 2023 else [])
+    pdf = (FX / "house_ptr_20034188.pdf").read_bytes()
+
+    class R:
+        content = pdf
+    broken = {"222"}
+
+    def get(url, **kw):
+        if any(url.endswith(f"/{d}.pdf") for d in broken):
+            raise apphttp.HttpError(url, 503, "temporarily unavailable")
+        return R()
+    monkeypatch.setattr(house.http, "get", get)
+    import datetime as dt
+
+    class FakeDate(dt.date):
+        @classmethod
+        def today(cls):
+            return dt.date(2024, 6, 1)
+    monkeypatch.setattr(house, "date", FakeDate)
+    house.HousePtrSource().run_backfill(engine, years=1)
+    with engine.begin() as c:
+        st = job_state(c, "backfill_house")
+    assert "2023" not in st["done"] and "222" in st["failed"]["2023"]
+    assert count(engine, filings, filings.c.source == "house") == 1
+    broken.clear()  # source recovers -> restart retries only the failed document
+    house.HousePtrSource().run_backfill(engine, years=1)
+    with engine.begin() as c:
+        st = job_state(c, "backfill_house")
+    assert "2023" in st["done"] and not st["failed"]
+    assert count(engine, filings, filings.c.source == "house") == 2
+
+
+# ---------------- transient price failures ----------------
+
+def test_transient_price_failure_is_retried_not_no_data(engine, monkeypatch):
+    from app import http as apphttp
+    from app.backtest import jobs
+    from app.marketdata import provider as prov
+    from tests.test_backtest import series
+    mode = {"m": "down"}
+
+    class P(prov.MarketDataProvider):
+        def get_historical_prices(self, symbol, start, end):
+            if symbol == "SPY":
+                return [b for b in series(date(2025, 12, 1), 400, base=500) if start <= b.date <= end]
+            if mode["m"] == "down":
+                raise apphttp.HttpError("x", 503, "unavailable")
+            if mode["m"] == "404":
+                raise apphttp.HttpError("x", 404, "No data found, symbol may be delisted")
+            return [b for b in series(date(2025, 12, 1), 400) if start <= b.date <= end]
+    monkeypatch.setattr(prov, "get_provider", lambda: P())
+    process(engine, form4_submission())
+    r = jobs.compute_pending(engine)
+    with engine.connect() as c:
+        e = c.execute(select(events)).mappings().first()
+    assert r["retry"] == 1 and e["returns_status"] == "retry" and "503" in e["returns_error"]
+    with engine.begin() as c:  # time passes, provider recovers
+        c.execute(events.update().values(returns_checked_at=text("now() - interval '21 hours'")))
+    mode["m"] = "up"
+    assert jobs.compute_pending(engine)["processed"] == 1
+    with engine.connect() as c:
+        assert c.execute(select(events.c.returns_status)).scalar() in ("partial", "complete")
+
+
+def test_confirmed_missing_symbol_is_no_data(engine, monkeypatch):
+    from app import http as apphttp
+    from app.backtest import jobs
+    from app.marketdata import provider as prov
+    from tests.test_backtest import series
+
+    class P(prov.MarketDataProvider):
+        def get_historical_prices(self, symbol, start, end):
+            if symbol == "SPY":
+                return [b for b in series(date(2025, 12, 1), 400, base=500) if start <= b.date <= end]
+            raise apphttp.HttpError("x", 404, "No data found, symbol may be delisted")
+    monkeypatch.setattr(prov, "get_provider", lambda: P())
+    process(engine, form4_submission())
+    assert jobs.compute_pending(engine)["no_data"] == 1

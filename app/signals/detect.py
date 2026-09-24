@@ -222,7 +222,8 @@ def multi_signal_check(conn: Connection, ticker: str | None, public_date: date, 
     rows = conn.execute(select(events.c.id, events.c.event_type, events.c.payload, events.c.public_date, events.c.priority,
                                events.c.company_name, events.c.issuer_cik, events.c.source_url)
                         .where(and_(events.c.ticker == ticker, events.c.public_date >= lo, events.c.public_date <= public_date,
-                                    events.c.event_type != "MULTI_SIGNAL_EVENT"))
+                                    events.c.event_type != "MULTI_SIGNAL_EVENT",
+                                    events.c.date_quality != "estimated"))  # inferred dates never combine
                         .order_by(events.c.public_date)).mappings().all()
     fam: dict[str, list] = defaultdict(list)
     for r in rows:

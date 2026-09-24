@@ -102,8 +102,17 @@ def load_bars(conn: Connection, symbol: str, start: date, end: date) -> list[Bar
     return [Bar(r.date, r.open, r.high, r.low, r.close, r.adj_close, r.volume) for r in conn.execute(q)]
 
 
+class PriceFetchError(RuntimeError):
+    """Transient provider failure (network, 5xx, rate limit). Callers must retry later - this is
+    NOT evidence that the symbol has no data."""
+
+
 def ensure_prices(conn: Connection, symbol: str, start: date, end: date, provider: MarketDataProvider | None = None) -> list[Bar]:
-    """Return bars for [start, end], fetching from the provider only when coverage is missing."""
+    """Return bars for [start, end], fetching from the provider only when coverage is missing.
+
+    A provider 404 ("no data / delisted") is a confirmed absence -> returns what is cached (maybe []).
+    Any other failure raises PriceFetchError so the caller can schedule a retry.
+    """
     have = load_bars(conn, symbol, start, end)
     today = date.today()
     need_end = min(end, today)
@@ -114,53 +123,103 @@ def ensure_prices(conn: Connection, symbol: str, start: date, end: date, provide
     fetch_from = start if not have or have[0].date > start + timedelta(days=5) else have[-1].date - timedelta(days=3)
     try:
         bars = provider.get_historical_prices(symbol, fetch_from, need_end)
-    except Exception as e:  # provider failure must not break ingestion
-        log.warning("price fetch failed %s: %s", symbol, e)
-        return have
+    except http.HttpError as e:
+        if e.status == 404:
+            log.info("no price data for %s (provider 404)", symbol)
+            return have
+        raise PriceFetchError(f"{symbol}: {e}") from e
+    except Exception as e:
+        raise PriceFetchError(f"{symbol}: {type(e).__name__}: {e}") from e
     store_bars(conn, symbol, bars)
     return load_bars(conn, symbol, start, end)
 
 
-# ---------- shares outstanding / market cap (official SEC XBRL) ----------
+# ---------- shares outstanding / market cap (official SEC XBRL, point-in-time) ----------
 
 SHARES_URL = "https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/dei/EntityCommonStockSharesOutstanding.json"
+MAX_SHARES_AGE_DAYS = 400  # older cover-page data is not a usable market-cap basis
 
 
-def fetch_shares_outstanding(cik: str) -> tuple[int, date] | None:
+@dataclass(frozen=True)
+class ShareFact:
+    accession: str
+    end: date
+    filed: date
+    form: str | None
+    val: int
+
+
+def parse_share_facts(data: dict) -> list[ShareFact]:
+    out = set()
+    for f in (data.get("units", {}).get("shares") or []):
+        try:
+            out.add(ShareFact(f["accn"], date.fromisoformat(f["end"]), date.fromisoformat(f["filed"]), f.get("form"), int(f["val"])))
+        except (KeyError, ValueError, TypeError):
+            continue
+    return sorted(out, key=lambda x: (x.filed, x.end))
+
+
+def fetch_share_facts(cik: str) -> list[ShareFact]:
     try:
         data = http.get(SHARES_URL.format(cik=cik.zfill(10)), retries=1).json()
     except http.HttpError as e:
         if e.status == 404:
-            return None
+            return []
         raise
-    best: dict[date, int] = {}
-    for f in (data.get("units", {}).get("shares") or []):
-        try:
-            d = date.fromisoformat(f["end"])
-            best[d] = best.get(d, 0) + int(f["val"])  # multiple share classes on the same date are summed
-        except (KeyError, ValueError):
-            continue
-    if not best:
+    return parse_share_facts(data)
+
+
+def shares_as_of(facts: list[ShareFact], on: date) -> tuple[int, ShareFact] | None:
+    """Shares outstanding an investor could know on `on`.
+
+    * only facts FILED on/before `on` (no look-ahead into later filings/restatements)
+    * latest period end among them; if several filings report that same end, the most recently
+      filed one wins (a re-report or amendment REPLACES, it is never added)
+    * distinct values inside that single filing are distinct share classes -> summed
+    """
+    known = [f for f in facts if f.filed <= on]
+    if not known:
         return None
-    d = max(best)
-    return best[d], d
+    end = max(f.end for f in known)
+    if (on - end).days > MAX_SHARES_AGE_DAYS:
+        return None
+    same_end = [f for f in known if f.end == end]
+    latest_filed = max(f.filed for f in same_end)
+    accs = sorted({f.accession for f in same_end if f.filed == latest_filed})
+    chosen = [f for f in same_end if f.accession == accs[-1]]
+    total = sum({f.val for f in chosen})
+    return total, chosen[0]
+
+
+def load_share_facts(conn: Connection, cik: str, refresh_days: int = 7) -> list[ShareFact]:
+    from app.db.models import shares_outstanding_facts as sof
+    cik = cik.zfill(10)
+    row = conn.execute(select(companies.c.id, companies.c.shares_checked_at).where(companies.c.cik == cik)).first()
+    stale = row is None or row.shares_checked_at is None or \
+        (datetime.now(timezone.utc) - row.shares_checked_at).days >= refresh_days
+    if stale:
+        facts = fetch_share_facts(cik)
+        if facts:
+            st = pg_insert(sof).values([{"cik": cik, "accession": f.accession, "end_date": f.end, "filed": f.filed,
+                                         "form": f.form, "val": f.val} for f in facts])
+            conn.execute(st.on_conflict_do_nothing(index_elements=["cik", "accession", "end_date", "val"]))
+        if row is not None:
+            conn.execute(companies.update().where(companies.c.id == row.id).values(shares_checked_at=datetime.now(timezone.utc)))
+    rows = conn.execute(select(sof.c.accession, sof.c.end_date, sof.c.filed, sof.c.form, sof.c.val).where(sof.c.cik == cik)).all()
+    return [ShareFact(*r) for r in rows]
 
 
 def get_market_cap(conn: Connection, ticker: str, on: date | None = None) -> float | None:
-    """shares outstanding (latest SEC cover-page value) x close price on/just before `on`."""
-    row = conn.execute(select(companies.c.id, companies.c.cik, companies.c.shares_outstanding, companies.c.shares_outstanding_date)
-                       .join(tickers, tickers.c.company_id == companies.c.id).where(tickers.c.symbol == ticker)).first()
+    """Point-in-time market cap: shares known on `on` x close on/just before `on`. None = unknown."""
+    on = on or date.today()
+    row = conn.execute(select(companies.c.cik).join(tickers, tickers.c.company_id == companies.c.id)
+                       .where(tickers.c.symbol == ticker)).first()
     if row is None:
         return None
-    shares, sdate = row.shares_outstanding, row.shares_outstanding_date
-    if shares is None or sdate is None or (date.today() - sdate).days > 120:
-        got = fetch_shares_outstanding(row.cik)
-        if got:
-            shares, sdate = got
-            conn.execute(companies.update().where(companies.c.id == row.id).values(shares_outstanding=shares, shares_outstanding_date=sdate))
-    if not shares:
+    got = shares_as_of(load_share_facts(conn, row.cik), on)
+    if got is None:
         return None
-    on = on or date.today()
+    shares, _fact = got
     bars = ensure_prices(conn, ticker, on - timedelta(days=10), on)
     closes = [b for b in bars if b.date <= on and b.close]
     if not closes:
