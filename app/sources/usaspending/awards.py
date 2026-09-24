@@ -136,6 +136,7 @@ def ingest_range(engine: Engine, start: date, end: date, *, is_backfill: bool, m
 class UsaSpendingSource(Source):
     name = "usaspending"
     interval_seconds = 6 * 3600
+    slow = True
 
     def run_live(self, engine: Engine) -> RunResult:
         # Records published/updated recently whose award was signed in the last 150 days.

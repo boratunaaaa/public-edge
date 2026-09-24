@@ -77,6 +77,20 @@ def strip_ns(xml: str) -> str:
     return xml
 
 
+def normalize_symbol(v: str | None) -> str | None:
+    """'NYSE: DJT' -> 'DJT', 'AMEX:  RIV' -> 'RIV', 'None'/'N/A' -> None."""
+    if not v:
+        return None
+    s = v.strip().upper().split(":")[-1].strip()
+    if not s or "[" in s or s in {"NONE", "N/A", "NA", "-", "NOT APPLICABLE", "NO SYMBOL", "NOSYMBOL"}:
+        return None
+    # "SNV PRE" / "FRG, FRGAP" / "ABC/ABCW": several listed classes -> the first (common) symbol
+    s = re.split(r"[\s,;/]+", s)[0].lstrip("$")
+    if not s or s in {"NONE", "N/A", "NA", "NO"} or len(s) > 12:
+        return None
+    return s
+
+
 def to_bool(v: str | None) -> bool:
     return (v or "").strip().lower() in {"1", "true", "y", "yes"}
 

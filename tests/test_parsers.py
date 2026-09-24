@@ -83,6 +83,14 @@ def test_submission_acceptance_timestamp_is_eastern():
     assert s.accepted_at.utcoffset().total_seconds() == -4 * 3600
 
 
+@pytest.mark.parametrize("v,exp", [("NYSE: DJT", "DJT"), ("AMEX:  RIV", "RIV"), (" zbio ", "ZBIO"), ("None", None),
+                                   ("N/A", None), ("", None), ("BRK.B", "BRK.B"), ("SNV PRE", "SNV"), ("FRG, FRGAP", "FRG"),
+                                   ("[ NONE ]", None), ("NO SYMBOL", None), ("[ N/A ]", None)])
+def test_symbol_normalization(v, exp):
+    from app.parsers.sec_common import normalize_symbol
+    assert normalize_symbol(v) == exp
+
+
 @pytest.mark.parametrize("v,exp", [("2026-03-30", "2026-03-30"), ("31-MAR-2026", "2026-03-31"), ("07/13/2026", "2026-07-13"),
                                    ("", None), (None, None)])
 def test_date_formats(v, exp):

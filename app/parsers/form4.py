@@ -7,7 +7,7 @@ from datetime import date
 
 from lxml import etree
 
-from app.parsers.sec_common import strip_ns, to_bool, to_date, to_float
+from app.parsers.sec_common import normalize_symbol, strip_ns, to_bool, to_date, to_float
 
 # Categories (the only high-quality buy signal is OPEN_MARKET_BUY).
 OPEN_MARKET_BUY = "OPEN_MARKET_BUY"
@@ -142,7 +142,7 @@ def parse_form4(xml: str) -> Form4:
         document_type=_t(root, "documentType") or "",
         issuer_cik=(_t(issuer, "issuerCik") or "").zfill(10),
         issuer_name=_t(issuer, "issuerName") or "",
-        ticker=((_t(issuer, "issuerTradingSymbol") or "").upper() or None),
+        ticker=normalize_symbol(_t(issuer, "issuerTradingSymbol")),
         owners=owners,
         aff10b5one=to_bool(_t(root, "aff10b5One")),
         footnotes=footnotes,

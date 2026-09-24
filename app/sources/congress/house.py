@@ -132,6 +132,7 @@ def congress_cluster_check(conn: Connection, ticker: str, as_of: date, *, is_bac
 class HousePtrSource(Source):
     name = "congress_house"
     interval_seconds = 3 * 3600
+    slow = True
 
     def _run_year(self, engine: Engine, year: int, *, is_backfill: bool) -> RunResult:
         res = RunResult()

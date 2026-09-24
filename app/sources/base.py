@@ -17,6 +17,7 @@ class Source(ABC):
     name: str = "abstract"
     interval_seconds: int = 3600
     critical: bool = True  # critical sources alert Telegram after N consecutive failures
+    slow: bool = False  # long-running sources run on their own thread so SEC polling stays ~1 min
     enabled: bool = True
     disabled_reason: str | None = None
 

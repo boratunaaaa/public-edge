@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,47 @@ def run_source(engine, src) -> None:
             _alert_source_failure(engine, src.name, fails, str(e))
 
 
+def _dispatch(engine) -> None:
+    try:
+        r = dispatch(engine)
+        if r.get("sent") or r.get("failed") or r.get("suppressed"):
+            log.info("dispatch %s", r)
+    except Exception:
+        log.exception("dispatch failed")
+
+
+def _source_loop(engine, sources) -> None:
+    """Slow thread: long-running sources + incremental backtest + daily registry refresh."""
+    next_run = {s.name: 0.0 for s in sources}
+    last_backtest = 0.0
+    last_registry = time.time()
+    while not _stop:
+        for s in sources:
+            if _stop or time.time() < next_run[s.name]:
+                continue
+            run_source(engine, s)
+            next_run[s.name] = time.time() + s.interval_seconds
+            _dispatch(engine)
+        if not _stop and time.time() - last_backtest > 1800:
+            try:
+                r = compute_pending(engine, limit=300, time_budget_s=240)
+                with engine.begin() as conn:
+                    save_job_state(conn, "backtest_incremental", r)
+                log.info("backtest incremental %s", r)
+            except Exception:
+                log.exception("backtest incremental failed")
+            last_backtest = time.time()
+        if not _stop and time.time() - last_registry > 86400:
+            try:
+                with engine.begin() as conn:
+                    sync_registry(conn)
+                    resolver.load(conn, force=True)
+            except Exception:
+                log.exception("registry sync failed")
+            last_registry = time.time()
+        time.sleep(5)
+
+
 def main() -> None:
     logging_setup.setup()
     signal.signal(signal.SIGTERM, _sig)
@@ -84,39 +126,24 @@ def main() -> None:
     else:
         log.warning("telegram not configured - alerts disabled")
 
-    next_run = {s.name: 0.0 for s in SOURCES if s.enabled}
-    last_backtest = 0.0
-    last_registry = time.time()
+    slow_thread = threading.Thread(target=_source_loop, args=(engine, [s for s in SOURCES if s.enabled and s.slow]),
+                                   name="slow-sources", daemon=True)
+    slow_thread.start()
+    fast = [s for s in SOURCES if s.enabled and not s.slow]
+    next_run = {s.name: 0.0 for s in fast}
     while not _stop:
         now = time.time()
-        for s in SOURCES:
-            if _stop or not s.enabled or now < next_run[s.name]:
+        for s in fast:
+            if _stop or now < next_run[s.name]:
                 continue
             run_source(engine, s)
             next_run[s.name] = time.time() + s.interval_seconds
-            try:
-                r = dispatch(engine)
-                if r.get("sent") or r.get("failed"):
-                    log.info("dispatch %s", r)
-            except Exception:
-                log.exception("dispatch failed")
-        if time.time() - last_backtest > 1800:
-            try:
-                r = compute_pending(engine, limit=300, time_budget_s=240)
-                with engine.begin() as conn:
-                    save_job_state(conn, "backtest_incremental", r)
-                log.info("backtest incremental %s", r)
-            except Exception:
-                log.exception("backtest incremental failed")
-            last_backtest = time.time()
-        if time.time() - last_registry > 86400:
-            try:
-                with engine.begin() as conn:
-                    sync_registry(conn)
-                    resolver.load(conn, force=True)
-            except Exception:
-                log.exception("registry sync failed")
-            last_registry = time.time()
+            _dispatch(engine)
+        if not slow_thread.is_alive() and not _stop:
+            log.error("slow-sources thread died - restarting it")
+            slow_thread = threading.Thread(target=_source_loop, args=(engine, [s for s in SOURCES if s.enabled and s.slow]),
+                                           name="slow-sources", daemon=True)
+            slow_thread.start()
         HEARTBEAT.write_text(str(int(time.time())))
         time.sleep(5)
     log.info("worker stopped")

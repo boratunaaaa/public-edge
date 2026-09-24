@@ -23,7 +23,7 @@ from app.db.models import insider_transactions
 from app.db.store import filing_exists, insert_rows, job_state, save_job_state
 from app.entities.registry import resolver
 from app.parsers.form4 import PLAN_RE, classify, role_flags
-from app.parsers.sec_common import index_url, to_date, to_float
+from app.parsers.sec_common import index_url, normalize_symbol, to_date, to_float
 from app.signals.detect import cluster_events_for_issuer, insider_buy_events
 from app.sources.sec import edgar
 from app.sources.sec.processing import process_text
@@ -93,7 +93,7 @@ def load_form345_quarter(engine: Engine, q: str) -> dict:
         shares = to_float(t.get("TRANS_SHARES"))
         price = to_float(t.get("TRANS_PRICEPERSHARE"))
         issuer = (s.get("ISSUERCIK") or "").zfill(10)
-        sym = (s.get("ISSUERTRADINGSYMBOL") or "").strip().upper() or None
+        sym = normalize_symbol(s.get("ISSUERTRADINGSYMBOL"))
         ticker = resolver.ticker_for_cik(issuer) or sym
         cik_url = issuer.lstrip("0") or "0"
         rows.append({
