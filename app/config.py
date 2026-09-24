@@ -34,6 +34,7 @@ class Settings:
     backfill_years: int = field(default_factory=lambda: _int("BACKFILL_YEARS", 5))
     min_sample_size: int = field(default_factory=lambda: _int("MIN_SAMPLE_SIZE", 30))
     source_failure_alert_threshold: int = field(default_factory=lambda: _int("SOURCE_FAILURE_ALERT_THRESHOLD", 3))
+    news_backfill_days: int = field(default_factory=lambda: _int("NEWS_BACKFILL_DAYS", 365))
 
 
 settings = Settings()

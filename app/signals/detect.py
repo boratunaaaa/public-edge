@@ -11,6 +11,7 @@ from sqlalchemy.engine import Connection
 from app.db.models import events, insider_transactions
 from app.db.store import create_event
 from app.signals import priority as P
+from app.signals.insider_type import classify as insider_classify, holdings_increase, owner_history
 
 CLUSTER_WINDOWS = (7, 14, 30)
 MULTI_WINDOW_DAYS = 30
@@ -66,14 +67,20 @@ def insider_buy_events(conn: Connection, accession: str, is_backfill: bool = Fal
         is_plan = any(t["is_10b5_1"] for t in txs)
         prio = P.insider_buy_priority(is_ceo=r0["is_ceo"], is_cfo=r0["is_cfo"], is_director=r0["is_director"],
                                       value=value, is_10b5_1=is_plan)
+        tdates0 = sorted(t["trans_date"] for t in txs if t["trans_date"])
+        itype = insider_classify(owner_history(conn, r0["owner_cik"], tdates0[0]), tdates0[0]) \
+            if (r0["owner_cik"] and tdates0) else "unclassified"
+        prio += {"opportunistic": 1, "routine": -1}.get(itype, 0)  # Cohen-Malloy-Pomorski (2012)
+        inc = holdings_increase(shares, float(txs[-1]["shares_after"]) if txs[-1]["shares_after"] is not None else None)
         role = role_label(r0["is_ceo"], r0["is_cfo"], r0["is_director"], r0["is_ten_pct"], r0["officer_title"])
-        tdates = sorted(t["trans_date"] for t in txs if t["trans_date"])
+        tdates = tdates0
         payload = {
             "owner": r0["owner_name"], "owner_cik": r0["owner_cik"], "role": role, "officer_title": r0["officer_title"],
             "is_ceo": r0["is_ceo"], "is_cfo": r0["is_cfo"], "is_director": r0["is_director"], "is_ten_pct": r0["is_ten_pct"],
             "value": round(value, 2), "shares": shares, "avg_price": round(value / shares, 4) if shares else None,
             "shares_after": float(txs[-1]["shares_after"]) if txs[-1]["shares_after"] is not None else None,
             "n_transactions": len(txs), "transaction_dates": [str(d) for d in tdates], "is_10b5_1": is_plan,
+            "insider_type": itype, "holdings_increase": inc,
             "flags": [f for f, ok in (("CEO_BUY", r0["is_ceo"]), ("CFO_BUY", r0["is_cfo"]),
                                       ("DIRECTOR_BUY", r0["is_director"]), ("GT_100K", value > 100_000),
                                       ("GT_500K", value > 500_000), ("GT_1M", value > 1_000_000)) if ok],
@@ -206,13 +213,19 @@ def signal_family(event_type: str, payload: dict) -> str | None:
         return "GOV_CONTRACT"
     if event_type in ("CONGRESS_BUY", "CONGRESS_CLUSTER_BUY"):
         return "CONGRESS_BUY"
+    if event_type == "MATERIAL_NEWS" and payload.get("materiality") in ("HIGH", "CRITICAL"):
+        positive = {"MAJOR_CUSTOMER", "NEW_CONTRACT", "GOVERNMENT_CONTRACT", "COMMERCIALIZATION", "PRODUCTION_START",
+                    "CAPACITY_EXPANSION", "DESIGN_WIN", "FDA_APPROVAL", "GOVERNMENT_EQUITY", "GUIDANCE_RAISE",
+                    "ACTIVIST", "M_AND_A"}
+        return "MATERIAL_NEWS" if positive & set(payload.get("classes") or []) else None
     return None
 
 
 # Independent evidence sources. CEO buy + insider cluster are the same evidence (the cluster
 # already contains the CEO), so a multi-signal needs at least two DIFFERENT source groups.
 FAMILY_GROUP = {"CEO_BUY": "INSIDER", "CFO_BUY": "INSIDER", "INSIDER_CLUSTER": "INSIDER",
-                "ACTIVIST_13D": "ACTIVIST", "GOV_CONTRACT": "CONTRACT", "CONGRESS_BUY": "CONGRESS"}
+                "ACTIVIST_13D": "ACTIVIST", "GOV_CONTRACT": "CONTRACT", "CONGRESS_BUY": "CONGRESS",
+                "MATERIAL_NEWS": "NEWS"}
 
 
 def multi_signal_check(conn: Connection, ticker: str | None, public_date: date, is_backfill: bool = False) -> int | None:

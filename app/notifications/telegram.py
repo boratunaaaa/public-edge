@@ -50,3 +50,17 @@ def check() -> dict:
 def send(text: str) -> None:
     _call("sendMessage", {"chat_id": settings.telegram_chat_id, "text": text[:4000], "parse_mode": "HTML",
                           "disable_web_page_preview": True})
+
+
+def send_photo(png: bytes, caption: str = "") -> None:
+    if not configured():
+        raise TelegramError("telegram not configured")
+    try:
+        r = httpx.post(API.format(token=settings.telegram_bot_token, method="sendPhoto"),
+                       data={"chat_id": settings.telegram_chat_id, "caption": caption[:1000]},
+                       files={"photo": ("chart.png", png, "image/png")}, timeout=30)
+        data = r.json()
+    except Exception as e:
+        raise TelegramError(_redact(f"{type(e).__name__}: {e}")) from None
+    if not data.get("ok"):
+        raise TelegramError(_redact(f"{r.status_code} {data.get('description')}"))

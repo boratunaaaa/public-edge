@@ -352,3 +352,200 @@ processing_jobs = Table(
     Column("last_error", Text),
     Column("runs", Integer, nullable=False, server_default="0"),
 )
+
+
+# =====================================================================  V2: discovery + news
+
+universe_snapshots = Table(  # point-in-time universe (kept per date -> no survivorship rewrite)
+    "universe_snapshots", metadata,
+    Column("as_of", Date, primary_key=True),
+    Column("cik", String(10), primary_key=True),
+    Column("ticker", String(16), nullable=False),
+    Column("name", Text),
+    Column("price", Float),
+    Column("shares", BigInteger),
+    Column("shares_end", Date),
+    Column("market_cap", Float),
+    Column("bucket", String(16)),  # MICRO | EARLY_SMALL | SMALL | GROWTH | ALREADY_SCALED | BELOW_UNIVERSE
+    Column("adv_dollar_30d", Float),
+)
+Index("ix_universe_bucket", universe_snapshots.c.as_of, universe_snapshots.c.bucket)
+
+fundamentals_quarterly = Table(
+    "fundamentals_quarterly", metadata,
+    Column("cik", String(10), primary_key=True),
+    Column("concept", String(64), primary_key=True),
+    Column("period_end", Date, primary_key=True),
+    Column("period_start", Date),
+    Column("val", Float, nullable=False),
+    Column("accession", String(25)),
+)
+
+discovery_companies = Table(
+    "discovery_companies", metadata,
+    Column("cik", String(10), primary_key=True),
+    Column("ticker", String(16), index=True),
+    Column("name", Text),
+    Column("market_cap", Float),
+    Column("bucket", String(16)),
+    Column("themes", JSONB, nullable=False, server_default="[]"),
+    Column("stage", String(24)),
+    Column("interest_score", Float),
+    Column("interest_level", String(8)),  # LOW | MEDIUM | HIGH
+    Column("features", JSONB, nullable=False, server_default="{}"),
+    Column("customers", JSONB, nullable=False, server_default="[]"),
+    Column("metrics", JSONB, nullable=False, server_default="{}"),
+    _ts("first_discovered_at"),
+    _ts("last_scanned_at"),
+)
+
+discovery_evidence = Table(
+    "discovery_evidence", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False, index=True),
+    Column("kind", String(24), nullable=False),  # bottleneck | theme | customer | stage | risk
+    Column("label", String(48), nullable=False),
+    Column("relation", String(24)),  # customer | supplier | partner | competitor | investor | ...
+    Column("agreement", String(40)),  # binding_contract | purchase_order | framework | mou | loi | pilot | ...
+    Column("counterparty", Text),
+    Column("counterparty_category", String(32)),
+    Column("hedged", Boolean, nullable=False, server_default="false"),
+    Column("sentence", Text, nullable=False),
+    Column("sentence_hash", String(40), nullable=False),
+    Column("source_url", Text, nullable=False),
+    Column("accession", String(25)),
+    Column("form", String(16)),
+    Column("filed_date", Date),
+    _created(),
+    UniqueConstraint("cik", "kind", "label", "sentence_hash", name="uq_discovery_evidence_key"),
+)
+
+discovery_risks = Table(
+    "discovery_risks", metadata,
+    Column("cik", String(10), primary_key=True),
+    Column("risk", String(40), primary_key=True),
+    Column("severity", String(8), nullable=False),  # LOW | MEDIUM | HIGH
+    Column("value", Text),
+    Column("source_url", Text),
+    _ts("detected_at"),
+)
+
+discovery_stage_history = Table(
+    "discovery_stage_history", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False, index=True),
+    Column("stage", String(24), nullable=False),
+    Column("previous_stage", String(24)),
+    Column("evidence", JSONB, nullable=False, server_default="[]"),
+    _created(),
+)
+
+company_thesis = Table(
+    "company_thesis", metadata,
+    Column("cik", String(10), primary_key=True),
+    Column("ticker", String(16)),
+    Column("sections", JSONB, nullable=False),  # {field: {"text": ..., "evidence": [urls/ids]}}
+    Column("thesis_last_updated", DateTime(timezone=True), nullable=False),
+)
+
+thesis_changes = Table(
+    "thesis_changes", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False, index=True),
+    Column("ticker", String(16)),
+    Column("news_cluster_id", BigInteger),
+    Column("change", String(24), nullable=False),  # THESIS_STRENGTHENING | THESIS_WEAKENING | THESIS_INVALIDATION | NEUTRAL
+    Column("explanation", Text, nullable=False),
+    Column("evidence", JSONB, nullable=False, server_default="[]"),
+    _created(),
+    UniqueConstraint("cik", "news_cluster_id", name="uq_thesis_changes_cik_cluster"),
+)
+
+watchlist = Table(
+    "watchlist", metadata,
+    Column("cik", String(10), primary_key=True),
+    Column("ticker", String(16)),
+    Column("category", String(20), nullable=False),  # DISCOVERY | HIGH_INTEREST | MONITOR | THESIS_WEAKENING | ARCHIVED
+    Column("reason", Text, nullable=False),
+    Column("manual_override", Boolean, nullable=False, server_default="false"),
+    _ts("updated_at"),
+)
+
+watchlist_history = Table(
+    "watchlist_history", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False, index=True),
+    Column("from_category", String(20)),
+    Column("to_category", String(20), nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("actor", String(16), nullable=False),  # auto | manual
+    _created(),
+)
+
+news_items = Table(
+    "news_items", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("source", String(32), nullable=False),
+    Column("source_tier", Integer, nullable=False),
+    Column("url", Text, nullable=False),
+    Column("guid", String(300), nullable=False),
+    Column("headline", Text, nullable=False),
+    Column("snippet", Text),
+    Column("publisher", Text),
+    Column("original_published_at", DateTime(timezone=True)),  # first published time as first observed
+    Column("updated_at", DateTime(timezone=True)),  # later "updated" timestamps - never used for entry
+    Column("first_seen_at", DateTime(timezone=True), nullable=False),
+    Column("tickers", JSONB, nullable=False, server_default="[]"),
+    Column("ciks", JSONB, nullable=False, server_default="[]"),
+    Column("entities", JSONB, nullable=False, server_default="[]"),
+    Column("cluster_id", BigInteger, index=True),
+    UniqueConstraint("source", "guid", name="uq_news_items_source_guid"),
+)
+Index("ix_news_items_published", news_items.c.original_published_at)
+
+news_story_clusters = Table(
+    "news_story_clusters", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("ticker", String(16), index=True),
+    Column("cik", String(10)),
+    Column("primary_item_id", BigInteger, nullable=False),
+    Column("public_at", DateTime(timezone=True), nullable=False),  # earliest trustworthy public time
+    Column("headline", Text, nullable=False),
+    Column("n_items", Integer, nullable=False, server_default="1"),
+    Column("sources", JSONB, nullable=False, server_default="[]"),
+    Column("title_tokens", JSONB, nullable=False, server_default="[]"),
+    Column("classes", JSONB, nullable=False, server_default="[]"),
+    Column("agreement", String(40)),
+    Column("binding", Boolean),
+    Column("contract_value", Float),
+    Column("annual_revenue", Float),
+    Column("value_to_revenue", Float),
+    Column("market_cap", Float),
+    Column("value_to_mcap", Float),
+    Column("mcap_bucket", String(16)),
+    Column("materiality", String(8)),
+    Column("event_id", BigInteger),
+    _created(),
+)
+Index("ix_news_clusters_public", news_story_clusters.c.public_at)
+
+entity_aliases = Table(
+    "entity_aliases", metadata,
+    Column("alias_norm", String(120), primary_key=True),
+    Column("canonical", Text, nullable=False),
+    Column("category", String(32), nullable=False),
+    Column("parent", Text),
+    Column("ticker", String(16)),
+)
+
+llm_usage = Table(
+    "llm_usage", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("provider", String(32), nullable=False),
+    Column("model", String(64), nullable=False),
+    Column("purpose", String(48), nullable=False),
+    Column("input_tokens", Integer, nullable=False),
+    Column("output_tokens", Integer, nullable=False),
+    Column("cost_usd", Float, nullable=False),
+    _created(),
+)

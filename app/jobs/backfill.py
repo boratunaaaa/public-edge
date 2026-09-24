@@ -48,9 +48,15 @@ def run_once(engine) -> None:
     step(engine, "trump", lambda: TrumpFamilySource().run_backfill(engine).items)
     step(engine, "form345", lambda: backfill_form345(engine, years))
     step(engine, "form4_gap", lambda: backfill_form4_gap(engine))
+    # routine vs opportunistic insider label for historical buy events (Cohen-Malloy-Pomorski 2012)
+    from app.signals.insider_type import annotate_existing
+    step(engine, "insider_type", lambda: annotate_existing(engine))
     step(engine, "house", lambda: HousePtrSource().run_backfill(engine, years).items)
     step(engine, "usaspending", lambda: UsaSpendingSource().run_backfill(engine, years).items)
     step(engine, "sc13d", lambda: backfill_13d(engine, years))
+    # V2: official 8-K history for the news backtest (needs a discovery universe snapshot first)
+    from app.news.backfill import backfill_news_8k
+    step(engine, "news_8k", lambda: backfill_news_8k(engine, days=settings.news_backfill_days))
     # returns for every historical event (prices are fetched per ticker, cached in market_prices)
     while not _stop and disk_ok():
         r = compute_pending(engine, limit=2000, time_budget_s=1800)

@@ -96,11 +96,12 @@ def test_multi_signal_families():
 def test_money_format_boundaries():
     from app.notifications.format import money
     from app.signals.detect import _money
-    for f in (money, _money):
-        assert f(999_999.6) == "$1.00M"
-        assert f(1_240_000) == "$1.24M"
-        assert f(4_610_000_000) == "$4.61B"
-    assert money(210_000) == "$210k" and _money(210_000) == "$210k"
+    # internal (dashboard titles)
+    assert _money(999_999.6) == "$1.00M" and _money(1_240_000) == "$1.24M" and _money(4_610_000_000) == "$4.61B"
+    assert _money(210_000) == "$210k"
+    # Telegram (Turkish)
+    assert money(999_999.6) == "1,00 milyon $" and money(1_240_000) == "1,24 milyon $"
+    assert money(4_610_000_000) == "4,61 milyar $" and money(210_000) == "210 bin $" and money(None) == "bilinmiyor"
 
 
 def test_contract_public_date_is_conservative_for_backfill():
