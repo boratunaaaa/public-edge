@@ -118,7 +118,8 @@ def subgroup_for(event_type: str, payload: dict) -> str:
 def stats_overview(conn: Connection) -> list[dict]:
     rows = conn.execute(text("""
         SELECT e.event_type, r.horizon_days, count(*) n, avg(r.ret) mean, percentile_cont(0.5) WITHIN GROUP (ORDER BY r.ret) median,
-               avg((r.ret > 0)::int) win_rate, avg((r.excess_ret > 0)::int) FILTER (WHERE r.excess_ret IS NOT NULL) spy_beat,
+               avg((r.ret > 0)::int)::float8 win_rate,
+               (avg((r.excess_ret > 0)::int) FILTER (WHERE r.excess_ret IS NOT NULL))::float8 spy_beat,
                avg(r.excess_ret) mean_excess, stddev_samp(r.ret) std, avg(r.mae) mae, avg(r.mfe) mfe
         FROM event_returns r JOIN events e ON e.id = r.event_id
         GROUP BY e.event_type, r.horizon_days ORDER BY e.event_type, r.horizon_days""")).mappings().all()
