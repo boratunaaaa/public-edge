@@ -1,0 +1,40 @@
+"""Source plugin interface. A new public-data source = one subclass registered in SOURCES."""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+
+from sqlalchemy.engine import Engine
+
+
+@dataclass
+class RunResult:
+    items: int = 0  # documents processed
+    events: list[int] = field(default_factory=list)  # new event ids
+
+
+class Source(ABC):
+    name: str = "abstract"
+    interval_seconds: int = 3600
+    critical: bool = True  # critical sources alert Telegram after N consecutive failures
+    enabled: bool = True
+    disabled_reason: str | None = None
+
+    @abstractmethod
+    def run_live(self, engine: Engine) -> RunResult:
+        """Fetch what is new since the last run. Must be idempotent."""
+
+    def run_backfill(self, engine: Engine) -> RunResult:  # optional
+        return RunResult()
+
+
+class PlannedSource(Source):
+    """Phase-2 placeholder: registered so the architecture/health view knows about it."""
+    enabled = False
+
+    def __init__(self, name: str, reason: str):
+        self.name = name
+        self.disabled_reason = reason
+
+    def run_live(self, engine: Engine) -> RunResult:
+        return RunResult()

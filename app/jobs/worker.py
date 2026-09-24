@@ -1,0 +1,126 @@
+"""LIVE INGESTION worker: runs every source on its own interval, then backtest + alerts."""
+from __future__ import annotations
+
+import logging
+import signal
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from sqlalchemy import select
+
+from app import logging_setup
+from app.backtest.jobs import compute_pending
+from app.config import settings
+from app.db.models import source_health
+from app.db.session import get_engine
+from app.db.store import health_failure, health_mark, health_success, save_job_state
+from app.entities.registry import resolver, sync_registry
+from app.notifications import telegram
+from app.notifications.dispatch import dispatch, send_system
+from app.sources.registry import SOURCES
+
+log = logging.getLogger("worker")
+HEARTBEAT = Path("/tmp/public_edge_worker_heartbeat")
+_stop = False
+
+
+def _sig(*_):
+    global _stop
+    _stop = True
+
+
+def _alert_source_failure(engine, source: str, fails: int, err: str) -> None:
+    with engine.begin() as conn:
+        row = conn.execute(select(source_health.c.alerted).where(source_health.c.source == source)).first()
+        if row and row[0]:
+            return
+        conn.execute(source_health.update().where(source_health.c.source == source).values(alerted=True))
+    try:
+        send_system(engine, f"source_error:{source}:{datetime.now(timezone.utc):%Y%m%d%H}",
+                    f"⚠️ <b>PUBLIC EDGE source error</b>\nKaynak: {source}\nArdışık hata: {fails}\nSon hata: {err[:300]}",
+                    kind="source_error")
+    except Exception as e:
+        log.warning("could not send source error alert: %s", e)
+
+
+def run_source(engine, src) -> None:
+    t0 = time.time()
+    try:
+        res = src.run_live(engine)
+        with engine.begin() as conn:
+            health_success(conn, src.name, items=res.items, had_event=bool(res.events))
+        log.info("source %s ok items=%s events=%s (%.1fs)", src.name, res.items, len(res.events), time.time() - t0)
+    except Exception as e:
+        log.exception("source %s failed", src.name)
+        with engine.begin() as conn:
+            fails = health_failure(conn, src.name, f"{type(e).__name__}: {e}")
+        if src.critical and fails >= settings.source_failure_alert_threshold:
+            _alert_source_failure(engine, src.name, fails, str(e))
+
+
+def main() -> None:
+    logging_setup.setup()
+    signal.signal(signal.SIGTERM, _sig)
+    signal.signal(signal.SIGINT, _sig)
+    engine = get_engine()
+    with engine.begin() as conn:
+        n = sync_registry(conn)
+        resolver.load(conn, force=True)
+        for s in SOURCES:
+            if not s.enabled:
+                health_mark(conn, s.name, "DISABLED", s.disabled_reason)
+    log.info("registry synced: %s tickers", n)
+    if telegram.configured():
+        try:
+            info = telegram.check()
+            log.info("telegram startup check OK: bot=@%s chat_type=%s", info["bot_username"], info["chat_type"])
+            with engine.begin() as conn:
+                health_success(conn, "telegram")
+        except Exception as e:
+            log.error("telegram startup check FAILED: %s", e)
+            with engine.begin() as conn:
+                health_failure(conn, "telegram", str(e))
+    else:
+        log.warning("telegram not configured - alerts disabled")
+
+    next_run = {s.name: 0.0 for s in SOURCES if s.enabled}
+    last_backtest = 0.0
+    last_registry = time.time()
+    while not _stop:
+        now = time.time()
+        for s in SOURCES:
+            if _stop or not s.enabled or now < next_run[s.name]:
+                continue
+            run_source(engine, s)
+            next_run[s.name] = time.time() + s.interval_seconds
+            try:
+                r = dispatch(engine)
+                if r.get("sent") or r.get("failed"):
+                    log.info("dispatch %s", r)
+            except Exception:
+                log.exception("dispatch failed")
+        if time.time() - last_backtest > 1800:
+            try:
+                r = compute_pending(engine, limit=300, time_budget_s=240)
+                with engine.begin() as conn:
+                    save_job_state(conn, "backtest_incremental", r)
+                log.info("backtest incremental %s", r)
+            except Exception:
+                log.exception("backtest incremental failed")
+            last_backtest = time.time()
+        if time.time() - last_registry > 86400:
+            try:
+                with engine.begin() as conn:
+                    sync_registry(conn)
+                    resolver.load(conn, force=True)
+            except Exception:
+                log.exception("registry sync failed")
+            last_registry = time.time()
+        HEARTBEAT.write_text(str(int(time.time())))
+        time.sleep(5)
+    log.info("worker stopped")
+
+
+if __name__ == "__main__":
+    main()

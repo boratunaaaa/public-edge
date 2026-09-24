@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/ownership" xmlns:ns2="http://www.sec.gov/edgar/common">
+    <headerData>
+        <submissionType>144</submissionType>
+        <filerInfo>
+            <filer>
+                <filerCredentials>
+                    <cik>0001204818</cik>
+                    <ccc>XXXXXXXX</ccc>
+                </filerCredentials>
+            </filer>
+            <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+        </filerInfo>
+    </headerData>
+    <formData>
+        <issuerInfo>
+            <issuerCik>0001846069</issuerCik>
+            <issuerName>NEXTDOOR HOLDINGS, INC.</issuerName>
+            <secFileNumber>001-40246</secFileNumber>
+            <issuerAddress>
+                <ns2:street1>420 TAYLOR STREET</ns2:street1>
+                <ns2:city>SAN FRANCISCO</ns2:city>
+                <ns2:stateOrCountry>CA</ns2:stateOrCountry>
+                <ns2:zipCode>94012</ns2:zipCode>
+            </issuerAddress>
+            <issuerContactPhone>415-344-0333</issuerContactPhone>
+            <nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>DANA L EVAN</nameOfPersonForWhoseAccountTheSecuritiesAreToBeSold>
+            <relationshipsToIssuer>
+                <relationshipToIssuer>Director</relationshipToIssuer>
+            </relationshipsToIssuer>
+        </issuerInfo>
+        <securitiesInformation>
+            <securitiesClassTitle>Common</securitiesClassTitle>
+            <brokerOrMarketmakerDetails>
+                <name>Morgan Stanley Smith Barney LLC Executive Financial Services</name>
+                <address>
+                    <ns2:street1>1 New York Plaza</ns2:street1>
+                    <ns2:street2>8th Floor</ns2:street2>
+                    <ns2:city>New York</ns2:city>
+                    <ns2:stateOrCountry>NY</ns2:stateOrCountry>
+                    <ns2:zipCode>10004</ns2:zipCode>
+                </address>
+            </brokerOrMarketmakerDetails>
+            <noOfUnitsSold>294389</noOfUnitsSold>
+            <aggregateMarketValue>715041.44</aggregateMarketValue>
+            <noOfUnitsOutstanding>259381559</noOfUnitsOutstanding>
+            <approxSaleDate>09/24/2026</approxSaleDate>
+            <securitiesExchangeName>NYSE</securitiesExchangeName>
+        </securitiesInformation>
+        <securitiesToBeSold>
+            <securitiesClassTitle>Common</securitiesClassTitle>
+            <acquiredDate>09/24/2026</acquiredDate>
+            <natureOfAcquisitionTransaction>Stock Option Exercise</natureOfAcquisitionTransaction>
+            <nameOfPersonfromWhomAcquired>Issuer</nameOfPersonfromWhomAcquired>
+            <isGiftTransaction>N</isGiftTransaction>
+            <amountOfSecuritiesAcquired>294389</amountOfSecuritiesAcquired>
+            <paymentDate>09/24/2026</paymentDate>
+            <natureOfPayment>Cash</natureOfPayment>
+        </securitiesToBeSold>
+        <nothingToReportFlagOnSecuritiesSoldInPast3Months>N</nothingToReportFlagOnSecuritiesSoldInPast3Months>
+        <securitiesSoldInPast3Months>
+            <sellerDetails>
+                <name>DANA L EVAN</name>
+                <address>
+                    <ns2:street1>420 Taylor Street</ns2:street1>
+                    <ns2:city>San Francisco</ns2:city>
+                    <ns2:stateOrCountry>CA</ns2:stateOrCountry>
+                    <ns2:zipCode>94102</ns2:zipCode>
+                </address>
+            </sellerDetails>
+            <securitiesClassTitle>Common</securitiesClassTitle>
+            <saleDate>08/25/2026</saleDate>
+            <amountOfSecuritiesSold>152740</amountOfSecuritiesSold>
+            <grossProceeds>364529.28</grossProceeds>
+        </securitiesSoldInPast3Months>
+        <noticeSignature>
+            <noticeDate>09/24/2026</noticeDate>
+            <planAdoptionDates/>
+            <signature>/s/ Dana L Evan</signature>
+        </noticeSignature>
+    </formData>
+</edgarSubmission>

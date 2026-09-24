@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <schemaVersion>X0202</schemaVersion>
+<headerData>
+    <submissionType>SCHEDULE 13D/A</submissionType>
+    <previousAccessionNumber>0001437749-19-004210</previousAccessionNumber>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>1768074</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <amendmentNo>9</amendmentNo>
+      <securitiesClassTitle>Ordinary Shares, par value $0.0002</securitiesClassTitle>
+      <dateOfEvent>09/22/2026</dateOfEvent>
+      <previouslyFiledFlag>false</previouslyFiledFlag>
+      <issuerInfo>
+        <issuerCIK>0001737450</issuerCIK>
+        <issuerCusips>
+          <issuerCusipNumber>68373M107</issuerCusipNumber>
+        </issuerCusips>
+        <issuerName>Opera Limited</issuerName>
+        <address>
+          <street1 xmlns="http://www.sec.gov/edgar/common">Vitaminveien 4</street1>
+          <city xmlns="http://www.sec.gov/edgar/common">Oslo</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">Q8</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">0485</zipCode>
+        </address>
+      </issuerInfo>
+      <authorizedPersons>
+        <notificationInfo>
+          <personName>Jie Lv, c/o Kunlun Tech Co Ltd</personName>
+          <personPhoneNum>86-138-1135-3317</personPhoneNum>
+          <personAddress>
+            <street1 xmlns="http://www.sec.gov/edgar/common">Block B, Mingyang International Center</street1>
+            <street2 xmlns="http://www.sec.gov/edgar/common">No. 46 Xizongbu Hutong</street2>
+            <city xmlns="http://www.sec.gov/edgar/common">Beijing</city>
+            <stateOrCountry xmlns="http://www.sec.gov/edgar/common">F4</stateOrCountry>
+            <zipCode xmlns="http://www.sec.gov/edgar/common">100005</zipCode>
+          </personAddress>
+        </notificationInfo>
+      </authorizedPersons>
+    </coverPageHeader>
+    <reportingPersons>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0002046932</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Hong Kong Kunlun Tech Holding Limited</reportingPersonName>
+        <fundType>WC</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>K3</citizenshipOrOrganization>
+        <soleVotingPower>59280804</soleVotingPower>
+        <sharedVotingPower>0</sharedVotingPower>
+        <soleDispositivePower>59280804</soleDispositivePower>
+        <sharedDispositivePower>0</sharedDispositivePower>
+        <aggregateAmountOwned>59280804</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>67.9</percentOfClass>
+        <typeOfReportingPerson>CO</typeOfReportingPerson>
+        <commentContent>The percentage of the class of securities beneficially owned by the reporting person is calculated based on 87,311,171 ordinary shares outstanding as of September 22, 2026, based on information provided by the Issuer. Hong Kong Kunlun Tech Holding Limited is the direct holder of all 59,280,804 ordinary shares reported on this Schedule 13D. Of that amount, 52,546,694 ordinary shares are registered in its name and 6,734,110 ordinary shares are held in the form of American Depositary Shares, each representing one ordinary share. Hong Kong Kunlun Tech Holding Limited is 68.03% owned by Kunlun Group Limited and 31.97% owned by Kunlun Tech Co., Ltd.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonNoCIK>Y</reportingPersonNoCIK>
+        <reportingPersonName>Kunlun Group Limited</reportingPersonName>
+        <fundType>WC</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>K3</citizenshipOrOrganization>
+        <soleVotingPower>40330154</soleVotingPower>
+        <sharedVotingPower>0</sharedVotingPower>
+        <soleDispositivePower>40330154</soleDispositivePower>
+        <sharedDispositivePower>0</sharedDispositivePower>
+        <aggregateAmountOwned>40330154</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>46.2</percentOfClass>
+        <typeOfReportingPerson>CO</typeOfReportingPerson>
+        <commentContent>The percentage of the class of securities beneficially owned by the reporting person is calculated based on 87,311,171 ordinary shares outstanding as of September 22, 2026, based on information provided by the Issuer. Kunlun Group Limited is wholly owned by Kunlun Tech Co., Ltd.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001730204</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Kunlun Tech Co., Ltd.</reportingPersonName>
+        <fundType>WC</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>F4</citizenshipOrOrganization>
+        <soleVotingPower>59280804</soleVotingPower>
+        <sharedVotingPower>0</sharedVotingPower>
+        <soleDispositivePower>59280804</soleDispositivePower>
+        <sharedDispositivePower>0</sharedDispositivePower>
+        <aggregateAmountOwned>59280804</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>67.9</percentOfClass>
+        <typeOfReportingPerson>CO</typeOfReportingPerson>
+        <commentContent>The percentage of the class of securities beneficially owned by the reporting person is calculated based on 87,311,171 ordinary shares outstanding as of September 22, 2026, based on information provided by the Issuer.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001768074</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Yahui Zhou</reportingPersonName>
+        <fundType>WC</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>F4</citizenshipOrOrganization>
+        <soleVotingPower>11490967</soleVotingPower>
+        <sharedVotingPower>0</sharedVotingPower>
+        <soleDispositivePower>11490967</soleDispositivePower>
+        <sharedDispositivePower>0</sharedDispositivePower>
+        <aggregateAmountOwned>11490967</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>13.2</percentOfClass>
+        <typeOfReportingPerson>IN</typeOfReportingPerson>
+        <commentContent>The percentage of the class of securities beneficially owned by the reporting person is calculated based on 87,311,171 ordinary shares outstanding as of September 22, 2026, based on information provided by the Issuer. The ordinary shares reported on this Schedule 13D are held by Hong Kong Kunlun Tech Holding Limited, a company indirectly wholly-owned by Kunlun Tech Co., Ltd. Mr. Zhou directly holds 11.3% of the equity interest of Kunlun Tech Co., Ltd. and indirectly holds 14.8% through Beijing Yingrui Century Software R&amp;D Center L.P. ("Beijing Yingrui"), a limited partnership established in the People's Republic of China, which is co-owned by Mr. Zhou and Ms. Qiong Li. Mr. Zhou holds 54.8% of the equity interest of Beijing Yingrui and, as the general partner, has sole decision making authority in terms of how the partnership exercises its ownership rights in Kunlun Tech Co., Ltd.</commentContent>
+      </reportingPersonInfo>
+    </reportingPersons>
+    <items1To7>
+      <item1>
+        <securityTitle>Ordinary Shares, par value $0.0002</securityTitle>
+        <issuerName>Opera Limited</issuerName>
+        <issuerPrincipalAddress>
+          <street1 xmlns="http://www.sec.gov/edgar/common">Vitaminveien 4</street1>
+          <city xmlns="http://www.sec.gov/edgar/common">Oslo</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">Q8</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">0485</zipCode>
+        </issuerPrincipalAddress>
+        <commentText>This Amendment No. 9 to Schedule 13D (this "Amendment") hereby amends and supplements the initial Schedule 13D filed with the U.S. Securities and Exchange Commission on March 6, 2019, as amended on January 13, 2021, November 26, 2021, December 19, 2022, May 16, 2023, July 5, 2023, October 19, 2023, December 6, 2024 and March 30, 2026 (as so amended, the "Original Schedule 13D" and, together with this Amendment, the "Schedule 13D"), on behalf of each of the Reporting Persons (as defined in Item 2 of this Amendment). Except as specifically provided herein, this Amendment does not modify any of the information previously reported in the Original Schedule 13D. The CUSIP number 68373M107 applies to the Issuer's American Depositary Shares ("ADSs"), each representing one ordinary share of the Issuer.</commentText>
+      </item1>
+      <item2>
+        <filingPersonName>This Schedule 13D is being jointly filed by: (i) Hong Kong Kunlun Tech Holding Limited ("KTL"); (ii) Kunlun Group Limited ("KGL"); (iii) Kunlun Tech Co., Ltd. ("KTC"); and (iv) Mr. Yahui Zhou (collectively, the "Reporting Persons"). Information concerning each director and executive officer of KTL, KGL and KTC is listed on Schedules A, B and C, attached hereto as Exhibits 99.2, 99.3 and 99.4, respectively, and is incorporated herein by reference.</filingPersonName>
+        <principalBusinessAddress>The residence or business addresses of the Reporting Persons are: (i) KTL: Flat/RM 8105B, 8/F, YF Life Tower, 33 Lockhart Road, Wanchai, Hong Kong. (ii) KGL: Flat/RM 8105A, 8/F, YF Life Tower, 33 Lockhart Road, Wanchai, Hong Kong. (iii) KTC: 46 Xizongbu Hutong, Mingyang International Center, Block B, Dongcheng District, Beijing 100005, People's Republic of China. (iv) Mr. Yahui Zhou: 10/F, 46 Xizongbu Hutong, Mingyang International Center, Block B, Dongcheng District, Beijing 100005, People's Republic of China.</principalBusinessAddress>
+        <principalJob>The principal business of KTL and KGL is investment holding. KTC is a global internet company listed on the Shenzhen Stock Exchange. The present principal occupation of Mr. Yahui Zhou is serving as the Executive Chairman of the Board of Directors of the Issuer, whose principal executive offices are located at Vitaminveien 4, 0485 Oslo, Norway.</principalJob>
+        <hasBeenConvicted>During the last five years, none of the Reporting Persons and, to the best of their knowledge, none of the persons listed on Schedules A through C, has been convicted in a criminal proceeding (excluding traffic violations or similar misdemeanors).</hasBeenConvicted>
+        <convictionDescription>During the last five years, none of the Reporting Persons and, to the best of their knowledge, none of the persons listed on Schedules A through C, was a party to a civil proceeding of a judicial or administrative body of competent jurisdiction and as a result of such proceeding was or is subject to a judgment, decree or final order enjoining future violations of, or prohibiting or mandating activities subject to, federal or state securities laws or finding any violation with respect to such laws.</convictionDescription>
+        <citizenship>KTL and KGL are organized under the laws of Hong Kong, and KTC is organized under the laws of the People's Republic of China. Mr. Yahui Zhou is a citizen of the People's Republic of China.</citizenship>
+      </item2>
+      <item3>
+        <fundsSource>Item 3 of the Original Schedule 13D is not amended by this Amendment.</fundsSource>
+      </item3>
+      <item4>
+        <transactionPurpose>Item 4 of the Original Schedule 13D is hereby amended and supplemented by adding the following at the end thereof:
+
+"Pursuant to the Stock Purchase Agreement described in Item 6 of the Schedule 13D, the Issuer purchased Ordinary Shares from KTL at two closings following the initial closing on March 26, 2026. On June 26, 2026, the Issuer purchased 665,995 Ordinary Shares from KTL in respect of the Applicable Quarter ended June 15, 2026. On September 22, 2026, the Issuer purchased 1,134,770 Ordinary Shares from KTL in respect of the Applicable Quarter ended September 15, 2026. Following these closings, the Reporting Persons beneficially own 59,280,804 Ordinary Shares, representing approximately 67.9% of the outstanding Ordinary Shares.
+
+As described in Amendment No. 8 to this Schedule 13D, the number of Ordinary Shares sold by KTL at each closing is determined in accordance with Annex A to the Stock Purchase Agreement so as to be proportionate to the ADSs repurchased by the Issuer in the open market during the corresponding Applicable Quarter. Accordingly, the dispositions described above have not resulted in any material change in the Reporting Persons' proportionate ownership interest in the Issuer. The purpose of these dispositions remains, as previously reported, to allow KTL to realize liquidity through participation in the Issuer's share repurchase program on a pro rata basis while the Reporting Persons generally maintain their approximate proportionate ownership interest in the Issuer.
+
+The Reporting Persons expect that KTL will sell additional Ordinary Shares to the Issuer at subsequent closings under the Stock Purchase Agreement, in amounts determined in accordance with Annex A thereto, for so long as the Stock Purchase Agreement remains in effect and the Issuer continues to repurchase ADSs under its share repurchase program.
+
+Except as set forth in this Amendment, the Original Schedule 13D and the Stock Purchase Agreement, the Reporting Persons have no present plans or proposals that relate to or would result in any of the actions specified in clauses (a) through (j) of Item 4 of Schedule 13D. The Reporting Persons intend to review their investment in the Issuer on a continuing basis and, depending upon various factors, including market conditions, the Issuer's business and financial position, and other investment opportunities, the Reporting Persons may take such actions with respect to their investment as they deem appropriate, including purchasing additional Ordinary Shares, disposing of Ordinary Shares, or engaging in discussions with management or the Board of Directors of the Issuer."</transactionPurpose>
+      </item4>
+      <item5>
+        <percentageOfClassSecurities>The information contained on the cover pages to this Amendment is incorporated herein by reference. As of September 22, 2026, the Reporting Persons beneficially own in the aggregate 59,280,804 Ordinary Shares, representing approximately 67.9% of the outstanding Ordinary Shares. All percentages calculated in this Amendment are based upon 87,311,171 Ordinary Shares outstanding as of September 22, 2026, based on information provided by the Issuer.</percentageOfClassSecurities>
+        <numberOfShares>The information regarding the number of Ordinary Shares as to which each Reporting Person has the sole power to vote or direct the vote, the shared power to vote or direct the vote, the sole power to dispose or direct the disposition, and the shared power to dispose or direct the disposition, is set forth in Rows 7 through 11 of the respective cover pages of this Amendment for each Reporting Person, and is incorporated herein by reference.</numberOfShares>
+        <transactionDesc>On September 22, 2026, pursuant to the Stock Purchase Agreement described in Items 4 and 6 of the Schedule 13D, KTL sold 1,134,770 Ordinary Shares to the Issuer in a privately negotiated transaction for aggregate consideration of approximately $21.4 million, representing a Dividend Adjusted Average Price of $18.82 per Ordinary Share determined in accordance with Annex A to the Stock Purchase Agreement.
+
+In addition, although effected more than 60 days prior to the date hereof, on June 26, 2026, KTL sold 665,995 Ordinary Shares to the Issuer in a privately negotiated transaction pursuant to the same agreement for aggregate consideration of approximately $10.7 million, representing an average price of $16.01 per Ordinary Share. This transaction is disclosed for completeness and to permit reconciliation of the number of Ordinary Shares reported herein to the number previously reported in Amendment No. 8 to this Schedule 13D.
+
+Except as disclosed in this Item 5(c), none of the Reporting Persons has effected any transactions in the Ordinary Shares of the Issuer during the past 60 days.</transactionDesc>
+        <listOfShareholders>No person other than the Reporting Persons is known to have the right to receive, or the power to direct the receipt of dividends from, or proceeds from the sale of, the Ordinary Shares reported herein.</listOfShareholders>
+        <date5PercentOwnership>Not applicable.</date5PercentOwnership>
+      </item5>
+      <item6>
+        <contractDescription>Item 6 of the Original Schedule 13D is hereby amended and supplemented by adding the following at the end thereof:
+
+"The information set forth in Items 4 and 5(c) of this Amendment is incorporated herein by reference.
+
+The Stock Purchase Agreement dated March 24, 2026, between the Issuer and KTL, which was described in Amendment No. 8 to this Schedule 13D, remains in full force and effect and has not been amended, modified or terminated. Pursuant to the Stock Purchase Agreement, KTL is obligated to sell to the Issuer, with respect to each Applicable Quarter (as defined therein), a number of Ordinary Shares determined in accordance with Annex A thereto, at a purchase price equal to the Dividend Adjusted Average Price calculated in accordance with Annex A. The closings described in Item 4 of this Amendment were effected in accordance with those terms.
+
+The foregoing description of the Stock Purchase Agreement does not purport to be complete and is qualified in its entirety by reference to the full text of the Stock Purchase Agreement, filed as Exhibit 99.5 to Amendment No. 8 to this Schedule 13D and incorporated herein by reference.
+
+Except as set forth in this Amendment and the Original Schedule 13D, none of the Reporting Persons has any contract, arrangement, understanding or relationship (legal or otherwise) with any person with respect to any securities of the Issuer, including but not limited to the transfer or voting of any securities, finder's fees, joint ventures, loan or option arrangements, puts or calls, guarantees of profits, division of profits or loss, or the giving or withholding of proxies."</contractDescription>
+      </item6>
+      <item7>
+        <filedExhibits>Item 7 of the Original Schedule 13D is hereby supplemented to include the following exhibits:
+
+Exhibit 99.1 - Joint Filing Agreement, dated September [29], 2026, by and among the Reporting Persons
+
+Exhibit 99.2 - Schedule A - Directors and Executive Officers of Hong Kong Kunlun Tech Holding Limited
+
+Exhibit 99.3 - Schedule B - Directors and Executive Officers of Kunlun Group Limited
+
+Exhibit 99.4 - Schedule C - Directors and Executive Officers of Kunlun Tech Co., Ltd.
+
+Exhibit 99.5 - Stock Purchase Agreement, dated March 24, 2026, by and between the Issuer and Hong Kong Kunlun Tech Holding Limited (incorporated by reference to Exhibit 99.5 to Amendment No. 8 to this Schedule 13D, filed with the Securities and Exchange Commission on March 30, 2026)</filedExhibits>
+      </item7>
+    </items1To7>
+    <signatureInfo>
+      <signaturePerson>
+        <signatureReportingPerson>Hong Kong Kunlun Tech Holding Limited</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Tian Jin</signature>
+          <title>Director</title>
+          <date>09/24/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>Kunlun Group Limited</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Tian Jin</signature>
+          <title>Director</title>
+          <date>09/24/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>Kunlun Tech Co., Ltd.</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Han Fang</signature>
+          <title>Director</title>
+          <date>09/24/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>Yahui Zhou</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Yahui Zhou</signature>
+          <title>Yahui Zhou</title>
+          <date>09/24/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+    </signatureInfo>
+  </formData>
+
+</edgarSubmission>

@@ -1,0 +1,94 @@
+# PUBLIC EDGE production stack.
+# Always run through scripts/pe.sh so the Telegram variables are interpolated from the
+# existing secret file (never copied into this repo).
+name: public-edge
+
+x-app: &app
+  image: public-edge:1.0.0
+  build: .
+  restart: unless-stopped
+  environment: &appenv
+    DATABASE_URL: postgresql+psycopg://public_edge:${PE_DB_PASSWORD:?set in .env}@db:5432/public_edge
+    SEC_USER_AGENT: ${SEC_USER_AGENT:?set in .env}
+    TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+    TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-1}
+    ALERT_MIN_PRIORITY: ${ALERT_MIN_PRIORITY:-5}
+    MAX_ALERTS_PER_HOUR: ${MAX_ALERTS_PER_HOUR:-8}
+    BACKFILL_YEARS: ${BACKFILL_YEARS:-5}
+    SEC_MAX_RPS: "3"
+  depends_on:
+    db:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+  logging:
+    driver: json-file
+    options: {max-size: "20m", max-file: "3"}
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: public_edge
+      POSTGRES_USER: public_edge
+      POSTGRES_PASSWORD: ${PE_DB_PASSWORD:?set in .env}
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=40", "-c", "work_mem=8MB",
+              "-c", "maintenance_work_mem=64MB", "-c", "effective_cache_size=512MB"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U public_edge -d public_edge"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 768m
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "3"}
+    # no published port: reachable only inside the compose network
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    ports:
+      - "127.0.0.1:8090:8000"
+      - "${PE_TAILNET_BIND:-127.0.0.1}:8091:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/live',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    mem_limit: 256m
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.jobs.worker"]
+    healthcheck:
+      # heartbeat is written every loop (~5s); a stuck worker goes unhealthy after 10 minutes
+      test: ["CMD", "python", "-c", "import time,sys,pathlib; p=pathlib.Path('/tmp/public_edge_worker_heartbeat'); sys.exit(0 if p.exists() and time.time()-int(p.read_text())<600 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    mem_limit: 768m
+
+  backfill:
+    <<: *app
+    command: ["nice", "-n", "10", "python", "-m", "app.jobs.backfill"]
+    environment:
+      <<: *appenv
+      SEC_MAX_RPS: "4"
+    mem_limit: 1g
+
+volumes:
+  pgdata:
