@@ -13,7 +13,7 @@ import logging
 import shutil
 import zipfile
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
@@ -30,7 +30,11 @@ from app.sources.sec.processing import process_text
 
 log = logging.getLogger(__name__)
 csv.field_size_limit(10**8)
-DATASET_URL = "https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/{q}_form345.zip"
+# SEC publishes the newest quarter under a different path than the archive.
+DATASET_URLS = (
+    "https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/{q}_form345.zip",
+    "https://www.sec.gov/files/datastandardsinnovation/data/insider-transactions-data-sets/{q}_form345.zip",
+)
 FULL_INDEX_URL = "https://www.sec.gov/Archives/edgar/full-index/{y}/QTR{n}/form.idx"
 MIN_FREE_BYTES = 3 * 1024**3
 
@@ -56,9 +60,21 @@ def _tsv(z: zipfile.ZipFile, name: str):
         yield from csv.DictReader(io.TextIOWrapper(f, encoding="utf-8", errors="replace"), delimiter="\t", quoting=csv.QUOTE_NONE)
 
 
+def _download_dataset(q: str) -> bytes:
+    last: Exception | None = None
+    for tpl in DATASET_URLS:
+        try:
+            return http.get(tpl.format(q=q), retries=3).content
+        except http.HttpError as e:
+            last = e
+            if e.status != 404:
+                raise
+    assert last is not None
+    raise last
+
+
 def load_form345_quarter(engine: Engine, q: str) -> dict:
-    r = http.get(DATASET_URL.format(q=q), retries=3)
-    z = zipfile.ZipFile(io.BytesIO(r.content))
+    z = zipfile.ZipFile(io.BytesIO(_download_dataset(q)))
     subs = {}
     for s in _tsv(z, "SUBMISSION.tsv"):
         if s.get("DOCUMENT_TYPE") not in ("4",):
@@ -168,6 +184,79 @@ def backfill_form345(engine: Engine, years: int) -> dict:
     with engine.begin() as conn:
         save_job_state(conn, name, st, status="done")
     return st
+
+
+# ---------------------------------------------------------------- Form 4 gap (not yet in datasets)
+
+DAILY_INDEX_URL = "https://www.sec.gov/Archives/edgar/daily-index/{y}/QTR{q}/form.{d}.idx"
+
+
+def _quarter_end(qkey: str) -> date:
+    y, q = int(qkey[:4]), int(qkey[-1])
+    return date(y, 12, 31) if q == 4 else date(y, 3 * q + 1, 1) - timedelta(days=1)
+
+
+def daily_form4(d: date) -> list[tuple[str, str]]:
+    """(cik, accession) of Form 4 filings on one day from the EDGAR daily form index."""
+    url = DAILY_INDEX_URL.format(y=d.year, q=(d.month - 1) // 3 + 1, d=d.strftime("%Y%m%d"))
+    try:
+        txt = http.get(url, retries=2).text
+    except http.HttpError as e:
+        if e.status in (403, 404):  # weekend / holiday: no index
+            return []
+        raise
+    out: dict[str, tuple[str, str]] = {}
+    for line in txt.splitlines():
+        if not line.startswith("4 "):
+            continue
+        path = line.split()[-1]
+        if not path.startswith("edgar/"):
+            continue
+        acc = path.rsplit("/", 1)[-1].replace(".txt", "")
+        out.setdefault(acc, (path.split("/")[2], acc))
+    return list(out.values())
+
+
+def backfill_form4_gap(engine: Engine, max_days: int = 100) -> dict:
+    """Fill Form 4 filings between the last published quarterly dataset and today."""
+    name = "backfill_form4_gap"
+    with engine.begin() as conn:
+        st = job_state(conn, name)
+        ds = job_state(conn, "backfill_form345").get("done", [])
+    if not ds:
+        return {"skipped": "datasets not loaded yet"}
+    start = _quarter_end(max(ds)) + timedelta(days=1)
+    start = max(start, date.today() - timedelta(days=max_days))
+    done_days = set(st.get("done_days", []))
+    d = start
+    totals = {"filings": 0, "errors": 0}
+    while d < date.today():
+        key = d.isoformat()
+        if key not in done_days and d.weekday() < 5:
+            if not disk_ok():
+                break
+            items = daily_form4(d)
+            with engine.connect() as conn:
+                resolver.load(conn)
+                todo = [(c, a) for c, a in items if not filing_exists(conn, "sec", a)]
+            for cik, acc in todo:
+                try:
+                    text = edgar.fetch_full_text(cik, acc)
+                    with engine.begin() as conn:
+                        process_text(conn, text, cik, is_backfill=True)
+                    totals["filings"] += 1
+                except Exception as e:
+                    totals["errors"] += 1
+                    log.warning("form4 gap %s failed: %s", acc, e)
+            if d < date.today() - timedelta(days=1):
+                done_days.add(key)
+            with engine.begin() as conn:
+                save_job_state(conn, name, {"done_days": sorted(done_days), "last_day": key, **totals}, status="running")
+            log.info("form4 gap %s: %s filings (%s new)", key, len(items), len(todo))
+        d += timedelta(days=1)
+    with engine.begin() as conn:
+        save_job_state(conn, name, {"done_days": sorted(done_days), **totals}, status="done")
+    return totals
 
 
 # ---------------------------------------------------------------- 13D

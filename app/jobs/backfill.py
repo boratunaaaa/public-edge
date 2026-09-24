@@ -13,7 +13,7 @@ from app.db.session import get_engine
 from app.db.store import save_job_state
 from app.entities.registry import resolver, sync_registry
 from app.sources.congress.house import HousePtrSource
-from app.sources.sec.backfill import backfill_13d, backfill_form345, disk_ok
+from app.sources.sec.backfill import backfill_13d, backfill_form4_gap, backfill_form345, disk_ok
 from app.sources.trump.tracker import TrumpFamilySource
 from app.sources.usaspending.awards import UsaSpendingSource
 
@@ -47,6 +47,7 @@ def run_once(engine) -> None:
         resolver.load(conn, force=True)
     step(engine, "trump", lambda: TrumpFamilySource().run_backfill(engine).items)
     step(engine, "form345", lambda: backfill_form345(engine, years))
+    step(engine, "form4_gap", lambda: backfill_form4_gap(engine))
     step(engine, "house", lambda: HousePtrSource().run_backfill(engine, years).items)
     step(engine, "usaspending", lambda: UsaSpendingSource().run_backfill(engine, years).items)
     step(engine, "sc13d", lambda: backfill_13d(engine, years))
