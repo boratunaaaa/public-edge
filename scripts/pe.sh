@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # PUBLIC EDGE management wrapper.
 #   scripts/pe.sh up | restart | status | logs [svc] | down | ps | <any docker compose args>
-# Telegram variables are interpolated from $TELEGRAM_ENV_FILE (the existing bot's secret file);
-# values are never printed or copied.
+# Telegram variables are interpolated from $TELEGRAM_ENV_FILE (default /etc/public-edge/telegram.env,
+# root-only 600, outside the repo so deploys can never delete it). Values are never printed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-TG_ENV=$(grep -E '^TELEGRAM_ENV_FILE=' .env | cut -d= -f2-)
-ARGS=()
-if [ -n "${TG_ENV:-}" ] && [ -f "$TG_ENV" ]; then ARGS+=(--env-file "$TG_ENV"); fi
-ARGS+=(--env-file .env)
+TG_ENV=$(grep -E '^TELEGRAM_ENV_FILE=' .env | cut -d= -f2- || true)
+TG_ENV=${TG_ENV:-/etc/public-edge/telegram.env}
+if [ ! -r "$TG_ENV" ]; then
+  echo "ERROR: Telegram secret file $TG_ENV missing/unreadable - refusing to start without alerts" >&2
+  exit 1
+fi
+ARGS=(--env-file "$TG_ENV" --env-file .env)
 dc() { docker compose "${ARGS[@]}" "$@"; }
 case "${1:-status}" in
   up)       dc up -d --build --remove-orphans ;;

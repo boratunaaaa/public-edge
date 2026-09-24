@@ -53,9 +53,11 @@ merged into one message. Multi-signal requires two independent source groups
 
 ## Secrets
 
-`.env` (DB password, SEC user agent, flags) is chmod 600 and git-ignored. Telegram variables are
-interpolated at `docker compose` time from `TELEGRAM_ENV_FILE` (the previous bot's secret file) by
-`scripts/pe.sh`; nothing is copied or logged, and the Telegram client redacts the token from errors.
+`.env` (DB password, SEC user agent, flags) is chmod 600 and git-ignored. Telegram variables live in
+`/etc/public-edge/telegram.env` (root-only, 600, outside the repo so rsync deploys cannot remove it) and
+are interpolated at `docker compose` time by `scripts/pe.sh`, which refuses to start if the file is
+missing. PUBLIC EDGE no longer depends on `/root/crypto-bot`. The Telegram client redacts the token
+from errors; nothing is logged or committed.
 
 ## Commands (on the server, /opt/public-edge)
 
