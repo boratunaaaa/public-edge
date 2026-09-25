@@ -109,6 +109,15 @@ def test_reverse_split_does_not_create_a_fake_return():
     assert abs(r.ret) < 1e-9
 
 
+def test_corrupt_non_positive_vendor_prices_never_produce_a_return():
+    stock = bars_between(date(2023, 1, 3), 80)
+    stock = [Bar(b.date, b.open, b.high, b.low, b.close, -0.12 if i >= 40 else b.adj_close, b.volume) for i, b in enumerate(stock)]
+    spy = bars_between(date(2022, 12, 20), 200, price=400.0)
+    res = compute_returns(stock, spy, date(2023, 1, 2), None, as_of=date(2024, 1, 1), horizons=(30, 90))
+    assert all(r.ret >= -1.0 for r in res)
+    assert {r.horizon_days for r in res} == {30}  # the 90-day exit falls on corrupt bars -> not computed
+
+
 def test_forward_split_with_adjusted_close_is_flat():
     raw = []
     d = date(2023, 1, 2)

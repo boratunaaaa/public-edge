@@ -94,7 +94,10 @@ def compute_returns(bars: list[Bar], spy_bars: list[Bar] | None, public_date: da
                     terminal_date: date | None = None) -> list[HorizonReturn]:
     """terminal_date: documented delisting date (security master). Horizons that end after it exit at
     the last traded price; the benchmark still runs to the full horizon (cash earns nothing)."""
-    bars = sorted((b for b in bars if b.close), key=lambda b: b.date)
+    # vendor sanity: a non-positive close / adjusted close is corrupt data (seen: Yahoo adj_close < 0 for a
+    # bankrupt issuer), never a price - such bars are dropped instead of producing a return below -100 %
+    bars = sorted((b for b in bars if b.close and b.close > 0 and (b.adj_close is None or b.adj_close > 0)),
+                  key=lambda b: b.date)
     if not bars:
         return []
     as_of = as_of or bars[-1].date
