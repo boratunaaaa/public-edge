@@ -111,7 +111,21 @@ def free_prices_loop(engine) -> None:
                     with engine.begin() as conn:
                         save_job_state(conn, "free_prices", {**st, "finsaber_done": True, "finsaber": r}, status="idle")
                 log.info("alpha vantage listing %s", alphavantage.refresh(engine))
-                log.info("tiingo free batch %s", tiingo.run(engine))
+                r = tiingo.run(engine)
+                log.info("tiingo free batch %s", r)
+                # keep going while there is quota (the host bucket + quota ledger enforce the free-tier rate);
+                # back off only when a limit is reached or nothing is left to try
+                stopped = r.get("stopped")
+                if r.get("skipped"):
+                    pause = 6 * 3600
+                elif stopped == "MONTHLY_SYMBOL_LIMIT":
+                    pause = 12 * 3600
+                elif stopped in ("PER_HOUR_LIMIT", "PER_DAY_LIMIT"):
+                    pause = 900
+                elif r.get("symbols"):
+                    pause = 30
+                else:
+                    pause = 6 * 3600
         except Exception:
             log.exception("free price recovery failed")
         for _ in range(pause // 10):
