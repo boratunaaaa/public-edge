@@ -18,6 +18,8 @@ x-app: &app
     BACKFILL_YEARS: ${BACKFILL_YEARS:-5}
     # optional: delisted-security prices (operator's own free Tiingo key; empty = SEC-only survivorship handling)
     TIINGO_API_KEY: ${TIINGO_API_KEY:-}
+    # optional: Alpha Vantage free key (delisting list cross-check only; never prices)
+    ALPHAVANTAGE_API_KEY: ${ALPHAVANTAGE_API_KEY:-}
     # optional: hit-rate episode windows per event family, e.g. {"NEWS": 45}
     EPISODE_WINDOWS: ${EPISODE_WINDOWS:-}
     # paper trading (virtual money only - there is no broker integration)

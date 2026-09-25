@@ -987,3 +987,71 @@ paper_performance = Table(
     Column("spy_nav", Float),  # same capital held in SPY from the account's first trade
     Column("n_open", Integer, nullable=False),
 )
+
+# ------------------------------------------------------------------ free / vendor historical price sources
+
+# One row per (company, symbol, provider) series, with provenance and the identity-gate verdict.
+# Only TRUSTED and VALIDATED_FALLBACK series may feed the backtest.
+price_sources = Table(
+    "price_sources", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False, index=True),
+    Column("symbol", String(16), nullable=False),
+    Column("provider", String(24), nullable=False),  # tiingo | finsaber | yahoo | ...
+    Column("source_ref", Text, nullable=False),  # URL without credentials, or dataset path + file hash
+    _ts("retrieved_at", nullable=False),
+    Column("raw_sha256", String(64)),
+    Column("raw_gz", LargeBinary),  # compressed raw response (re-validation without re-querying)
+    Column("n_bars", Integer, nullable=False, server_default="0"),
+    Column("first_date", Date),
+    Column("last_date", Date),
+    Column("identity_basis", String(16), nullable=False),  # cik | name | symbol
+    Column("validation_status", String(20), nullable=False),  # TRUSTED | VALIDATED_FALLBACK | LOW_CONFIDENCE | REJECTED
+    Column("confidence", Float, nullable=False, server_default="0"),
+    Column("reasons", JSONB, nullable=False, server_default="[]"),
+    Column("checks", JSONB, nullable=False, server_default="{}"),
+    UniqueConstraint("cik", "symbol", "provider", name="uq_price_sources_cik_symbol_provider"),
+)
+
+vendor_prices = Table(
+    "vendor_prices", metadata,
+    Column("source_id", BigInteger, ForeignKey("price_sources.id", ondelete="CASCADE"), primary_key=True),
+    Column("date", Date, primary_key=True),
+    Column("open", Float),
+    Column("high", Float),
+    Column("low", Float),
+    Column("close", Float),
+    Column("adj_close", Float),
+    Column("volume", BigInteger),
+)
+
+# Free-tier quota ledger: unique symbols per calendar month and individual requests (hour/day limits).
+provider_usage = Table(
+    "provider_usage", metadata,
+    Column("provider", String(24), primary_key=True),
+    Column("month", String(7), primary_key=True),  # YYYY-MM
+    Column("symbol", String(16), primary_key=True),
+    _ts("first_used_at", nullable=False),
+)
+
+provider_requests = Table(
+    "provider_requests", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("provider", String(24), nullable=False),
+    _ts("at", nullable=False),
+    Column("kind", String(16), nullable=False),  # meta | prices | listing | test
+    Column("status", Integer),
+)
+Index("ix_provider_requests_provider_at", provider_requests.c.provider, provider_requests.c.at)
+
+# Raw responses of low-limit free sources (never re-queried needlessly): hash + source + timestamp, gzip.
+provider_raw = Table(
+    "provider_raw", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("provider", String(24), nullable=False),
+    Column("request_ref", Text, nullable=False),  # never contains a credential
+    _ts("retrieved_at", nullable=False),
+    Column("sha256", String(64), nullable=False),
+    Column("body_gz", LargeBinary, nullable=False),
+)
+Index("ix_provider_raw_provider_ref", provider_raw.c.provider, provider_raw.c.request_ref)

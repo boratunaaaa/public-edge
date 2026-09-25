@@ -38,7 +38,7 @@ PARTIAL_MAX_UNRESOLVED = 0.10
 TRUSTED_MIN_VERIFIED = 0.98
 ENTRY_LAG_DAYS = 7  # a horizon is mature only after entry + horizon (+ lag for the next-session entry)
 CACHE_TTL = timedelta(hours=6)
-VERIFIED_BASES = ("current_ticker_same_cik", "historical_symbol_verified")
+VERIFIED_BASES = ("current_ticker_same_cik", "historical_symbol_verified", "vendor_trusted", "vendor_validated")
 
 # event family (user-facing taxonomy) and default episode windows in days - configurable through
 # the EPISODE_WINDOWS environment variable, e.g. EPISODE_WINDOWS='{"NEWS": 45}'
@@ -148,7 +148,7 @@ def load_rows(conn: Connection, event_type: str, cond: str, params: dict, horizo
         SELECT e.id, COALESCE(e.issuer_cik, 'T:' || e.ticker, 'E:' || e.id::text) issuer, sm.sector,
                e.public_date, r.excess_ret, r.ret, r.mae, r.sector_excess, (r.event_id IS NOT NULL) has_ret, e.missing_reason,
                sm.delisting_reason, sm.delisting_date,
-               (e.price_symbol_basis IN ('current_ticker_same_cik','historical_symbol_verified')) verified
+               (e.price_symbol_basis IN ('current_ticker_same_cik','historical_symbol_verified','vendor_trusted','vendor_validated')) verified
         FROM events e
         LEFT JOIN event_returns r ON r.event_id = e.id AND r.horizon_days = :h
         LEFT JOIN security_master sm ON sm.cik = e.issuer_cik

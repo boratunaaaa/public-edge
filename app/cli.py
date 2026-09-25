@@ -20,6 +20,10 @@
   python -m app.cli paper-approve CODE | paper-reject CODE
   python -m app.cli paper-notify                        # send pending proposals to Telegram
   python -m app.cli tiingo-backfill | provider-coverage
+  python -m app.cli tiingo-test                         # ONE request to verify the key (status only)
+  python -m app.cli tiingo-batch [N]                    # identity-gated Tiingo free-tier batch
+  python -m app.cli finsaber-load | av-refresh          # FINSABER open dataset / Alpha Vantage delisting list
+  python -m app.cli recovery-report [--hard-set] [--probe]   # FREE DATA RECOVERY coverage
 """
 from __future__ import annotations
 
@@ -141,6 +145,33 @@ def main(argv: list[str]) -> int:
     elif cmd == "paper-notify":
         from app.paper.proposals import notify_pending
         _print({"sent": notify_pending(eng)})
+    elif cmd == "tiingo-test":
+        from app.pricesources.tiingo import connection_test
+        _print(connection_test(eng))
+    elif cmd == "tiingo-batch":
+        from app.pricesources.tiingo import run as tiingo_batch
+        _print(tiingo_batch(eng, max_symbols=int(argv[1]) if len(argv) > 1 else 22))
+    elif cmd == "finsaber-load":
+        from app.pricesources.finsaber import run as finsaber_run
+        _print(finsaber_run(eng))
+    elif cmd == "av-refresh":
+        from app.pricesources.alphavantage import refresh
+        _print(refresh(eng))
+    elif cmd == "recovery-report":
+        from app.pricesources import quota, report
+        base = report.baseline(eng)
+        with eng.connect() as conn:
+            out = {"baseline": base, "now": report.unresolved_by_cause(conn), "providers": report.provider_results(conn),
+                   "tiingo_quota": quota.summary(conn, "tiingo")}
+            if "--hard-set" in argv:
+                hs = report.hard_set(conn)
+                out["hard_set"] = hs
+        if "--probe" in argv and "hard_set" in out:
+            from datetime import date as _d
+            syms = [(h["symbol"], h["events"]["first_unresolved"] or _d(2023, 1, 3)) for h in out["hard_set"] if h.get("symbol")]
+            out["probe_yahoo"] = report.probe_yahoo(syms)
+            out["probe_wayback"] = report.probe_wayback([s for s, _ in syms[:30]])
+        _print(out)
     elif cmd == "tiingo-backfill":
         from app.securitymaster.tiingo_backfill import run as tiingo_run
         _print(tiingo_run(eng))

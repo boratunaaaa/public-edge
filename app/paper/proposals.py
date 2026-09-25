@@ -41,7 +41,7 @@ DUP_DAYS = 30
 PROPOSAL_TTL_HOURS = int(_f("PAPER_PROPOSAL_TTL_HOURS", 72))
 STOP_PCT = 0.15
 SEVERE = {"GOING_CONCERN", "CASH_RUNWAY"}
-VERIFIED_BASES = ("current_ticker_same_cik", "historical_symbol_verified")
+VERIFIED_BASES = ("current_ticker_same_cik", "historical_symbol_verified", "vendor_trusted", "vendor_validated")
 
 
 def research_mode() -> bool:

@@ -20,7 +20,6 @@ from datetime import date, timedelta
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from app.db.store import job_state, save_job_state
 
 log = logging.getLogger(__name__)
 TIINGO_START = date(2005, 1, 1)
@@ -41,50 +40,12 @@ def candidates(engine: Engine, limit: int = 5000) -> list[dict]:
 
 
 def run(engine: Engine, max_requests: int = 45) -> dict:
-    """One resumable batch (default: under one hour of free-tier quota)."""
+    """Superseded by app.pricesources.tiingo (identity-gated, quota-aware, stored per CIK - never spliced
+    into the shared symbol cache, where a reused ticker could mix two companies)."""
     if not configured():
         return {"skipped": "TIINGO_NOT_CONFIGURED"}
-    from app.marketdata.provider import store_bars
-    from app.securitymaster.provider import get_security_master
-    from app.securitymaster.vendors import delisted_price_provider
-    vendor = delisted_price_provider()
-    name = "tiingo_backfill"
-    with engine.begin() as conn:
-        st = job_state(conn, name)
-    done = set(st.get("done") or [])
-    out = {"requests": 0, "stored_symbols": 0, "empty": 0, "no_symbol": 0, "errors": 0}
-    for c in candidates(engine):
-        if out["requests"] >= max_requests:
-            break
-        if c["cik"] in done:
-            continue
-        with engine.connect() as conn:
-            sym, _, _ = get_security_master(conn).price_symbol(c["cik"], c["public_date"], c["ticker"])
-        if not sym:
-            out["no_symbol"] += 1
-            done.add(c["cik"])
-            continue
-        out["requests"] += 1
-        try:
-            bars = vendor.get_historical_prices(sym, TIINGO_START, date.today())
-        except Exception as e:
-            out["errors"] += 1
-            log.info("tiingo %s: %s", sym, type(e).__name__)  # never the request (it carries the key header)
-            continue
-        done.add(c["cik"])
-        if not bars:
-            out["empty"] += 1
-            continue
-        with engine.begin() as conn:
-            store_bars(conn, sym, bars)
-            # let the returns job re-price this company's unpriced events from the cached vendor series
-            conn.execute(text("""UPDATE events SET returns_status = 'retry', returns_checked_at = NULL
-                                 WHERE issuer_cik = :c AND returns_status = 'no_data'"""), {"c": c["cik"]})
-        out["stored_symbols"] += 1
-    with engine.begin() as conn:
-        save_job_state(conn, name, {"done": sorted(done), "last": out}, status="idle")
-    out["remaining"] = max(0, len(candidates(engine)) - len(done))
-    return out
+    from app.pricesources.tiingo import run as gated_run
+    return gated_run(engine, max_symbols=max(1, max_requests // 2))
 
 
 def coverage_report(engine: Engine, sample: int = 20) -> dict:

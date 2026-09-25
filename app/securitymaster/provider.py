@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 SYMBOL_GRACE_DAYS = 120  # a filing symbol stays valid this long after its last observation
 
 # basis values, from strongest to weakest
-VERIFIED_BASES = {"current_ticker_same_cik", "historical_symbol_verified"}
+VERIFIED_BASES = {"current_ticker_same_cik", "historical_symbol_verified", "vendor_trusted", "vendor_validated"}
 
 
 @dataclass

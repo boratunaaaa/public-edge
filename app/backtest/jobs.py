@@ -67,6 +67,15 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
             sm = get_security_master(conn)
             sym, basis, missing = sm.price_symbol(cik, pdate, ticker)
             dl = sm.delisting(cik) if cik else None
+            vendor = None
+            if sym is None or basis == "historical_symbol_verified":
+                # free/vendor recovery: an identity-gated series stored for THIS CIK (never by symbol alone)
+                from app.pricesources.store import vendor_series
+                vendor = vendor_series(conn, cik, pdate)
+                if vendor is not None:
+                    vbars, vbasis, vsym = vendor
+                    cache[f"{cik}|vendor"] = (vbars, vbasis, None)
+                    sym, basis = vsym, vbasis
             if sym is None:
                 status = "no_data" if (today - pdate).days > 10 else "pending"
                 nodata += status == "no_data"
@@ -79,7 +88,7 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                     returns_status="retry", returns_checked_at=now, returns_error=failed[sym]))
                 retry += 1
                 continue
-            key = f"{cik}|{sym}"
+            key = f"{cik}|vendor" if vendor is not None else f"{cik}|{sym}"
             if key not in cache:
                 cache.clear()  # rows are issuer-ordered; keep memory bounded
                 try:
@@ -94,7 +103,8 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                     continue
             all_bars, basis_used, series_missing = cache[key]
             bars = [b for b in all_bars if pdate - timedelta(days=10) <= b.date <= pdate + timedelta(days=400)]
-            terminal = dl.date if (dl is not None and dl.date and basis_used == "historical_symbol_verified") else None
+            terminal = dl.date if (dl is not None and dl.date and basis_used in (
+                "historical_symbol_verified", "vendor_trusted", "vendor_validated")) else None
             res = compute_returns(bars, spy, pdate, pat, as_of=today, terminal_date=terminal)
             if not res:
                 status = "no_data" if (today - pdate).days > 10 else "pending"

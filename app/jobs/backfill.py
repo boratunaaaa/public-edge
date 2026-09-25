@@ -89,17 +89,32 @@ def tenk_loop(engine) -> None:
             time.sleep(10)
 
 
-def tiingo_loop(engine) -> None:
-    """Delisted prices from Tiingo, one free-tier hour of quota per batch (resumable). Started only
-    when the operator configured TIINGO_API_KEY."""
-    from app.securitymaster.tiingo_backfill import run as tiingo_run
+def free_prices_loop(engine) -> None:
+    """LOW priority free historical price recovery (identity-gated): FINSABER open dataset once, Alpha Vantage
+    delisting list monthly (key optional), then Tiingo free tier one hourly batch within its quota.
+    Stops while free disk is under 10 GB."""
+    import shutil
+
+    from app.db.store import job_state
+    from app.pricesources import alphavantage, finsaber, tiingo
     while not _stop:
+        pause = 3600
         try:
-            r = tiingo_run(engine)
-            log.info("tiingo backfill batch %s", r)
+            if shutil.disk_usage("/").free < 10 * 1024**3:
+                log.warning("free price recovery paused: < 10 GB free disk")
+            else:
+                with engine.begin() as conn:
+                    st = job_state(conn, "free_prices")
+                if not st.get("finsaber_done"):
+                    r = finsaber.run(engine)
+                    log.info("finsaber recovery %s", r)
+                    with engine.begin() as conn:
+                        save_job_state(conn, "free_prices", {**st, "finsaber_done": True, "finsaber": r}, status="idle")
+                log.info("alpha vantage listing %s", alphavantage.refresh(engine))
+                log.info("tiingo free batch %s", tiingo.run(engine))
         except Exception:
-            log.exception("tiingo backfill failed")
-        for _ in range(360):
+            log.exception("free price recovery failed")
+        for _ in range(pause // 10):
             if _stop:
                 return
             time.sleep(10)
@@ -145,11 +160,7 @@ def main() -> None:
     rt.start()
     if loop:
         threading.Thread(target=tenk_loop, args=(engine,), name="tenk", daemon=True).start()
-        from app.securitymaster.tiingo_backfill import configured as tiingo_configured
-        if tiingo_configured():
-            threading.Thread(target=tiingo_loop, args=(engine,), name="tiingo", daemon=True).start()
-        else:
-            log.info("TIINGO_API_KEY not set: delisted prices stay unresolved (reported in data quality)")
+        threading.Thread(target=free_prices_loop, args=(engine,), name="free-prices", daemon=True).start()
     while not _stop:
         run_once(engine)
         if not loop:
