@@ -239,15 +239,19 @@ def _recompare_successor(conn, row: dict, name: str | None) -> str | None:
     return _compare_and_emit(conn, {**new, "id": nid}, None, name)["status"]
 
 
+def fetch_submissions(cik: str) -> dict:
+    return http.get(SUBMISSIONS_URL.format(cik=cik.zfill(10)), retries=2).json()
+
+
 def process_cik(engine: Engine, cik: str, ticker: str | None, name: str | None, *, history_from: date,
                 live_from: date, max_docs: int) -> dict:
     """All not-yet-stored 10-Ks of one CIK filed on/after history_from (plus the one before it, so the
     first of them has a predecessor). Filings before live_from are stored as backfill."""
     cik = cik.zfill(10)
     try:
-        sub = http.get(SUBMISSIONS_URL.format(cik=cik), retries=2).json()
-    except http.HttpError as e:
-        return {"error": str(e)}
+        sub = fetch_submissions(cik)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"[:300]}
     since = history_from - timedelta(days=CONSECUTIVE_MAX_DAYS)
     try:
         fl = [f for f in all_annual_filings(sub, since) if f["filing_date"] >= since]
@@ -256,8 +260,9 @@ def process_cik(engine: Engine, cik: str, ticker: str | None, name: str | None, 
     with engine.connect() as conn:
         known = {a for (a,) in conn.execute(select(tenk_filings.c.accession).where(and_(
             tenk_filings.c.cik == cik, tenk_filings.c.status.notin_(RETRYABLE)))).all()}
-    todo = [f for f in fl if f["accession"] not in known][-max_docs:]
-    res = {"docs": 0, "events": 0, "failed": 0}
+    pending = [f for f in fl if f["accession"] not in known]
+    todo = pending[:max_docs]  # oldest first: every predecessor is stored before its successor
+    res = {"docs": 0, "events": 0, "failed": 0, "remaining": len(pending) - len(todo)}
     for f in todo:  # oldest first, so each one finds its predecessor
         tk = ticker
         if tk is None or f["filing_date"] < live_from:  # the ticker AT the filing date, never today's
@@ -301,7 +306,7 @@ def run_live(engine: Engine, days: int = 4, max_docs: int = 60) -> dict:
     ciks: set[str] = set()
     for i in range(days):
         ciks |= daily_10k_ciks(today - timedelta(days=i)) & set(uni)
-    out = {"ciks": len(ciks), "docs": 0, "events": 0}
+    out = {"ciks": len(ciks), "docs": 0, "events": 0, "failed": 0, "errors": 0}
     for cik in sorted(ciks):
         if out["docs"] >= max_docs:
             break
@@ -310,6 +315,33 @@ def run_live(engine: Engine, days: int = 4, max_docs: int = 60) -> dict:
                         live_from=today - timedelta(days=days + 2), max_docs=2)
         out["docs"] += r.get("docs", 0)
         out["events"] += r.get("events", 0)
+        out["failed"] += r.get("failed", 0)
+        out["errors"] += "error" in r
+    out["retry_queue"] = retry_failed(engine, uni)
+    return out
+
+
+def retry_failed(engine: Engine, uni: dict | None = None, max_ciks: int = 40) -> dict:
+    """Persistent retry queue: every filing stored as fetch_failed is retried here, independent of the
+    daily-index window and of the backfill's done list, until it succeeds (or is permanently missing)."""
+    with engine.connect() as conn:
+        rows = conn.execute(select(tenk_filings.c.cik, tenk_filings.c.filing_date, tenk_filings.c.is_backfill)
+                            .where(tenk_filings.c.status.in_(RETRYABLE)).order_by(tenk_filings.c.filing_date)).all()
+    first: dict[str, date] = {}
+    for cik, d, _ in rows:
+        first.setdefault(cik, d)
+    out = {"queued": len(rows), "ciks": 0, "recovered": 0, "still_failed": 0}
+    live_from = date.today() - timedelta(days=6)
+    for cik in list(first)[:max_ciks]:
+        u = (uni or {}).get(cik) or {}
+        r = process_cik(engine, cik, u.get("ticker"), u.get("name"), history_from=first[cik] + timedelta(days=CONSECUTIVE_MAX_DAYS),
+                        live_from=live_from, max_docs=HISTORY_YEARS + 2)
+        out["ciks"] += 1
+        out["still_failed"] += r.get("failed", 0) + ("error" in r)
+    with engine.connect() as conn:
+        left = conn.execute(select(tenk_filings.c.id).where(tenk_filings.c.status.in_(RETRYABLE))).all()
+    out["recovered"] = max(0, len(rows) - len(left))
+    out["remaining"] = len(left)
     return out
 
 
@@ -396,10 +428,14 @@ def run_backfill(engine: Engine, max_docs: int = 120, time_budget_s: float = 900
                     complete = False
                 continue
             fails.pop(cik, None)
-            done.add(cik)
-            out["ciks"] += 1
             out["docs"] += r["docs"]
             out["events"] += r["events"]
+            if r.get("remaining"):
+                complete = False  # the per-run document cap left older reports: continue this company next run
+                out["partial"] = out.get("partial", 0) + 1
+                continue
+            done.add(cik)
+            out["ciks"] += 1
         if complete and filers:
             finished_q.add(qk)
         with engine.begin() as conn:

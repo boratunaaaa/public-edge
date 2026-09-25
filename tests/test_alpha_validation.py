@@ -216,6 +216,21 @@ def _bars(c, symbol, start, n, price=10.0, step=0.05):
     return out
 
 
+class _Serve:
+    """A provider answering from fixed series (one adjustment basis per symbol)."""
+
+    def __init__(self, series: dict):
+        self.series = series
+
+    def get_historical_prices(self, symbol, start, end):
+        return [b for b in self.series.get(symbol, []) if start <= b.date <= end]
+
+
+def _serve(monkeypatch, **series):
+    import app.marketdata.provider as mp
+    monkeypatch.setattr(mp, "get_provider", lambda: _Serve(series))
+
+
 @pytest.fixture
 def offline_prices(monkeypatch):
     import app.marketdata.provider as mp
@@ -312,15 +327,16 @@ def test_gate_rules(engine):
 
 @db
 @pytest.mark.usefixtures("clean", "offline_prices")
-def test_proposal_approval_paper_fill_exit_and_pnl(engine):
+def test_proposal_approval_paper_fill_exit_and_pnl(engine, monkeypatch):
     from app.db.models import paper_cash, paper_orders, paper_positions, paper_trades, proposed_trades
     from app.paper import ledger
     from app.paper.proposals import create_proposal, decide
     with engine.begin() as c:
         _universe(c)
-        _bars(c, "ZBIO", date(2024, 1, 2), 200, 10.0, 0.05)
-        _bars(c, "SPY", date(2024, 1, 2), 200, 400.0, 0.5)
+        zb = _bars(c, "ZBIO", date(2024, 1, 2), 200, 10.0, 0.05)
+        spy = _bars(c, "SPY", date(2024, 1, 2), 200, 400.0, 0.5)
         eid = _event(c)
+    _serve(monkeypatch, ZBIO=zb, SPY=spy)
     t0 = datetime(2024, 3, 1, 15, 0, tzinfo=timezone.utc)
     # INSIDER_BUY is not proven (BLOCKED in an empty DB): automatic mode refuses, research mode may propose
     assert create_proposal(engine, eid, now=t0)["created"] is False
@@ -362,14 +378,15 @@ def test_proposal_approval_paper_fill_exit_and_pnl(engine):
 
 @db
 @pytest.mark.usefixtures("clean", "offline_prices")
-def test_stop_loss_exits_at_the_next_session(engine):
+def test_stop_loss_exits_at_the_next_session(engine, monkeypatch):
     from app.paper import ledger
     from app.paper.proposals import create_proposal, decide
     with engine.begin() as c:
         _universe(c)
-        _bars(c, "ZBIO", date(2024, 1, 2), 120, 20.0, -0.12)  # steady decline
-        _bars(c, "SPY", date(2024, 1, 2), 120, 400.0, 0.5)
+        zb = _bars(c, "ZBIO", date(2024, 1, 2), 120, 20.0, -0.12)  # steady decline
+        spy = _bars(c, "SPY", date(2024, 1, 2), 120, 400.0, 0.5)
         eid = _event(c)
+    _serve(monkeypatch, ZBIO=zb, SPY=spy)
     p = create_proposal(engine, eid, research_only=True, now=datetime(2024, 3, 1, 15, tzinfo=timezone.utc))
     decide(engine, p["code"], True, by="t", now=datetime(2024, 3, 1, 16, tzinfo=timezone.utc))
     ledger.run(engine, today=date(2024, 5, 20))
@@ -613,3 +630,144 @@ def test_tenk_successor_can_be_rebased_twice(engine, monkeypatch):
         evs = c.execute(select(events.c.payload).where(events.c.superseded.is_(False))).scalars().all()
     assert dict(live)["c3"] == "c2" and n_sup == 2
     assert len(evs) == 1 and evs[0]["prev_accession"] == "c2"
+
+
+
+# ------------------------------------------------------------------ review fixes, round 2
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_no_mixed_basis_cache_fallback_when_the_provider_fails(engine, monkeypatch):
+    """Provider down + a cache that mixes bases (entry 100 pre-split, recent rows 50 post-split): the last
+    trusted valuation is kept and no stop / sale is decided from the mixed cache."""
+    import app.marketdata.provider as mp
+    from app.marketdata.provider import store_bars
+    from app.paper import ledger
+    from app.paper.proposals import create_proposal, decide
+    with engine.begin() as c:
+        _universe(c)
+        _bars(c, "ZBIO", date(2024, 1, 2), 200, 100.0, 0.0)
+        _bars(c, "SPY", date(2024, 1, 2), 200, 400.0, 0.5)
+        eid = _event(c)
+    p = create_proposal(engine, eid, research_only=True, now=datetime(2024, 3, 1, 15, tzinfo=timezone.utc))
+    decide(engine, p["code"], True, by="t", now=datetime(2024, 3, 1, 16, tzinfo=timezone.utc))
+    with engine.begin() as c:
+        ledger.fill_orders(c, date(2024, 3, 10))
+        # later rows re-fetched after a 2:1 split, older rows untouched: a mixed-basis cache
+        d, post = date(2024, 4, 15), []
+        while d <= date(2024, 6, 20):
+            if d.weekday() < 5:
+                post.append(Bar(d, 50.0, 50.0, 50.0, 50.0, 50.0, 1))
+            d += timedelta(days=1)
+        store_bars(c, "ZBIO", post)
+
+    class Down:
+        def get_historical_prices(self, *a):
+            raise RuntimeError("provider down")
+    monkeypatch.setattr(mp, "get_provider", lambda: Down())
+    r = ledger.run(engine, today=date(2024, 6, 20))
+    assert r["exits"].get("deferred") == 5
+    with engine.connect() as c:
+        pos = c.execute(text("SELECT p.*, a.strategy FROM paper_positions p JOIN paper_accounts a ON a.id = p.account_id")).mappings().all()
+        assert all(p["status"] == "OPEN" for p in pos)  # neither the 15% stop nor a sale at a mixed price
+        e = dict(next(p for p in pos if p["strategy"] == "E_STOP_TIME"))
+        value, px, _ = ledger.position_value(c, e, date(2024, 6, 20))
+        assert px == pytest.approx(e["last_price"]) and px > 99  # last trusted valuation, not 50
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_superseded_risk_event_does_not_trigger_a_thesis_exit(engine, monkeypatch):
+    from app.db.store import create_event
+    from app.paper import ledger
+    from app.paper.proposals import create_proposal, decide
+    with engine.begin() as c:
+        _universe(c)
+        zb = _bars(c, "ZBIO", date(2024, 1, 2), 200, 10.0, 0.01)
+        spy = _bars(c, "SPY", date(2024, 1, 2), 200, 400.0, 0.5)
+        eid = _event(c)
+    _serve(monkeypatch, ZBIO=zb, SPY=spy)
+    p = create_proposal(engine, eid, research_only=True, now=datetime(2024, 3, 1, 15, tzinfo=timezone.utc))
+    decide(engine, p["code"], True, by="t", now=datetime(2024, 3, 1, 16, tzinfo=timezone.utc))
+    with engine.begin() as c:
+        ledger.fill_orders(c, date(2024, 3, 10))
+        old = create_event(c, event_type="TENK_CHANGE", dedupe_key="tenk:x#rp1", public_date=date(2024, 4, 1), ticker="ZBIO",
+                           issuer_cik="0001953926", title="t", source_url="u",
+                           payload={"change_types": ["NEW_GOING_CONCERN"], "direction": "NEGATIVE"})
+        c.execute(text("UPDATE events SET superseded = true, superseded_reason = 'TENK_PREDECESSOR_ARRIVED' WHERE id = :i"), {"i": old})
+        create_event(c, event_type="TENK_CHANGE", dedupe_key="tenk:x", public_date=date(2024, 4, 1), ticker="ZBIO",
+                     issuer_cik="0001953926", title="t", source_url="u",
+                     payload={"change_types": ["NEW_LEGAL_RISK"], "direction": "NEGATIVE"})
+        pos = dict(c.execute(text("SELECT p.* FROM paper_positions p JOIN paper_accounts a ON a.id = p.account_id "
+                                  "WHERE a.strategy = 'D_THESIS'")).mappings().one())
+        assert ledger.thesis_invalidated(c, pos, date(2024, 5, 1)) is None
+        ledger.check_exits(c, date(2024, 5, 1))
+        n_sell = c.execute(text("SELECT count(*) FROM paper_orders WHERE side = 'SELL' AND position_id = :i"), {"i": pos["id"]}).scalar()
+    assert n_sell == 0
+
+
+def _sub(filings: list[tuple[str, str]]) -> dict:
+    return {"name": "Z", "filings": {"recent": {
+        "form": ["10-K"] * len(filings), "accessionNumber": [a for a, _ in filings], "filingDate": [d for _, d in filings],
+        "acceptanceDateTime": [""] * len(filings), "primaryDocument": ["k.htm"] * len(filings), "reportDate": [""] * len(filings)}}}
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_tenk_document_cap_leaves_the_company_open_until_all_reports_are_done(engine, monkeypatch):
+    import app.securitymaster.provider as smp
+    from app.db.models import tenk_filings
+    from app.db.store import job_state
+    from app.tenk import engine as te
+
+    class SM:
+        def resolve_ticker_at_date(self, cik, d):
+            return "ZBIO"
+    monkeypatch.setattr(smp, "get_security_master", lambda conn: SM())
+    years = [2021, 2022, 2023, 2024, 2025]
+    monkeypatch.setattr(te, "fetch_submissions", lambda cik: _sub([(f"d{y}", f"{y}-03-01") for y in years]))
+    monkeypatch.setattr(te, "fetch_text", lambda cik, f: _doc([_risk(i) for i in range(20)], BASE_MDNA))
+    monkeypatch.setattr(te, "_quarters", lambda y: ["2025Q1"])
+    monkeypatch.setattr(te, "quarter_10k_ciks", lambda y, q: [("0001953926", date(2025, 3, 1))])
+    real = te.process_cik
+    monkeypatch.setattr(te, "process_cik", lambda *a, **k: real(*a, **{**k, "max_docs": 2}))  # cap below the backlog
+    te.run_backfill(engine, years=6)
+    with engine.connect() as c:
+        st = job_state(c, "tenk_backfill")
+        n = len(c.execute(select(tenk_filings.c.id)).all())
+    assert n == 2 and "0001953926" not in st["done_ciks"] and "2025Q1" not in st["done_quarters"]
+    for _ in range(3):  # restarts
+        te.run_backfill(engine, years=6)
+    with engine.connect() as c:
+        st = job_state(c, "tenk_backfill")
+        rows = dict(c.execute(select(tenk_filings.c.accession, tenk_filings.c.prev_accession)).all())
+    assert set(rows) == {f"d{y}" for y in years} and "0001953926" in st["done_ciks"]
+    assert rows["d2025"] == "d2024" and rows["d2022"] == "d2021"  # oldest first: every report has its predecessor
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_live_retry_queue_recovers_a_failed_filing_after_the_index_window(engine, monkeypatch):
+    from app.db.models import tenk_filings
+    from app.tenk import engine as te
+    old = (date.today() - timedelta(days=30)).isoformat()
+    monkeypatch.setattr(te, "fetch_submissions", lambda cik: _sub([("f1", old)]))
+    state = {"down": True}
+
+    def fetch(cik, f):
+        if state["down"]:
+            raise te.FetchError("HTTP 503")
+        return _doc([_risk(i) for i in range(20)], BASE_MDNA)
+    monkeypatch.setattr(te, "fetch_text", fetch)
+    monkeypatch.setattr(te, "_universe", lambda conn: {})
+    monkeypatch.setattr(te, "daily_10k_ciks", lambda d: set())  # the filing is long out of the 4-day window
+    r = te.process_cik(engine, "0001953926", "ZBIO", "Z", history_from=date.today() - timedelta(days=400),
+                       live_from=date.today(), max_docs=5)
+    assert r["failed"] == 1
+    out = te.run_live(engine)  # still down: visible, not lost
+    assert out["retry_queue"]["queued"] == 1 and out["retry_queue"]["still_failed"] == 1
+    state["down"] = False  # e.g. after a restart
+    out = te.run_live(engine)
+    assert out["retry_queue"]["recovered"] == 1 and out["retry_queue"]["remaining"] == 0
+    with engine.connect() as c:
+        assert c.execute(select(tenk_filings.c.status).where(tenk_filings.c.accession == "f1")).scalar() == "ok"

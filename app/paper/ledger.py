@@ -109,15 +109,17 @@ def _factor(b) -> float:
 
 
 def fresh_bars(conn: Connection, symbol: str, start: date, end: date):
-    """Bars from ONE provider request (one adjustment basis). Falls back to the cache when the
-    provider has nothing (offline, delisted)."""
+    """Bars from ONE provider request = one adjustment basis, or None. There is deliberately NO fallback
+    to the price cache: cached rows are fetched at different times, so after a split they mix bases
+    (entry 100, today 50 = a phantom -50%). Without a consistent series the caller keeps the last
+    trusted valuation and postpones stop / sale decisions."""
     from app.marketdata.provider import get_provider
     try:
         got = get_provider().get_historical_prices(symbol, start, end)
     except Exception:
-        got = []
-    got = [b for b in got if b.open and b.close and start <= b.date <= end]
-    return got or _bars(conn, symbol, start, end)
+        return None
+    got = [b for b in (got or []) if b.open and b.close and start <= b.date <= end]
+    return got or None
 
 
 def _entry_open(conn: Connection, pos: dict) -> float:
@@ -149,8 +151,8 @@ class Growth:
 def position_value(conn: Connection, pos: dict, on: date) -> tuple[float, float | None, date | None]:
     """(value, price per entry-share, price date) at the last close on/before `on`."""
     bars = fresh_bars(conn, pos["ticker"], pos["entry_date"], on)
-    g = Growth(bars, pos["entry_date"], _entry_open(conn, pos))
-    if not bars or not g.ok:
+    g = Growth(bars or [], pos["entry_date"], _entry_open(conn, pos))
+    if not bars or not g.ok:  # last trusted valuation (never a mixed-basis cache price)
         px = pos.get("last_price") or pos["entry_price"]
         return pos["shares"] * px, pos.get("last_price"), pos.get("last_price_date")
     px = g.close(bars[-1])
@@ -212,10 +214,10 @@ def fill_orders(conn: Connection, today: date) -> dict:
             _move_cash(conn, o["account_id"], b.date, -(notional + comm), "BUY", o["id"])
         else:
             pos = dict(conn.execute(select(paper_positions).where(paper_positions.c.id == o["position_id"])).mappings().first())
-            series = fresh_bars(conn, o["ticker"], pos["entry_date"], today)
+            series = fresh_bars(conn, o["ticker"], pos["entry_date"], today) or []
             g = Growth(series, pos["entry_date"], _entry_open(conn, pos))
             sb = next((x for x in series if x.date >= o["not_before"]), None) if g.ok else None
-            if sb is None:
+            if sb is None:  # no consistent series yet: the sale waits, it is never priced from the cache
                 out["waiting"] += 1
                 continue
             b = sb
@@ -245,6 +247,7 @@ def thesis_invalidated(conn: Connection, pos: dict, until: date) -> date | None:
     r = conn.execute(text("""
         SELECT min(d) FROM (
           SELECT e.public_date d FROM events e WHERE e.issuer_cik = :cik AND e.public_date > :entry AND e.public_date <= :until
+             AND NOT e.superseded
              AND e.event_type = 'TENK_CHANGE' AND e.payload->'change_types' ? 'NEW_GOING_CONCERN'
           UNION ALL
           SELECT tc.created_at::date FROM thesis_changes tc WHERE tc.cik = :cik AND tc.change = 'THESIS_INVALIDATION'
@@ -264,8 +267,11 @@ def check_exits(conn: Connection, today: date) -> dict:
         p = dict(p)
         rule = STRATEGIES[p["strategy"]][2]
         series = fresh_bars(conn, p["ticker"], p["entry_date"], today)
-        g = Growth(series, p["entry_date"], _entry_open(conn, p))
-        bars = [b for b in series if b.date > p["entry_date"]] if g.ok else []
+        g = Growth(series or [], p["entry_date"], _entry_open(conn, p))
+        if not series or not g.ok:
+            out["deferred"] = out.get("deferred", 0) + 1  # keep the last trusted valuation; decide on a later run
+            continue
+        bars = [b for b in series if b.date > p["entry_date"]]
         if bars:
             last = bars[-1]
             conn.execute(paper_positions.update().where(paper_positions.c.id == p["id"]).values(
