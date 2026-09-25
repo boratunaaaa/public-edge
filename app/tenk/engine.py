@@ -541,7 +541,7 @@ def supersede_old_classifier(engine: Engine, dry_run: bool = True) -> dict:
         if dry_run:
             return out
         for r in old:
-            new_acc = f"{r['accession']}#v{r['v']}"[:25]
+            new_acc = f"{r['accession'][:20]}#{r['id'] % 65536:04x}"  # unique per row (re-supersessions never collide)
             conn.execute(sql("UPDATE tenk_filings SET status = 'superseded', accession = :a WHERE id = :i"), {"a": new_acc, "i": r["id"]})
             conn.execute(sql("""INSERT INTO data_cleanup_audit (run_id, action, table_name, row_id, before, after, reason, dry_run)
                                 VALUES (:r, 'supersede', 'tenk_filings', :i, CAST(:b AS jsonb), CAST(:a AS jsonb), :why, false)"""),
@@ -550,7 +550,7 @@ def supersede_old_classifier(engine: Engine, dry_run: bool = True) -> dict:
                           "why": f"10-K classifier v{r['v']} -> v{CLASSIFIER_VERSION} (going-concern boilerplate fix)"})
         for e in evs:
             conn.execute(sql("""UPDATE events SET superseded = true, superseded_reason = 'TENK_CLASSIFIER_OLD',
-                                dedupe_key = left(dedupe_key || '#old', 200) WHERE id = :i"""), {"i": e["id"]})
+                                dedupe_key = left(dedupe_key, 170) || '#old' || id WHERE id = :i"""), {"i": e["id"]})
             conn.execute(sql("""INSERT INTO data_cleanup_audit (run_id, action, table_name, row_id, before, after, reason, dry_run)
                                 VALUES (:r, 'supersede', 'events', :i, CAST(:b AS jsonb), '{"superseded": true}'::jsonb, :why, false)"""),
                          {"r": run_id, "i": e["id"], "b": f'{{"dedupe_key": "{e["dedupe_key"]}"}}',

@@ -450,8 +450,8 @@ def test_old_classifier_rows_are_superseded_not_deleted(engine):
         f = c.execute(select(tenk_filings)).mappings().one()
         e = c.execute(select(events)).mappings().one()
         n_audit = len(c.execute(select(data_cleanup_audit)).all())
-    assert f["status"] == "superseded" and f["accession"].endswith("#v1")
-    assert e["superseded"] and e["dedupe_key"].endswith("#old") and n_audit == 2
+    assert f["status"] == "superseded" and "#" in f["accession"]
+    assert e["superseded"] and "#old" in e["dedupe_key"] and n_audit == 2
 
 
 @db
@@ -1150,3 +1150,21 @@ def test_fill_locks_the_source_event_against_concurrent_supersession(engine, mon
         conn_b.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": eid})
     with engine.connect() as c:
         assert c.execute(text("SELECT superseded FROM events WHERE id = :i"), {"i": eid}).scalar() is True
+
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_reclassify_twice_does_not_collide(engine):
+    """v1 -> v2 -> v3: every supersession of the same accession gets its own key."""
+    from app.db.models import events, tenk_filings
+    from app.tenk.engine import supersede_old_classifier
+    for _ in range(2):
+        with engine.begin() as c:
+            c.execute(tenk_filings.insert().values(cik="0001953926", accession="0000000001-24-000001", form="10-K",
+                                                   filing_date=date(2024, 3, 1), source_url="u", profile={}, status="ok"))
+            _event(c, et="TENK_CHANGE", key="tenk:0000000001-24-000001", payload={"direction": "NEGATIVE"})
+        supersede_old_classifier(engine, dry_run=False)
+    with engine.connect() as c:
+        keys = c.execute(select(events.c.dedupe_key).where(events.c.superseded.is_(True))).scalars().all()
+    assert len(keys) == 2 and len(set(keys)) == 2
