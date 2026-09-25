@@ -89,51 +89,6 @@ def tenk_loop(engine) -> None:
             time.sleep(10)
 
 
-def free_prices_loop(engine) -> None:
-    """LOW priority free historical price recovery (identity-gated): FINSABER open dataset once, Alpha Vantage
-    delisting list monthly (key optional), then Tiingo free tier one hourly batch within its quota.
-    Stops while free disk is under 10 GB."""
-    import shutil
-
-    from app.db.store import job_state
-    from app.pricesources import alphavantage, finsaber, tiingo
-    while not _stop:
-        pause = 3600
-        try:
-            if shutil.disk_usage("/").free < 10 * 1024**3:
-                log.warning("free price recovery paused: < 10 GB free disk")
-            else:
-                with engine.begin() as conn:
-                    st = job_state(conn, "free_prices")
-                if not st.get("finsaber_done"):
-                    r = finsaber.run(engine)
-                    log.info("finsaber recovery %s", r)
-                    with engine.begin() as conn:
-                        save_job_state(conn, "free_prices", {**st, "finsaber_done": True, "finsaber": r}, status="idle")
-                log.info("alpha vantage listing %s", alphavantage.refresh(engine))
-                r = tiingo.run(engine)
-                log.info("tiingo free batch %s", r)
-                # keep going while there is quota (the host bucket + quota ledger enforce the free-tier rate);
-                # back off only when a limit is reached or nothing is left to try
-                stopped = r.get("stopped")
-                if r.get("skipped"):
-                    pause = 6 * 3600
-                elif stopped == "MONTHLY_SYMBOL_LIMIT":
-                    pause = 12 * 3600
-                elif stopped in ("PER_HOUR_LIMIT", "PER_DAY_LIMIT"):
-                    pause = 900
-                elif r.get("symbols"):
-                    pause = 30
-                else:
-                    pause = 6 * 3600
-        except Exception:
-            log.exception("free price recovery failed")
-        for _ in range(pause // 10):
-            if _stop:
-                return
-            time.sleep(10)
-
-
 def run_once(engine) -> None:
     years = settings.backfill_years
     with engine.begin() as conn:
@@ -174,7 +129,6 @@ def main() -> None:
     rt.start()
     if loop:
         threading.Thread(target=tenk_loop, args=(engine,), name="tenk", daemon=True).start()
-        threading.Thread(target=free_prices_loop, args=(engine,), name="free-prices", daemon=True).start()
     while not _stop:
         run_once(engine)
         if not loop:

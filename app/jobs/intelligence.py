@@ -116,6 +116,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _sig)
     signal.signal(signal.SIGINT, _sig)
     engine = get_engine()
+    import threading
+
+    from app.pricesources.loop import free_prices_loop
+    threading.Thread(target=free_prices_loop, args=(engine, lambda: _stop), name="free-prices", daemon=True).start()
     last_scan = [0.0]
     while not _stop:
         now = datetime.now(timezone.utc)
