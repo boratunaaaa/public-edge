@@ -67,3 +67,35 @@ scripts/pe.sh logs worker       # follow logs (worker|backfill|api|db)
 scripts/pe.sh restart           # rebuild + recreate app containers
 scripts/pe.sh up                # full stack
 ```
+
+## V2 — Early Discovery + News Intelligence
+
+Extra process `intelligence` (daily discovery at 10:00 UTC, full refresh weekly; daily Telegram
+report 12:30 UTC Mon–Fri = 08:30 New York; weekly report Sunday 16:00 UTC).
+
+**News** (`app/news`): SEC 8-K (exact acceptance time, Exhibit 99 press release), PR Newswire,
+Business Wire, DOE/NASA, openFDA (original + new-indication approvals only), watchlist headlines.
+Only the headline and lead paragraph are classified — forward-looking-statement boilerplate,
+"About X" sections, legal exhibits and inline-XBRL headers are cut first (`app/news/lead.py`).
+Copies of the same story are clustered; the story's public time is the earliest *original*
+publication time (updated/future-dated timestamps are ignored). Hype filter: MOU / LOI / pilot /
+collaboration can never be HIGH on wording alone. Materiality scales with contract / market cap
+and contract / annual revenue. Historical 8-Ks (backfill) feed the news backtest.
+
+**Discovery** (`app/discovery`): point-in-time universe snapshots (>= $50M; buckets MICRO,
+EARLY_SMALL, SMALL, GROWTH, ALREADY_SCALED), XBRL frames fundamentals, EDGAR full-text evidence
+(sentence-level, source-linked), counterparty relation quality (customer vs competitor vs potential,
+binding vs MOU), commercialization stage, inflection flags that need two confirming quarters,
+microcap risk filter, research-priority score (no price-momentum feature), watchlist with reasons
+and manual override (`python -m app.cli watchlist TICKER CATEGORY "reason"`), evidence-linked thesis.
+
+**Insiders**: routine vs opportunistic (Cohen, Malloy & Pomorski 2012) and holdings increase.
+
+## Telegram messages (Turkish, for non-experts)
+
+Every alert: company + size + price context, "Ne oldu?", "Neden önemli?", "Geçmişte ne oldu?",
+"Alım puanı", overall verdict, "Dikkat" (plain-language risks), source link, and a 6-month price
+chart. **Alım puanı** = share of comparable past events (most specific peer group with >= 30
+samples) whose stock beat the S&P 500 over 3 months in this system's no-look-ahead backtest,
+shrunk toward 50% (Beta(5,5)); below 30 samples no percentage is shown. The weekly report carries an
+alert scorecard (how the alerts actually sent 1–4 months ago performed).

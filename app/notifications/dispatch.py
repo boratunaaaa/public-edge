@@ -17,11 +17,10 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 
-from app.backtest.jobs import event_type_stats, subgroup_for
 from app.config import settings
 from app.db.models import events, notifications
 from app.notifications import telegram
-from app.notifications.format import format_alert, format_discovery, money
+from app.notifications.format import format_alert, format_discovery
 
 log = logging.getLogger(__name__)
 MAX_AGE_DAYS = 2
@@ -102,28 +101,13 @@ def _sent_last_hour(conn) -> int:
         notifications.c.sent_at > _now() - timedelta(hours=1)))).scalar_one()
 
 
-def _extra_signals(conn, ev) -> list[str]:
-    if not ev["ticker"]:
-        return []
-    rows = conn.execute(select(events.c.event_type, events.c.title, events.c.payload).where(and_(
-        events.c.ticker == ev["ticker"], events.c.id != ev["id"], events.c.event_type != "MULTI_SIGNAL_EVENT",
-        events.c.public_date >= ev["public_date"] - timedelta(days=30), events.c.public_date <= ev["public_date"],
-    )).limit(5)).all()
-    out = []
-    for et, title, p in rows:
-        if et == "GOV_CONTRACT":
-            out.append(f"Government contract: {money(p.get('amount'))} ({(p.get('value_to_mcap') or 0) * 100:.1f}% of mcap)")
-        else:
-            out.append(title[:120])
-    return out
-
 
 THESIS_TR = {"THESIS_STRENGTHENING": "şirket hakkındaki olumlu görüş güçlendi", "THESIS_WEAKENING": "şirket hakkındaki görüş zayıfladı",
              "THESIS_INVALIDATION": "şirket hakkındaki görüş ciddi şekilde bozuldu", "NEUTRAL": "görüşte değişiklik yok"}
 NO_CHART = {"TRUMP_FAMILY_SEC_EVENT"}
 
 
-def build_message(engine: Engine, ev: dict, stats, subgroup: str, extra: list[str]) -> tuple[str, bytes | None]:
+def build_message(engine: Engine, ev: dict) -> tuple[str, bytes | None]:
     """Turkish, plain-language alert text + optional price chart."""
     from app.backtest.probability import success_rate
     from app.db.models import discovery_risks, thesis_changes, universe_snapshots
@@ -147,13 +131,31 @@ def build_message(engine: Engine, ev: dict, stats, subgroup: str, extra: list[st
             tc = conn.execute(select(thesis_changes.c.change).where(thesis_changes.c.news_cluster_id == p["cluster_id"])).first()
             thesis = THESIS_TR.get(tc[0]) if tc else None
         chart = None
-        if ev.get("ticker") and ev["event_type"] not in NO_CHART:
+        if ev.get("ticker") and ev["event_type"] not in NO_CHART:  # also loads/stores the prices used below
             chart = price_chart(conn, ev["ticker"], ev["public_date"], f"{ev['ticker']} — son 6 ay fiyat (turuncu çizgi: olay günü)")
+        price_ctx = _price_context(conn, ev.get("ticker"), ev["public_date"])
     mcap, bucket = (uni[0], uni[1]) if uni else (p.get("market_cap"), p.get("bucket") or p.get("mcap_bucket"))
     if ev["event_type"] == "EARLY_DISCOVERY":
         srcs = ["SEC resmi belgeleri"] + (["Form 4 (yönetici alımları)"] if p.get("why") and any("insider" in w for w in p["why"]) else [])
         return format_discovery(ev, risks, srcs + [ev.get("source_url") or ""], rate=rate), chart
-    return format_alert(ev, rate=rate, risks=risks, related=related, thesis=thesis, market_cap=mcap, bucket=bucket), chart
+    return format_alert(ev, rate=rate, risks=risks, related=related, thesis=thesis, market_cap=mcap, bucket=bucket,
+                        price_ctx=price_ctx), chart
+
+
+def _price_context(conn, ticker: str | None, day) -> dict | None:
+    """3-month change and position inside the 1-year range, from stored prices on/before the event day."""
+    if not ticker:
+        return None
+    from app.marketdata.provider import load_bars
+    bars = [b for b in load_bars(conn, ticker, day - timedelta(days=370), day) if b.close]
+    if len(bars) < 60:
+        return None
+    last = bars[-1].adj_close or bars[-1].close
+    past = [b for b in bars if b.date <= day - timedelta(days=90)]
+    base = (past[-1].adj_close or past[-1].close) if past else None
+    closes = [b.adj_close or b.close for b in bars]
+    lo, hi = min(closes), max(closes)
+    return {"change_3m": (last / base - 1) if base else None, "range_pos": (last - lo) / (hi - lo) if hi > lo else None}
 
 
 def _candidates(engine: Engine) -> list:
@@ -177,13 +179,12 @@ def dispatch(engine: Engine) -> dict:
         return {"skipped": "telegram not configured"}
     sent = deferred = failed = merged_n = 0
     cands = _candidates(engine)
-    # One message per ticker per dispatch: highest priority is sent, related ones folded in.
-    merged: dict[int, list[str]] = {}
+    # One message per ticker per dispatch: the highest-priority event is sent; the others are marked
+    # 'merged' and still appear in that message's "Aynı şirkette son zamanlarda" section.
     top_for_ticker: dict[str, int] = {}
     for ev in cands:  # priority desc
         tk = ev["ticker"]
         if tk and tk in top_for_ticker:
-            merged.setdefault(top_for_ticker[tk], []).append(ev["title"][:120])
             with engine.begin() as conn:
                 mark_terminal(conn, f"event:{ev['id']}", "merged", ev["id"], f"merged into event {top_for_ticker[tk]}")
             merged_n += 1
@@ -197,13 +198,7 @@ def dispatch(engine: Engine) -> dict:
             if _sent_last_hour(conn) >= settings.max_alerts_per_hour:
                 deferred += 1  # left untouched: picked up by a later run while still fresh
                 continue
-            sg = subgroup_for(ev["event_type"], ev["payload"] or {})
-            try:
-                stats = event_type_stats(conn, ev["event_type"], sg, horizons=(30, 90))
-            except Exception:
-                stats = None
-            extra = merged.get(ev["id"], []) + [x for x in _extra_signals(conn, ev) if x not in merged.get(ev["id"], [])]
-        msg, chart = build_message(engine, dict(ev), stats, sg, extra)
+        msg, chart = build_message(engine, dict(ev))
         r = deliver(engine, f"event:{ev['id']}", "event", msg, ev["id"], photo=chart,
                     photo_caption=f"{ev['ticker']} fiyat grafiği" if ev.get("ticker") else "")
         sent += r is True

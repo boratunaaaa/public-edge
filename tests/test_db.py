@@ -523,3 +523,39 @@ def test_watchlist_manual_override_survives_automation(engine):
 def test_daily_report_quiet_day(engine):
     from app.reports import daily_report
     assert "kayda değer bir gelişme olmadı" in daily_report(engine)
+
+
+def test_alert_scorecard_counts_only_sent_alerts(engine):
+    from datetime import datetime as dt, timedelta as td, timezone as tz
+    from app.db.store import create_event
+    from app.reports import alert_scorecard
+    now = dt.now(tz.utc)
+    with engine.begin() as c:
+        ids = []
+        for i, ex in enumerate((0.05, -0.02, 0.08)):
+            eid = create_event(c, event_type="INSIDER_OPEN_MARKET_BUY", dedupe_key=f"S{i}", public_date=date(2026, 5, 1),
+                               ticker="ZBIO", title="t", payload={}, source_url="u", priority=6)
+            c.execute(event_returns.insert().values(event_id=eid, horizon_days=30, entry_date=date(2026, 5, 2), entry_price=1,
+                                                    exit_date=date(2026, 6, 1), exit_price=1, ret=ex, excess_ret=ex))
+            ids.append(eid)
+        for eid in ids[:2]:  # the third alert was never sent -> must not count
+            c.execute(notifications.insert().values(dedupe_key=f"event:{eid}", event_id=eid, kind="event", status="sent",
+                                                    attempts=1, sent_at=now - td(days=60)))
+        lines = alert_scorecard(c, now)
+    assert "2 bildirimden 1 tanesinde" in lines[0]
+
+
+def test_evaluate_all_end_to_end(engine):
+    """Runs the real universe selection + evaluation loop (regression: result-level .distinct() crashed it)."""
+    from app.db.models import discovery_companies, fundamentals_quarterly
+    from app.discovery.engine import evaluate_all
+    from app.discovery.evidence import extract_from_text
+    _seed_universe(engine, as_of=date.today())
+    with engine.begin() as c:
+        c.execute(fundamentals_quarterly.insert(), [dict(cik="0001953926", concept="Revenue", period_end=date.today() - timedelta(days=30),
+                                                         val=5e6)])
+        extract_from_text(c, "0001953926", "General Motors signed a five-year supply agreement with us for our modules.",
+                          url="u", accession="a", form="10-K", filed=date.today())
+    stats = evaluate_all(engine, is_backfill=True)
+    assert stats["errors"] == 0 and stats["evaluated"] == 1
+    assert count(engine, discovery_companies) == 1

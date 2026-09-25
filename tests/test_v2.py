@@ -365,3 +365,11 @@ def test_routine_vs_opportunistic_insider():
     assert classify({(2025, 3)}, date(2026, 3, 10)) == "unclassified"  # not enough history -> never guessed
     assert holdings_increase(40_000, 140_000) == pytest.approx(0.4)
     assert holdings_increase(10, 5) is None
+
+
+def test_price_context_line():
+    from app.notifications.format import price_context_line
+    assert price_context_line({"change_3m": -0.32, "range_pos": 0.05}) == \
+        "Hisse son 3 ayda %32 düştü. Fiyat son bir yılın en düşük seviyelerine yakın."
+    assert price_context_line({"change_3m": 0.1, "range_pos": 0.5}) == "Hisse son 3 ayda %10 yükseldi."
+    assert price_context_line(None) is None and price_context_line({"change_3m": None}) is None

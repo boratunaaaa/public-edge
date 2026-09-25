@@ -17,15 +17,15 @@ from app.sources.registry import SOURCES
 app = FastAPI(title="PUBLIC EDGE", version="1.0.0")
 
 TABS = [
-    ("latest", "Latest Events", None),
-    ("insider", "Insider Buys", "INSIDER_OPEN_MARKET_BUY"),
-    ("cluster", "Cluster Buys", "CLUSTER_INSIDER_BUY"),
-    ("13d", "13D Activists", "ACTIVIST_13D"),
-    ("contracts", "Government Contracts", "GOV_CONTRACT"),
-    ("congress", "Congress Buys", "CONGRESS_BUY,CONGRESS_CLUSTER_BUY"),
-    ("trump", "Trump Family Events", "TRUMP_FAMILY_SEC_EVENT"),
-    ("multi", "Multi Signals", "MULTI_SIGNAL_EVENT"),
-    ("f144", "Form 144", "FORM144_MAJOR_SALE"),
+    ("latest", "Son Olaylar", None),
+    ("insider", "Yönetici Alımları", "INSIDER_OPEN_MARKET_BUY"),
+    ("cluster", "Toplu Yönetici Alımı", "CLUSTER_INSIDER_BUY"),
+    ("13d", "Aktivist Yatırımcılar (13D)", "ACTIVIST_13D"),
+    ("contracts", "Devlet Sözleşmeleri", "GOV_CONTRACT"),
+    ("congress", "Kongre Alımları", "CONGRESS_BUY,CONGRESS_CLUSTER_BUY"),
+    ("trump", "Trump Ailesi", "TRUMP_FAMILY_SEC_EVENT"),
+    ("multi", "Çoklu Sinyal", "MULTI_SIGNAL_EVENT"),
+    ("f144", "Satış Niyeti (Form 144)", "FORM144_MAJOR_SALE"),
 ]
 
 
@@ -140,11 +140,11 @@ pre{white-space:pre-wrap;background:#fff;padding:10px;border:1px solid #e3e6ea;f
 def _page(title: str, active: str, body: str) -> HTMLResponse:
     nav = "".join(f'<a class="{"on" if k == active else ""}" href="/?tab={k}">{html.escape(lbl)}</a>' for k, lbl, _ in TABS)
     nav += "".join(f'<a class="{"on" if k == active else ""}" href="/{k}">{html.escape(lbl)}</a>' for k, lbl in V2_NAV)
-    nav += f'<a class="{"on" if active == "sources" else ""}" href="/sources">Sources</a>'
-    nav += f'<a class="{"on" if active == "stats" else ""}" href="/stats">Backtest</a>'
+    nav += f'<a class="{"on" if active == "sources" else ""}" href="/sources">Kaynak Durumu</a>'
+    nav += f'<a class="{"on" if active == "stats" else ""}" href="/stats">Geçmiş Performans</a>'
     return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PUBLIC EDGE - {html.escape(title)}</title><style>{CSS}</style></head><body><header><b>PUBLIC EDGE</b>
-<span class="muted"> &nbsp;kamu verisi olay tespiti — yatırım tavsiyesi değildir</span></header><nav>{nav}</nav><main>{body}</main></body></html>""")
+<span class="muted"> &nbsp;ABD kamu verisinden şirket olayları ve erken keşif</span></header><nav>{nav}</nav><main>{body}</main></body></html>""")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -155,9 +155,9 @@ def dashboard(tab: str = "latest", backfill: int = 0, ticker: str | None = None)
         f"<tr><td>{r['public_date']}</td><td class='p'>{r['priority']}</td><td>{html.escape(r['event_type'])}</td>"
         f"<td><a href='/?tab={tab}&ticker={html.escape(r['ticker'] or '')}&backfill={backfill}'>{html.escape(r['ticker'] or '')}</a></td>"
         f"<td><a href='/event/{r['id']}'>{html.escape(r['title'])}</a>{' <span class=bf>(backfill)</span>' if r['is_backfill'] else ''}</td>"
-        f"<td><a href='{html.escape(r['source_url'])}' target=_blank rel=noopener>source</a></td></tr>" for r in rows)
-    toggle = f"<a href='/?tab={tab}&backfill={0 if backfill else 1}'>{'canlı olayları göster' if backfill else 'geçmiş (backfill) olayları da göster'}</a>"
-    body = f"<p class=muted>{len(rows)} event {toggle}</p><table><tr><th>Public date</th><th>Prio</th><th>Type</th><th>Ticker</th><th>Event</th><th></th></tr>{trs}</table>"
+        f"<td><a href='{html.escape(r['source_url'])}' target=_blank rel=noopener>kaynak</a></td></tr>" for r in rows)
+    toggle = f"<a href='/?tab={tab}&backfill={0 if backfill else 1}'>{'yalnız canlı olaylar' if backfill else 'geçmiş olayları da göster'}</a>"
+    body = f"<p class=muted>{len(rows)} event {toggle}</p><table><tr><th>Açıklanma</th><th>Önem</th><th>Tür</th><th>Hisse</th><th>Olay</th><th></th></tr>{trs}</table>"
     return _page("events", tab, body)
 
 
@@ -202,8 +202,8 @@ def sources_page():
                   f"<td>{s.get('items_last_run')}</td><td>{html.escape((s.get('last_error') or '')[:200])}</td></tr>" for s in d["sources"])
     jobs = "".join(f"<tr><td>{html.escape(j['name'])}</td><td>{j['status']}</td><td>{j.get('last_finished') or ''}</td>"
                    f"<td><pre>{html.escape(json.dumps(j['state'])[:600])}</pre></td></tr>" for j in d["jobs"])
-    body = (f"<h3>Source health</h3><table><tr><th>Source</th><th>Status</th><th>Last success</th><th>Last event</th><th>Fails</th><th>Items</th><th>Last error / reason</th></tr>{trs}</table>"
-            f"<h3>Jobs</h3><table><tr><th>Job</th><th>Status</th><th>Finished</th><th>State</th></tr>{jobs}</table>")
+    body = (f"<h3>Veri kaynaklarının durumu</h3><table><tr><th>Source</th><th>Status</th><th>Last success</th><th>Last event</th><th>Fails</th><th>Items</th><th>Last error / reason</th></tr>{trs}</table>"
+            f"<h3>Arka plan işleri</h3><table><tr><th>Job</th><th>Status</th><th>Finished</th><th>State</th></tr>{jobs}</table>")
     return _page("sources", "sources", body)
 
 
@@ -225,8 +225,8 @@ def stats_page():
 from app.db.models import (company_thesis, discovery_companies, discovery_risks, news_items, news_story_clusters,  # noqa: E402
                            thesis_changes, watchlist, watchlist_history)
 
-V2_NAV = [("discovery", "Discovery"), ("news", "News"), ("thesis", "Company Thesis"), ("watchlist", "Watchlist"),
-          ("risks", "Microcap Risks"), ("thesis-changes", "Thesis Changes")]
+V2_NAV = [("discovery", "Keşif"), ("news", "Haberler"), ("thesis", "Şirket Görüşü"), ("watchlist", "Takip Listesi"),
+          ("risks", "Küçük Şirket Riskleri"), ("thesis-changes", "Görüş Değişiklikleri")]
 
 
 def _v2_page(title: str, active: str, body: str) -> HTMLResponse:
@@ -298,7 +298,7 @@ def discovery_page(bucket: str | None = None, theme: str | None = None, stage: s
         f"<td>{_fmt_pct((r['metrics'] or {}).get('yoy_latest'))}</td><td class=p>{r['interest_level']} ({r['interest_score']})</td>"
         f"<td>{html.escape(', '.join(c['counterparty'] for c in (r['customers'] or [])[:3]))}</td>"
         f"<td class={'err' if any(x.endswith(':HIGH') for x in r['risks']) else 'muted'}>{html.escape(', '.join(r['risks'][:3]))}</td></tr>" for r in rows)
-    body = (form + f"<p class=muted>{len(rows)} companies — Discovery Interest = araştırma önceliği, yatırım tavsiyesi değildir.</p>"
+    body = (form + f"<p class=muted>{len(rows)} companies — İlgi seviyesi = araştırma önceliği (fiyat hareketi değil, iş ilerlemesine göre).</p>"
             "<table><tr><th>Ticker</th><th>Name</th><th>MCap</th><th>Bucket</th><th>Themes</th><th>Stage</th><th>Rev YoY</th><th>Interest</th><th>Customers</th><th>Risks</th></tr>"
             + trs + "</table>")
     return _v2_page("discovery", "discovery", body)
@@ -359,7 +359,7 @@ def thesis_page(ticker: str | None = None):
     body = (f"<div class=card><h2>${html.escape(ticker.upper())} — company thesis</h2><p class=muted>Her alan yalnızca kaynaklı kanıttan üretilir; "
             f"kanıt yoksa boş bırakılır. Last updated {d['thesis']['thesis_last_updated']}</p></div>"
             f"<table><tr><th>Field</th><th>Value</th><th>Evidence</th></tr>{trs}</table>"
-            f"<h3>Thesis changes</h3><table><tr><th>At</th><th>Change</th><th>Why</th></tr>{ch}</table>")
+            f"<h3>Görüş değişiklikleri</h3><table><tr><th>At</th><th>Change</th><th>Why</th></tr>{ch}</table>")
     return _v2_page(ticker, "thesis", body)
 
 

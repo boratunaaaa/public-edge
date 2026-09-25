@@ -63,6 +63,22 @@ def daily_report(engine: Engine, now: datetime | None = None) -> str:
     return head + "\n" + "\n".join(parts).rstrip()
 
 
+def alert_scorecard(conn, now: datetime) -> list[str]:
+    """How did the alerts we actually SENT do? (30-day return vs S&P 500, alerts 30-120 days old)."""
+    from sqlalchemy import text as _t
+    rows = conn.execute(_t("""
+        SELECT e.event_type, r.excess_ret FROM notifications n JOIN events e ON e.id = n.event_id
+        JOIN event_returns r ON r.event_id = e.id AND r.horizon_days = 30
+        WHERE n.kind = 'event' AND n.status = 'sent' AND n.sent_at BETWEEN :a AND :b AND r.excess_ret IS NOT NULL"""),
+        {"a": now - timedelta(days=120), "b": now - timedelta(days=30)}).all()
+    if not rows:
+        return ["Henüz sonucu ölçülebilecek kadar eski bildirim yok (bildirimden en az 30 gün geçmesi gerekiyor)."]
+    wins = sum(1 for _, x in rows if x > 0)
+    avg = sum(x for _, x in rows) / len(rows)
+    return [f"Son 1-4 ayda gönderilen {len(rows)} bildirimden {wins} tanesinde hisse 1 ay içinde borsa ortalamasını geçti.",
+            f"Ortalama fark: {'+' if avg >= 0 else ''}{avg * 100:.1f}%".replace(".", ",")]
+
+
 def weekly_report(engine: Engine, now: datetime | None = None) -> str:
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(days=7)
@@ -86,6 +102,7 @@ def weekly_report(engine: Engine, now: datetime | None = None) -> str:
                 discovery_companies.c.ticker == t).scalar_subquery(), discovery_risks.c.severity == "HIGH"))).all()
             if n:
                 risky_rows.append(f"{t} ({money(mc)}): " + ", ".join(RISK_SHORT.get(r[0], r[0]) for r in n[:3]))
+        card = alert_scorecard(conn, now)
         moves = conn.execute(select(watchlist_history.c.cik, watchlist_history.c.from_category, watchlist_history.c.to_category,
                                     watchlist_history.c.reason, watchlist.c.ticker)
                              .join(watchlist, watchlist.c.cik == watchlist_history.c.cik)
@@ -101,7 +118,8 @@ def weekly_report(engine: Engine, now: datetime | None = None) -> str:
         _section("🟢 Yönetici alımları", ol(insider)) + \
         _section("🏛 Şirket büyüklüğüne göre en büyük devlet sözleşmeleri", ol(big)) + \
         _section("⚠️ Riskli çok küçük şirketler (listede ama dikkat)", risky_rows[:8]) + \
-        _section("➕ Takip listesine eklenenler", adds) + _section("➖ Takip listesinden çıkanlar", removed)
+        _section("➕ Takip listesine eklenenler", adds) + _section("➖ Takip listesinden çıkanlar", removed) + \
+        _section("🧾 Bildirim karnesi (sistem ne kadar isabetli?)", card)
     head = f"📚 <b>PUBLIC EDGE HAFTALIK KEŞİF RAPORU</b> — {now:%d.%m.%Y}\n"
     body = "\n".join(parts).rstrip() if parts else "Bu hafta kayda değer bir keşif gelişmesi olmadı."
     return head + "\n" + body

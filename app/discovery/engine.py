@@ -164,12 +164,12 @@ def evaluate_all(engine: Engine, *, is_backfill: bool) -> dict:
     with engine.connect() as conn:
         uni = universe_ciks(conn, lo=50e6, hi=1e15)
         interesting = {r[0] for r in conn.execute(select(discovery_evidence.c.cik).distinct()).all()}
-        interesting |= {r[0] for r in conn.execute(select(insider_transactions.c.issuer_cik).where(and_(
-            insider_transactions.c.category == "OPEN_MARKET_BUY", insider_transactions.c.filed_date >= date.today() - timedelta(days=90)))).distinct().all()}
+        interesting |= {r[0] for r in conn.execute(select(insider_transactions.c.issuer_cik).distinct().where(and_(
+            insider_transactions.c.category == "OPEN_MARKET_BUY", insider_transactions.c.filed_date >= date.today() - timedelta(days=90)))).all()}
         interesting |= {r[0] for r in conn.execute(select(watchlist.c.cik)).all()}
         from app.db.models import fundamentals_quarterly as fq
-        interesting |= {r[0] for r in conn.execute(select(fq.c.cik).where(and_(fq.c.concept == "Revenue",
-                                                                                  fq.c.period_end >= date.today() - timedelta(days=200)))).distinct().all()}
+        interesting |= {r[0] for r in conn.execute(select(fq.c.cik).distinct().where(and_(
+            fq.c.concept == "Revenue", fq.c.period_end >= date.today() - timedelta(days=200)))).all()}
     todo = [u for c, u in uni.items() if c in interesting]
     stats = {"evaluated": 0, "candidates": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "events": 0, "errors": 0}
     for u in todo:

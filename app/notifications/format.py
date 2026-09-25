@@ -322,8 +322,24 @@ ITEM4_TR = {"SALE_OF_COMPANY": "şirketin satılmasını istiyor", "MERGER": "bi
             "CAPITAL_ALLOCATION": "paranın farklı kullanılmasını istiyor", "OTHER_ACTIVISM": "şirkette değişiklik istiyor"}
 
 
+def price_context_line(ctx: dict | None) -> str | None:
+    """Plain context only (not a signal): recent move and where the price sits in its 1-year range."""
+    if not ctx or ctx.get("change_3m") is None:
+        return None
+    ch = ctx["change_3m"]
+    word = "yükseldi" if ch > 0 else "düştü"
+    line = f"Hisse son 3 ayda {pct(abs(ch), 0, sign=False)} {word}."
+    pos = ctx.get("range_pos")
+    if pos is not None:
+        if pos <= 0.15:
+            line += " Fiyat son bir yılın en düşük seviyelerine yakın."
+        elif pos >= 0.85:
+            line += " Fiyat son bir yılın en yüksek seviyelerine yakın."
+    return line
+
+
 def format_alert(ev: dict, rate=None, risks: list[dict] | None = None, related: list[str] | None = None,
-                 thesis: str | None = None, market_cap=None, bucket=None) -> str:
+                 thesis: str | None = None, market_cap=None, bucket=None, price_ctx: dict | None = None) -> str:
     risks = risks or []
     p = ev.get("payload") or {}
     head, what, why = what_happened(ev)
@@ -332,7 +348,11 @@ def format_alert(ev: dict, rate=None, risks: list[dict] | None = None, related: 
     if (bucket or p.get("bucket") or p.get("mcap_bucket")) in ("MICRO", "BELOW_UNIVERSE"):
         extra_risk.append("Çok küçük şirket: fiyatı çok sert inip çıkabilir.")
     out = [f"<b>{head}</b>", "", _company(ev), size_line(market_cap or p.get("market_cap"), bucket or p.get("bucket") or p.get("mcap_bucket")),
-           f"Bilgi açıklandı: {tarih(ev.get('public_date'))}", "",
+           f"Bilgi açıklandı: {tarih(ev.get('public_date'))}"]
+    pc = price_context_line(price_ctx)
+    if pc:
+        out.append(f"📈 {pc}")
+    out += ["",
            "📌 <b>Ne oldu?</b>"] + what + ["", "💡 <b>Neden önemli?</b>"] + why
     if related:
         out += ["", "🔁 <b>Aynı şirkette son zamanlarda:</b>"] + [f"• {e(r)}" for r in related[:4]]
