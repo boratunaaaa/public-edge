@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import html
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import and_, desc, func, select, text
 
-from app.backtest.jobs import event_type_stats, person_stats, stats_overview, subgroup_for
+
 from app.db.models import event_returns, events, notifications, processing_jobs, source_health
 from app.db.session import get_engine
 from app.sources.registry import SOURCES
@@ -84,17 +84,12 @@ def _event_detail(eid: int) -> dict:
         if not ev:
             raise HTTPException(404)
         rets = conn.execute(select(event_returns).where(event_returns.c.event_id == eid).order_by(event_returns.c.horizon_days)).mappings().all()
-        sg = subgroup_for(ev["event_type"], ev["payload"] or {})
-        stats = event_type_stats(conn, ev["event_type"], sg)
-        pstats = None
-        p = ev["payload"] or {}
-        if ev["event_type"] == "INSIDER_OPEN_MARKET_BUY" and p.get("owner_cik"):
-            pstats = {"insider": p.get("owner"), "stats": person_stats(conn, ev["event_type"], "owner_cik", p["owner_cik"])}
-        if ev["event_type"] == "CONGRESS_BUY" and p.get("politician"):
-            pstats = {"politician": p.get("politician"), "stats": person_stats(conn, ev["event_type"], "politician", p["politician"])}
         notes = conn.execute(select(notifications.c.status, notifications.c.sent_at).where(notifications.c.event_id == eid)).mappings().all()
-    return _jsonable({"event": dict(ev), "returns": [dict(r) for r in rets], "historical": {"subgroup": sg, "stats": stats},
-                      "person": pstats, "notifications": [dict(n) for n in notes]})
+    from app.backtest.probability import success_rate
+    with get_engine().begin() as conn:
+        rate = success_rate(conn, ev["event_type"], ev["payload"] or {}, persist=True)
+    return _jsonable({"event": dict(ev), "returns": [dict(r) for r in rets], "historical": rate.__dict__,
+                      "notifications": [dict(n) for n in notes]})
 
 
 @app.get("/api/events/{eid}")
@@ -111,10 +106,35 @@ def api_sources():
                       "registered": [{"name": s.name, "enabled": s.enabled, "reason": s.disabled_reason} for s in SOURCES]})
 
 
+STAT_TYPES = ["INSIDER_OPEN_MARKET_BUY", "CLUSTER_INSIDER_BUY", "ACTIVIST_13D", "GOV_CONTRACT", "CONGRESS_BUY",
+              "CONGRESS_CLUSTER_BUY", "MATERIAL_NEWS", "MULTI_SIGNAL_EVENT", "EARLY_DISCOVERY"]
+
+
+def gated_stats(horizons=(30, 90, 180)) -> list[dict]:
+    """Per event type: quality verdict (TRUSTED | PARTIAL | BLOCKED). Rates only when TRUSTED;
+    PARTIAL shows the worst/best-case bounds; BLOCKED shows the reason - never a bare number."""
+    from app.backtest import quality as Q
+    out = []
+    with get_engine().begin() as conn:
+        for et in STAT_TYPES:
+            for h in horizons:
+                st = Q.compute(conn, et, "tüm benzer olaylar", "TRUE", {}, h, persist=True)
+                trusted = st["status"] == "TRUSTED"
+                out.append({"event_type": et, "horizon_days": h, "status": st["status"], "reason": Q.reason_text_tr(st) if not trusted else None,
+                            "unique_events": st["unique_events"], "unique_episodes": st["unique_episodes"],
+                            "unique_companies": st["unique_companies"], "unique_periods": st["unique_periods"],
+                            "unresolved_episodes": st["unresolved_episodes"], "unresolved_share": st["unresolved_share"],
+                            "company_equal_rate": st["company_equal_rate"] if trusted else None,
+                            "event_level_rate": st["event_level_rate"] if trusted else None,
+                            "sector_equal_rate": st["sector_equal_rate"] if trusted else None,
+                            "median_excess": st["median_excess"] if trusted else None,
+                            "bounds": [st["worst_case"], st["best_case"]] if st["status"] == "PARTIAL" else None})
+    return out
+
+
 @app.get("/api/stats")
 def api_stats():
-    with get_engine().connect() as conn:
-        return _jsonable(stats_overview(conn))
+    return _jsonable(gated_stats())
 
 
 @app.get("/api/counts")
@@ -142,6 +162,7 @@ def _page(title: str, active: str, body: str) -> HTMLResponse:
     nav += "".join(f'<a class="{"on" if k == active else ""}" href="/{k}">{html.escape(lbl)}</a>' for k, lbl in V2_NAV)
     nav += f'<a class="{"on" if active == "sources" else ""}" href="/sources">Kaynak Durumu</a>'
     nav += f'<a class="{"on" if active == "stats" else ""}" href="/stats">Geçmiş Performans</a>'
+    nav += f'<a class="{"on" if active == "data-quality" else ""}" href="/data-quality">Veri Kalitesi</a>'
     return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PUBLIC EDGE - {html.escape(title)}</title><style>{CSS}</style></head><body><header><b>PUBLIC EDGE</b>
 <span class="muted"> &nbsp;ABD kamu verisinden şirket olayları ve erken keşif</span></header><nav>{nav}</nav><main>{body}</main></body></html>""")
@@ -176,21 +197,23 @@ def event_page(eid: int):
     rets = "".join(f"<tr><td>{r['horizon_days']}d</td><td>{r['entry_date']} @ {r['entry_price']:.2f}</td><td>{r['exit_date']} @ {r['exit_price']:.2f}</td>"
                    f"<td>{_fmt_pct(r['ret'])}</td><td>{_fmt_pct(r['spy_ret'])}</td><td>{_fmt_pct(r['excess_ret'])}</td>"
                    f"<td>{_fmt_pct(r['mae'])}</td><td>{_fmt_pct(r['mfe'])}</td></tr>" for r in d["returns"]) or "<tr><td colspan=8 class=muted>henüz yok (ufuk dolmadı veya fiyat verisi yok)</td></tr>"
-    hs = d["historical"]["stats"]
-    hist = "".join(f"<tr><td>{h}d</td><td>{s['n']}</td><td>{_fmt_pct(s['mean'])}</td><td>{_fmt_pct(s['median'])}</td>"
-                   f"<td>{_rate(s['win_rate'])}</td><td>{_rate(s['spy_beat_rate'])}</td>"
-                   f"<td>{_fmt_pct(s['median_excess'])}</td><td class='{'ok' if s['sufficient'] else 'warn'}'>{'yeterli' if s['sufficient'] else 'yetersiz örneklem'}</td></tr>"
-                   for h, s in hs.items())
+    h = d["historical"]
+    if h.get("probability") is not None:
+        hist = (f"<p>Durum: <b class=ok>{h['status']}</b> · grup: {html.escape(h['group'])} · {h['company_n']} şirket, {h['episodes']} bağımsız dönem</p>"
+                f"<p>Geçmiş başarı oranı (3 ay, S&amp;P 500'ü geçen dönem payı, şirket eşit): <b>{_rate(h['probability'])}</b> "
+                f"(aralık {_rate(h['ci_low'])}–{_rate(h['ci_high'])}; olay bazlı {_rate(h['event_level_rate'])}, "
+                f"sektör eşit {_rate(h['sector_equal_rate'])})</p>")
+    else:
+        hist = (f"<p>Durum: <b class={'warn' if h['status'] == 'PARTIAL' else 'err'}>{h['status']}</b> · grup: {html.escape(h['group'])}</p>"
+                f"<p>Geçmiş başarı oranı: gösterilmiyor. Neden: {html.escape(h.get('blocked_reason') or '')}</p>")
     body = f"""<div class=card><h2>{html.escape(ev['title'])}</h2>
 <p>Type: <b>{ev['event_type']}</b> · Ticker: <b>{ev['ticker'] or '-'}</b> · Company: {html.escape(ev['company_name'] or '-')}</p>
 <p>Public (filing/publication) date: <b>{ev['public_date']}</b> {('· timestamp ' + str(ev['public_at'])) if ev['public_at'] else '(yalnızca tarih - giriş bir sonraki seansın açılışı)'}
  · Transaction date: {ev['transaction_date'] or '-'} · Priority: {ev['priority']} {'· backfill' if ev['is_backfill'] else ''}</p>
 <p>Source: <a href="{html.escape(ev['source_url'])}" target=_blank rel=noopener>{html.escape(ev['source_url'])}</a></p></div>
 <div class=card><h3>Bu eventin getirileri (giriş = public date sonrası ilk açılış)</h3><table><tr><th>Horizon</th><th>Entry</th><th>Exit</th><th>Return</th><th>SPY</th><th>Excess</th><th>MAE</th><th>MFE</th></tr>{rets}</table></div>
-<div class=card><h3>Geçmiş benzer eventler ({ev['event_type']}/{d['historical']['subgroup']})</h3><table><tr><th>H</th><th>N</th><th>Mean</th><th>Median</th><th>Win</th><th>SPY beat</th><th>Median excess</th><th></th></tr>{hist}</table>
-<p class=muted>Geçmiş performans gelecek garantisi değildir.</p></div>
-<div class=card><h3>Payload</h3><pre>{html.escape(json.dumps(ev['payload'], indent=2, ensure_ascii=False))}</pre></div>
-{('<div class=card><h3>Kişi bazlı</h3><pre>' + html.escape(json.dumps(d['person'], indent=2, ensure_ascii=False)) + '</pre></div>') if d['person'] else ''}"""
+<div class=card><h3>Geçmiş benzer durumlar</h3>{hist}</div>
+<div class=card><h3>Payload</h3><pre>{html.escape(json.dumps(ev['payload'], indent=2, ensure_ascii=False))}</pre></div>"""
     return _page(ev["title"], "", body)
 
 
@@ -209,20 +232,30 @@ def sources_page():
 
 @app.get("/stats", response_class=HTMLResponse)
 def stats_page():
-    rows = api_stats()
-    trs = "".join(f"<tr><td>{r['event_type']}</td><td>{r['horizon_days']}d</td><td>{r['n']}</td><td>{_fmt_pct(r['mean'])}</td><td>{_fmt_pct(r['median'])}</td>"
-                  f"<td>{_rate(r['win_rate'])}</td><td>{_rate(r['spy_beat'])}</td>"
-                  f"<td>{_fmt_pct(r['mean_excess'])}</td><td>{_fmt_pct(r['std'])}</td><td>{_fmt_pct(r['mae'])}</td><td>{_fmt_pct(r['mfe'])}</td>"
-                  f"<td class='{'ok' if r['sufficient'] else 'warn'}'>{'yeterli' if r['sufficient'] else 'yetersiz'}</td></tr>" for r in rows)
-    body = ("<p class=muted>Giriş: bilginin kamuya açıldığı an sonrası ilk açılış fiyatı (look-ahead yok). Getiriler split/temettü düzeltmeli. "
-            "Geçmiş performans gelecek garantisi değildir.</p>"
-            f"<table><tr><th>Type</th><th>H</th><th>N</th><th>Mean</th><th>Median</th><th>Win</th><th>SPY beat</th><th>Mean excess</th><th>Std</th><th>MAE</th><th>MFE</th><th>Sample</th></tr>{trs}</table>")
+    rows = gated_stats()
+    cls = {"TRUSTED": "ok", "PARTIAL": "warn", "BLOCKED": "err"}
+
+    def cell(r):
+        if r["status"] == "TRUSTED":
+            return (f"<b>{_rate(r['company_equal_rate'])}</b> <span class=muted>(olay bazlı {_rate(r['event_level_rate'])}, "
+                    f"sektör eşit {_rate(r['sector_equal_rate'])}, medyan fark {_fmt_pct(r['median_excess'])})</span>")
+        if r["status"] == "PARTIAL" and r["bounds"] and r["bounds"][0] is not None:
+            return f"gösterilmiyor — kısmi veri; olası aralık {_rate(r['bounds'][0])}–{_rate(r['bounds'][1])}"
+        return "gösterilmiyor — " + html.escape(r["reason"] or "")
+    trs = "".join(f"<tr><td>{r['event_type']}</td><td>{r['horizon_days']}g</td><td class={cls[r['status']]}>{r['status']}</td>"
+                  f"<td>{r['unique_events']}</td><td>{r['unique_episodes']}</td><td>{r['unique_companies']}</td><td>{r['unique_periods']}</td>"
+                  f"<td>{r['unresolved_episodes']} ({r['unresolved_share'] * 100:.1f}%)</td><td>{cell(r)}</td></tr>" for r in rows)
+    body = ("<p class=muted>Geçmiş başarı oranı (S&amp;P 500'ü geçen bağımsız dönem payı, şirket başına eşit ağırlık) yalnız veri kalitesi "
+            "<b>TRUSTED</b> olduğunda gösterilir. Aynı şirketin 90 gün içindeki olayları tek dönem sayılır; fiyatı olmayan / borsadan çıkmış "
+            "örnekler sessizce atılmaz, çözülemeyen örnek oranı yüksekse metrik kapalı kalır.</p>"
+            f"<table><tr><th>Tür</th><th>Vade</th><th>Durum</th><th>Olay</th><th>Bağımsız dönem</th><th>Şirket</th><th>Çeyrek</th>"
+            f"<th>Çözülemeyen</th><th>Geçmiş başarı oranı</th></tr>{trs}</table>")
     return _page("backtest", "stats", body)
 
 
 # ================================================================== V2: discovery / news / thesis / watchlist
 
-from app.db.models import (company_thesis, discovery_companies, discovery_risks, news_items, news_story_clusters,  # noqa: E402
+from app.db.models import (company_thesis, discovery_companies, discovery_risks, news_story_clusters,  # noqa: E402
                            thesis_changes, watchlist, watchlist_history)
 
 V2_NAV = [("discovery", "Keşif"), ("news", "Haberler"), ("thesis", "Şirket Görüşü"), ("watchlist", "Takip Listesi"),
@@ -413,7 +446,22 @@ def thesis_changes_page():
 
 @app.get("/api/stats/news")
 def api_news_stats():
-    """News event returns by class x market-cap bucket (verified timestamps only)."""
+    """News event quality by class (gated like every other hit rate)."""
+    from app.backtest import quality as Q
+    out = []
+    with get_engine().begin() as conn:
+        classes = [c for (c,) in conn.execute(text("""SELECT DISTINCT jsonb_array_elements_text(payload->'classes') FROM events
+                                                         WHERE event_type = 'MATERIAL_NEWS'""")).all()]
+        for c in classes:
+            st = Q.compute(conn, "MATERIAL_NEWS", c, "e.payload->'classes' ? :cls", {"cls": c}, 90, persist=True)
+            out.append({"class": c, "status": st["status"], "episodes": st["unique_episodes"], "companies": st["company_n"],
+                        "unresolved_share": st["unresolved_share"],
+                        "company_equal_rate": st["company_equal_rate"] if st["status"] == "TRUSTED" else None})
+    return _jsonable(out)
+
+
+def _legacy_news_stats():
+    """(kept for reference, not routed) raw news returns by class x bucket."""
     with get_engine().connect() as conn:
         rows = conn.execute(text("""
             SELECT c.cls, coalesce(e.payload->>'mcap_bucket', 'UNKNOWN') bucket, r.horizon_days, count(*) n,
@@ -425,3 +473,53 @@ def api_news_stats():
             GROUP BY 1, 2, 3 ORDER BY 1, 2, 3""")).mappings().all()
     from app.config import settings as _s
     return _jsonable([dict(r) | {"sufficient": r["n"] >= _s.min_sample_size} for r in rows])
+
+
+# ================================================================== data quality
+
+@app.get("/api/data-quality")
+def api_data_quality():
+    from app.integrity.quality_report import overview
+    with get_engine().connect() as conn:
+        return _jsonable(overview(conn))
+
+
+def _tbl(rows: list[dict]) -> str:
+    if not rows:
+        return "<p class=muted>veri yok</p>"
+    cols = list(rows[0].keys())
+    head = "".join(f"<th>{html.escape(str(c))}</th>" for c in cols)
+    body = "".join("<tr>" + "".join(f"<td>{html.escape(str(r[c]) if r[c] is not None else '')}</td>" for c in cols) + "</tr>" for r in rows)
+    return f"<table><tr>{head}</tr>{body}</table>"
+
+
+@app.get("/data-quality", response_class=HTMLResponse)
+def data_quality_page():
+    d = api_data_quality()
+    r, t, n = d["returns"], d["tickers"], d["news"]
+    body = [
+        "<p class=muted>Sistemin ne kadarına güvenebileceğimizi gösterir. Hiçbir sorunlu örnek sessizce atılmaz; "
+        "geçmiş başarı oranları yalnız TRUSTED olduğunda görünür.</p>",
+        "<h3>Geçmiş fiyatlar</h3>", f"<p>Olgun olay: <b>{r['mature_events']}</b> · delist terminal çıkışlı olay: {r['delisting_terminal_exits']}</p>",
+        "<div class=card><b>Getiri durumu</b>", _tbl(r["by_status"]), "</div>",
+        "<div class=card><b>Fiyatı olmayan olaylar — neden</b>", _tbl(r["missing_by_reason"]), "</div>",
+        "<div class=card><b>Fiyat serisi kimliği (point-in-time doğrulama)</b>", _tbl(r["price_identity"]), "</div>",
+        "<h3>Borsadan çıkmış şirketler</h3>", _tbl(d["delisted"]["master_status"]), _tbl(d["delisted"]["delisting_reasons"]),
+        "<div class=card><b>Delist şirketlerin olayları</b>", _tbl(d["delisted"]["events_of_delisted_issuers"]), "</div>",
+        "<h3>Ticker çözümleme</h3>", _tbl(t["unresolved"]),
+        f"<p>Security master: {t['security_master_ciks']} CIK · sembol geçmişi {t['symbol_history_rows']} satır / {t['symbol_history_ciks']} CIK "
+        f"· listeleme dönemi {t['listing_periods']}</p>", _tbl(t["corporate_actions"]),
+        "<h3>Haber zaman damgası güveni</h3>", _tbl(n["timestamp_confidence"]),
+        f"<p>{n['items']} haber kopyası → {n['stories']} hikâye · birleştirilen kopya: {n['syndicated_copies_merged']}</p>",
+        _tbl(n["backfill_universe"]),
+        "<h3>Devlet sözleşmesi ana şirket eşleştirmesi</h3>", _tbl(d["government"]["mapping_confidence"]),
+        "<h3>Geçmiş başarı oranı kapıları</h3>", _tbl(d["hit_rates"]["by_status"]), _tbl(d["hit_rates"]["metrics"]),
+        "<h3>Tekrar bastırma</h3>", _tbl(d["duplicates"]["superseded_events"]), _tbl(d["duplicates"]["cleanup_runs"]),
+        "<h3>Form 4 sahip çözümleme</h3>", _tbl(d["insiders"]["attribution"]),
+        f"<p>Çok sahipli bildirim: {d['insiders']['multi_owner_filings']}</p>", _tbl(d["insiders"]["beneficial_links"]),
+        "<h3>Kongre</h3><p>Kapsam: <b>HOUSE_ONLY</b> — Senato: <b>SENATE_UNAVAILABLE</b></p>",
+        "<h3>OGE</h3>", _tbl(d["oge"]["documents"]), _tbl(d["oge"]["transactions"]),
+        "<h3>Walk-forward (yalnız test dönemi sonuçları)</h3>", _tbl(d["walkforward"]),
+        "<h3>Keşif doğrulama veri seti</h3>", _tbl(d["discovery_validation"]),
+    ]
+    return _page("data quality", "data-quality", "".join(body))

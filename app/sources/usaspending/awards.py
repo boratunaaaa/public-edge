@@ -56,6 +56,42 @@ def parent_name(gid: str) -> str | None:
     return rec.get("parent_recipient_name")
 
 
+MAPPING_RANK = {"VERIFIED": 4, "HIGH_CONFIDENCE": 3, "MEDIUM": 2, "LOW": 1}
+
+
+def map_recipient(name: str, parent: str | None, *, manual: dict[str, str] | None = None) -> tuple[str | None, str | None, str]:
+    """(ticker, confidence, source) for an award recipient -> listed parent.
+
+    VERIFIED        curated alias (entity_aliases) or recipient AND USAspending parent both resolve
+                    to the same SEC registrant
+    HIGH_CONFIDENCE the recipient's own name is exactly (normalized) one SEC registrant
+    MEDIUM          only USAspending's parent-recipient name resolves (subsidiary -> parent)
+    LOW             anything weaker - stored for research, never a high-priority alert"""
+    manual = manual or {}
+    norm_name = (name or "").strip().upper()
+    if norm_name in manual:
+        return manual[norm_name], "VERIFIED", "entity_aliases (curated)"
+    t_name = resolver.ticker_for_name(name)
+    t_parent = resolver.ticker_for_name(parent) if parent and parent.strip().upper() != norm_name else None
+    if t_name and t_parent and t_name == t_parent:
+        return t_name, "VERIFIED", "recipient name + USAspending parent -> same SEC registrant"
+    if t_name:
+        return t_name, "HIGH_CONFIDENCE", "recipient name = SEC registrant name (exact, unique)"
+    if t_parent:
+        return t_parent, "MEDIUM", "USAspending parent_recipient_name = SEC registrant name"
+    if parent:
+        return None, "LOW", "parent name did not resolve uniquely"
+    return None, None, "unmapped"
+
+
+def _manual_aliases(conn: Connection) -> dict[str, str]:
+    from sqlalchemy import select
+    from app.db.models import entity_aliases
+    rows = conn.execute(select(entity_aliases.c.alias_norm, entity_aliases.c.ticker).where(
+        entity_aliases.c.category == "GOV_RECIPIENT", entity_aliases.c.ticker.isnot(None))).all()
+    return {a.upper(): t for a, t in rows}
+
+
 def process_award(conn: Connection, a: dict, *, is_backfill: bool, first_seen: date) -> list[int]:
     gid = a.get("generated_internal_id")
     amount = float(a.get("Award Amount") or 0)
@@ -63,12 +99,13 @@ def process_award(conn: Connection, a: dict, *, is_backfill: bool, first_seen: d
         return []
     award_date = to_date(a.get("Base Obligation Date")) or to_date(a.get("Start Date"))
     name = a.get("Recipient Name") or ""
-    ticker = resolver.ticker_for_name(name)
+    manual = _manual_aliases(conn)
+    ticker, mconf, msrc = map_recipient(name, None, manual=manual)
     parent = None
-    if not ticker and amount >= PARENT_LOOKUP_MIN:
-        parent = parent_name(gid)
-        if parent and parent.strip().upper() != name.strip().upper():
-            ticker = resolver.ticker_for_name(parent)
+    if amount >= PARENT_LOOKUP_MIN and mconf != "VERIFIED":
+        parent = parent_name(gid)  # also upgrades HIGH_CONFIDENCE to VERIFIED when both agree
+        if parent:
+            ticker, mconf, msrc = map_recipient(name, parent, manual=manual)
     # Live: the documented date is the day this system first saw the record, with the amount
     # shown on that day. Backfill: USAspending exposes neither the original publication date nor
     # the amount known back then -> the date is ESTIMATED and kept out of verified stats/multi-signal.
@@ -91,26 +128,31 @@ def process_award(conn: Connection, a: dict, *, is_backfill: bool, first_seen: d
     level = P.contract_level(ratio)
     url = PUBLIC_URL.format(gid=gid)
     cid = resolver.ticker_to_cik.get(ticker) if ticker else None
+    prio = P.contract_priority(ratio) if ratio is not None else 0
+    if mconf in ("MEDIUM", "LOW"):
+        # subsidiary -> parent attribution is not verified: research only, below the alert threshold
+        prio = min(prio, 3)
     insert_rows(conn, government_awards, [{
         "award_key": gid, "award_id": a.get("Award ID"), "recipient_name": name, "recipient_uei": a.get("Recipient UEI"),
         "parent_name": parent, "amount": amount, "award_date": award_date, "start_date": to_date(a.get("Start Date")),
         "end_date": to_date(a.get("End Date")), "agency": a.get("Awarding Agency"), "subagency": a.get("Awarding Sub Agency"),
         "description": (a.get("Description") or "")[:4000], "ticker": ticker, "market_cap": mcap, "value_to_mcap": ratio,
         "mcap_level": level, "first_seen_date": first_seen, "public_date_basis": basis, "amount_basis": amount_basis,
-        "source_url": url,
+        "recipient_cik": cid, "mapping_confidence": mconf, "mapping_source": msrc, "source_url": url,
     }], ["award_key"])  # first observation wins: later amount changes never rewrite history
     created = []
     if ticker and ratio is not None and ratio >= EVENT_MIN_RATIO:
         eid = create_event(
             conn, event_type="GOV_CONTRACT", dedupe_key=f"AWARD:{gid}", public_date=public_date, transaction_date=award_date,
             ticker=ticker, company_name=resolver.cik_to_name.get(cid or "", name), issuer_cik=cid,
-            priority=P.contract_priority(ratio),
+            priority=prio,
             title=f"{_money(amount)} federal contract to {name} (${ticker}) = {ratio * 100:.1f}% of market cap",
             payload={"recipient": name, "parent": parent, "amount": amount, "award_date": award_date,
                      "agency": a.get("Awarding Agency"), "subagency": a.get("Awarding Sub Agency"),
                      "description": (a.get("Description") or "")[:500], "period": [a.get("Start Date"), a.get("End Date")],
                      "market_cap": mcap, "value_to_mcap": ratio, "level": level, "award_id": a.get("Award ID"),
-                     "public_date_basis": basis, "amount_basis": amount_basis},
+                     "public_date_basis": basis, "amount_basis": amount_basis,
+                     "mapping_confidence": mconf, "mapping_source": msrc},
             source_url=url, is_backfill=is_backfill, date_quality=date_quality,
         )
         if eid:

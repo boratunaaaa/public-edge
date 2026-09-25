@@ -25,12 +25,54 @@ RISK_PENALTY = {("GOING_CONCERN", "HIGH"): 3.0, ("DILUTION", "HIGH"): 2.0, ("DIL
                 ("PROMOTIONAL_PR", "MEDIUM"): 1.0, ("HIGH_SBC", "MEDIUM"): 0.5, ("NEGATIVE_WORKING_CAPITAL", "MEDIUM"): 0.5}
 
 
+BINDING_AGREEMENTS = {"production_agreement", "paid_contract"}
+SHIPMENT_LABELS = {"FIRST_COMMERCIAL_PRODUCTION", "COMMERCIAL_SCALE", "MASS_PRODUCTION", "PRODUCTION_RAMP"}
+HYPE_RE = None  # compiled lazily (see hype_count)
+
+
+def hype_count(texts: list[str]) -> int:
+    """Speculative TAM / promotional wording - context, never evidence."""
+    import re
+    global HYPE_RE
+    if HYPE_RE is None:
+        HYPE_RE = re.compile(r"\b(total addressable market|\btam\b|multi-?billion[- ]dollar (market|opportunity)|"
+                             r"revolution(ary|i[sz]e)|game[- ]chang|disruptive|paradigm shift|massive opportunity|"
+                             r"trillion[- ]dollar)", re.I)
+    return sum(1 for t in texts if HYPE_RE.search(t or ""))
+
+
+def strong_evidence(f: dict, relations: list[dict], signal_labels: list[str]) -> list[str]:
+    """Real-world evidence that can carry a HIGH label. PR wording, themes and keyword matches are
+    deliberately absent from this list."""
+    ev = []
+    rev = f.get("ttm_revenue") or 0
+    if rev >= 5e6 and f.get("stage") in ("EARLY_COMMERCIAL", "PRODUCTION_RAMP", "MASS_PRODUCTION"):
+        ev.append("COMMERCIAL_REVENUE")
+    if any(r.get("agreement") in BINDING_AGREEMENTS and not r.get("hedged") and r.get("relation") not in ("competitor", "supplier")
+           for r in relations):
+        ev.append("BINDING_CONTRACT")
+    if f.get("stage") == "CUSTOMER_QUALIFICATION" and ("QUALIFICATION" in signal_labels or "DESIGN_WIN" in signal_labels):
+        ev.append("CUSTOMER_QUALIFICATION")
+    if f.get("stage") == "PRODUCTION_RAMP" and rev > 0:
+        ev.append("PRODUCTION_RAMP")
+    if (f.get("gov_contract_to_mcap") or 0) >= 0.02:
+        ev.append("GOVERNMENT_AWARD")
+    if f.get("major_customer_count"):
+        ev.append("MAJOR_CUSTOMER")
+    if set(signal_labels) & SHIPMENT_LABELS and rev > 0:
+        ev.append("REAL_SHIPMENT")
+    if f.get("insider_buyers_90d", 0) >= 2 or f.get("insider_buy_value_90d", 0) >= 250_000:
+        ev.append("STRONG_INSIDER_BUY")
+    return ev
+
+
 def features(*, market_cap: float | None, metrics: dict, stage: str | None, stage_prev: str | None,
              relations: list[dict], signal_labels: list[str], insider: dict, activist_13d: bool,
-             gov_contract_ratio: float | None, risks: list[dict], themes: list[str] | None = None) -> dict:
+             gov_contract_ratio: float | None, risks: list[dict], themes: list[str] | None = None,
+             texts: list[str] | None = None, financing: tuple[float | None, list[str]] | None = None) -> dict:
     strong_customers = [r for r in relations if r["category"] in MAJOR_CATEGORIES and r["strength"] >= 0.6 and not r["hedged"]
                         and r.get("relation") not in ("competitor", "supplier")]
-    return {
+    f = {
         "market_cap": market_cap,
         "in_priority_band": bool(market_cap and 100e6 <= market_cap <= 2e9),
         "revenue_yoy": metrics.get("yoy_latest"),
@@ -53,7 +95,12 @@ def features(*, market_cap: float | None, metrics: dict, stage: str | None, stag
         "positive_ocf": (metrics.get("annual_ocf") or 0) > 0,
         "risks": [f"{r['risk']}:{r['severity']}" for r in risks],
         "themes": themes or [],
+        "hype_sentences": hype_count(texts or []),
+        "financing_risk_score": (financing or (None, []))[0],
+        "financing_flags": (financing or (None, []))[1],
     }
+    f["strong_evidence"] = strong_evidence(f, relations, signal_labels)
+    return f
 
 
 def _rank(stage: str | None) -> int:
@@ -116,14 +163,19 @@ def score(f: dict) -> tuple[float, str, list[str]]:
     for rk in f.get("risks") or []:
         risk, sev = rk.split(":")
         s -= RISK_PENALTY.get((risk, sev), 0.0)
+    if (f.get("hype_sentences") or 0) >= 5 and not f.get("strong_evidence"):
+        s -= 1.0
+        why.append("tanıtım dili yoğun, somut kanıt az")
     level = "HIGH" if s >= 6 else "MEDIUM" if s >= 3.5 else "LOW"
-    # HIGH interest needs business evidence of the kind this engine looks for (a technology theme, a
-    # validated customer or a bottleneck position) - revenue growth alone (shipping, miners...) is not enough
-    if level == "HIGH" and not has_business_evidence(f):
+    # HIGH interest needs business evidence of the kind this engine looks for AND at least one piece of
+    # real-world evidence (revenue, binding contract, qualification, ramp, award, major customer,
+    # shipment, strong insider buying) - wording, themes or TAM claims alone can never make HIGH
+    if level == "HIGH" and (not has_business_evidence(f) or not f.get("strong_evidence")):
         level = "MEDIUM"
     if level == "HIGH" and ((f.get("market_cap") or 0) >= 10e9 or f.get("stage") == "SCALED"):
         level = "MEDIUM"  # already scaled operating businesses are not early discoveries
-    high_risks = {rk.split(":", 1)[0] for rk in (f.get("risks") or []) if rk.endswith(":HIGH")}
+    # HIGH_FINANCING_RISK summarizes the other financing rows - not counted twice
+    high_risks = {rk.split(":", 1)[0] for rk in (f.get("risks") or []) if rk.endswith(":HIGH")} - {"HIGH_FINANCING_RISK"}
     if level == "HIGH" and (len(high_risks) >= 2 or "GOING_CONCERN" in high_risks):
         level = "MEDIUM"  # severe financing/distress risk cannot carry a HIGH-interest label
     return round(s, 2), level, why

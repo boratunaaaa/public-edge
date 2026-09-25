@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine
 
@@ -13,6 +13,7 @@ from app.db.models import (activist_filings, discovery_companies, discovery_evid
 from app.db.store import create_event, job_state, save_job_state
 from app.discovery import language as L
 from app.discovery import metrics as M
+from app.discovery import financing as F
 from app.discovery import risks as R
 from app.discovery import scoring as S
 from app.discovery.evidence import collect, universe_ciks
@@ -45,12 +46,16 @@ def _relations(conn: Connection, cik: str) -> tuple[list[dict], list[str], list[
 
 
 def _insider(conn: Connection, cik: str) -> dict:
+    """Discretionary open-market buying in 90 days; buyers = independent beneficial owners."""
+    from app.signals.owners import independent_owner_count, owner_key
     since = date.today() - timedelta(days=90)
-    row = conn.execute(select(func.coalesce(func.sum(insider_transactions.c.value), 0),
-                              func.count(func.distinct(insider_transactions.c.owner_cik))).where(and_(
+    rows = conn.execute(select(insider_transactions.c.value, insider_transactions.c.owner_cik, insider_transactions.c.owner_name,
+                               insider_transactions.c.joint_owner_ciks).where(and_(
         insider_transactions.c.issuer_cik == cik, insider_transactions.c.category == "OPEN_MARKET_BUY",
-        insider_transactions.c.is_10b5_1.is_(False), insider_transactions.c.filed_date >= since))).first()
-    return {"buy_value": float(row[0] or 0), "buyers": int(row[1] or 0)}
+        insider_transactions.c.is_derivative.is_(False), insider_transactions.c.is_10b5_1.is_(False),
+        insider_transactions.c.filed_date >= since))).all()
+    keys = {owner_key(o, n, j) for _v, o, n, j in rows}
+    return {"buy_value": float(sum(float(v or 0) for v, *_ in rows)), "buyers": independent_owner_count(conn, keys)}
 
 
 def evaluate(conn: Connection, u: dict, *, is_backfill: bool) -> dict:
@@ -61,6 +66,7 @@ def evaluate(conn: Connection, u: dict, *, is_backfill: bool) -> dict:
                     s("CurrentAssets"), s("CurrentLiabilities"), s("Shares")).as_dict()
     rels, labels, texts = _relations(conn, cik)
     R.derived_risks(conn, cik, ticker, metrics=met, price=u.get("price"), market_cap=u.get("market_cap"), adv=u.get("adv_dollar_30d"))
+    fin = F.assess(conn, cik, u.get("market_cap"), met, R.risks_for(conn, cik))
     risks = R.risks_for(conn, cik)
     stage, stage_reasons = L.classify_stage(labels, met.get("ttm_revenue"), met.get("yoy_latest"))
     prev = conn.execute(select(discovery_companies.c.stage, discovery_companies.c.interest_level)
@@ -70,11 +76,13 @@ def evaluate(conn: Connection, u: dict, *, is_backfill: bool) -> dict:
         activist_filings.c.filed_date >= date.today() - timedelta(days=180)))).scalar()
     gov = conn.execute(select(func.max(government_awards.c.value_to_mcap)).where(and_(
         government_awards.c.ticker == ticker, government_awards.c.public_date_basis == "first_seen",
+        or_(government_awards.c.mapping_confidence.is_(None),
+            government_awards.c.mapping_confidence.in_(["VERIFIED", "HIGH_CONFIDENCE"])),
         government_awards.c.award_date >= date.today() - timedelta(days=365)))).scalar()
     themes = L.themes_in(" ".join(texts[:400]) + " " + (u.get("name") or ""))
     feats = S.features(market_cap=u.get("market_cap"), metrics=met, stage=stage, stage_prev=prev[0] if prev else None,
                        relations=rels, signal_labels=labels, insider=_insider(conn, cik), activist_13d=bool(act),
-                       gov_contract_ratio=gov, risks=risks, themes=themes)
+                       gov_contract_ratio=gov, risks=risks, themes=themes, texts=texts[:400], financing=fin)
     feats["stage_reasons"] = stage_reasons
     sc, level, why = S.score(feats)
     candidate = S.has_real_progress(feats)
@@ -83,7 +91,7 @@ def evaluate(conn: Connection, u: dict, *, is_backfill: bool) -> dict:
     vals = dict(ticker=ticker, name=u.get("name"), market_cap=u.get("market_cap"), bucket=u.get("bucket"), themes=themes,
                 stage=stage, interest_score=sc, interest_level=level, features=_jsonable(feats),
                 customers=[{"counterparty": c, "category": k, "agreement": a} for c, k, a in customers], metrics=_jsonable(met),
-                last_scanned_at=now)
+                financing_risk_score=fin[0], financing_flags=fin[1], last_scanned_at=now)
     st = pg_insert(discovery_companies).values(cik=cik, first_discovered_at=now if candidate else None, **vals)
     conn.execute(st.on_conflict_do_update(index_elements=["cik"], set_={
         **vals, "first_discovered_at": func.coalesce(discovery_companies.c.first_discovered_at, st.excluded.first_discovered_at)}))
@@ -203,6 +211,11 @@ def run_discovery(engine: Engine, *, full: bool) -> dict:
         log.info("discovery: fundamentals %s", out["fundamentals"].get("rows"))
         out["risks"] = R.scan_text_risks(engine, {c for c, u in uni.items() if (u["market_cap"] or 0) < 10e9})
         log.info("discovery: risks %s", out["risks"])
+    # SEC submissions (S-3 / 424B / 8-K 3.01 / 3.02 ...) for sub-$1B companies -> financing risk
+    from app.securitymaster.build import refresh_submissions
+    with engine.connect() as conn:
+        small = universe_ciks(conn, lo=50e6, hi=1e9)
+    out["submissions"] = refresh_submissions(engine, list(small), max_n=800)
     out["evidence"] = collect(engine, max_docs=1500 if first else 600)
     log.info("discovery: evidence %s", out["evidence"])
     out["evaluation"] = evaluate_all(engine, is_backfill=first)

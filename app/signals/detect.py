@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection
@@ -12,6 +12,7 @@ from app.db.models import events, insider_transactions
 from app.db.store import create_event
 from app.signals import priority as P
 from app.signals.insider_type import classify as insider_classify, holdings_increase, owner_history
+from app.signals.owners import beneficial_roots, owner_key
 
 CLUSTER_WINDOWS = (7, 14, 30)
 MULTI_WINDOW_DAYS = 30
@@ -46,17 +47,34 @@ def role_label(is_ceo: bool, is_cfo: bool, is_director: bool, is_ten_pct: bool, 
 
 # ---------------- insider open-market buys ----------------
 
+def _person_cik_for_joint(conn: Connection, accession: str) -> str | None:
+    """The single natural person among the joint filers (whose trading calendar is classified)."""
+    from app.db.models import insider_filing_owners as ifo
+    rows = conn.execute(select(ifo.c.owner_cik, ifo.c.is_entity).where(ifo.c.accession == accession)).all()
+    persons = [c for c, ent in rows if not ent]
+    return persons[0] if len(persons) == 1 else None
+
+
+def purchase_groups(conn: Connection, rows) -> dict[str, list]:
+    """Buy rows of one filing grouped by BENEFICIAL owner: jointly reported rows, rows attributed to a
+    filer and rows of that filer's trusts/vehicles are one economic purchase -> one event."""
+    keys = {owner_key(r["owner_cik"], r["owner_name"], r.get("joint_owner_ciks")) for r in rows}
+    roots = beneficial_roots(conn, keys) if keys else {}
+    out: dict[str, list] = defaultdict(list)
+    for r in rows:
+        out[roots[owner_key(r["owner_cik"], r["owner_name"], r.get("joint_owner_ciks"))]].append(r)
+    return out
+
+
 def insider_buy_events(conn: Connection, accession: str, is_backfill: bool = False) -> list[int]:
     rows = conn.execute(select(insider_transactions).where(
         insider_transactions.c.accession == accession,
         insider_transactions.c.category == "OPEN_MARKET_BUY",
         insider_transactions.c.is_derivative.is_(False),
     )).mappings().all()
-    by_owner: dict[str, list] = defaultdict(list)
-    for r in rows:
-        by_owner[r["owner_cik"] or r["owner_name"]].append(r)
+    by_owner = purchase_groups(conn, rows)
     created = []
-    for owner_key, txs in by_owner.items():
+    for okey, txs in by_owner.items():
         r0 = txs[0]
         if not r0["ticker"]:
             continue
@@ -68,8 +86,10 @@ def insider_buy_events(conn: Connection, accession: str, is_backfill: bool = Fal
         prio = P.insider_buy_priority(is_ceo=r0["is_ceo"], is_cfo=r0["is_cfo"], is_director=r0["is_director"],
                                       value=value, is_10b5_1=is_plan)
         tdates0 = sorted(t["trans_date"] for t in txs if t["trans_date"])
-        itype = insider_classify(owner_history(conn, r0["owner_cik"], tdates0[0]), tdates0[0]) \
-            if (r0["owner_cik"] and tdates0) else "unclassified"
+        person = r0["owner_cik"] or (_person_cik_for_joint(conn, accession) if r0.get("joint_owner_ciks") else None)
+        # point-in-time: only trades FILED before this filing count as the insider's known history
+        itype = insider_classify(owner_history(conn, person, tdates0[0], filed_before=r0["filed_date"]), tdates0[0]) \
+            if (person and tdates0) else "unclassified"
         prio += {"opportunistic": 1, "routine": -1}.get(itype, 0)  # CMP-inspired heuristic
         inc = holdings_increase(shares, float(txs[-1]["shares_after"]) if txs[-1]["shares_after"] is not None else None)
         role = role_label(r0["is_ceo"], r0["is_cfo"], r0["is_director"], r0["is_ten_pct"], r0["officer_title"])
@@ -82,13 +102,16 @@ def insider_buy_events(conn: Connection, accession: str, is_backfill: bool = Fal
             "n_transactions": len(txs), "transaction_dates": [str(d) for d in tdates], "is_10b5_1": is_plan,
             "insider_type": itype, "holdings_increase": inc,
             "insider_type_method": "cmp_inspired_point_in_time_heuristic",
+            "owner_attribution": r0.get("owner_attribution") or "single",
+            "joint_owner_ciks": r0.get("joint_owner_ciks"),
+            "direct_indirect": sorted({t["direct_indirect"] for t in txs if t.get("direct_indirect")}),
             "flags": [f for f, ok in (("CEO_BUY", r0["is_ceo"]), ("CFO_BUY", r0["is_cfo"]),
                                       ("DIRECTOR_BUY", r0["is_director"]), ("GT_100K", value > 100_000),
                                       ("GT_500K", value > 500_000), ("GT_1M", value > 1_000_000)) if ok],
             "accession": accession,
         }
         eid = create_event(
-            conn, event_type="INSIDER_OPEN_MARKET_BUY", dedupe_key=f"IOMB:{accession}:{owner_key}",
+            conn, event_type="INSIDER_OPEN_MARKET_BUY", dedupe_key=f"IOMB:{accession}:{okey}",
             public_date=r0["filed_date"], public_at=r0["accepted_at"], transaction_date=tdates[0] if tdates else None,
             ticker=r0["ticker"], company_name=r0["issuer_name"], issuer_cik=r0["issuer_cik"], priority=prio,
             title=f"{role} {r0['owner_name']} bought {_money(value)} of ${r0['ticker']}",
@@ -153,12 +176,17 @@ def cluster_events_for_issuer(conn: Connection, issuer_cik: str, anchor: date, i
     agg: dict[tuple, Buy] = {}
     ticker = next((r["ticker"] for r in rows if r["ticker"]), None)
     name = rows[0]["issuer_name"]
+    # trusts / LLCs / funds of the same economic owner are ONE buyer (beneficial-owner graph)
+    keys = {owner_key(r["owner_cik"], r["owner_name"], r.get("joint_owner_ciks")) for r in rows}
+    roots = beneficial_roots(conn, keys)
+    reporting_owners = len(keys)
     for r in rows:
-        key = (r["owner_cik"] or r["owner_name"], r["filed_date"])
+        root = roots[owner_key(r["owner_cik"], r["owner_name"], r.get("joint_owner_ciks"))]
+        key = (root, r["filed_date"])
         b = agg.get(key)
         v = float(r["value"] or 0)
         if b is None:
-            agg[key] = Buy(r["filed_date"], r["owner_cik"] or r["owner_name"], r["owner_name"], v, r["is_ceo"], r["is_cfo"],
+            agg[key] = Buy(r["filed_date"], root, r["owner_name"], v, r["is_ceo"], r["is_cfo"],
                            r["is_director"], role_label(r["is_ceo"], r["is_cfo"], r["is_director"], r["is_ten_pct"], r["officer_title"]),
                            r["source_url"])
         else:
@@ -178,6 +206,7 @@ def cluster_events_for_issuer(conn: Connection, issuer_cik: str, anchor: date, i
         directors = sum(1 for p in per_owner.values() if p["is_director"] and not (p["is_ceo"] or p["is_cfo"]))
         payload = {
             "window_days": c.window, "number_of_buyers": c.n_buyers, "aggregate_value": round(aggregate, 2),
+            "independent_beneficial_owners": c.n_buyers, "reporting_owners_in_window": reporting_owners,
             "CEO_present": ceo, "CFO_present": cfo, "directors_count": directors,
             "span_days": (c.end - c.start).days + 1,
             "buyers": sorted(per_owner.values(), key=lambda p: -p["value"]),
@@ -210,7 +239,8 @@ def signal_family(event_type: str, payload: dict) -> str | None:
         return "INSIDER_CLUSTER"
     if event_type == "ACTIVIST_13D":
         return "ACTIVIST_13D"
-    if event_type == "GOV_CONTRACT" and (payload.get("value_to_mcap") or 0) >= 0.02:
+    if event_type == "GOV_CONTRACT" and (payload.get("value_to_mcap") or 0) >= 0.02 \
+            and payload.get("mapping_confidence") not in ("MEDIUM", "LOW"):  # unverified subsidiary mapping
         return "GOV_CONTRACT"
     if event_type in ("CONGRESS_BUY", "CONGRESS_CLUSTER_BUY"):
         return "CONGRESS_BUY"
@@ -236,7 +266,7 @@ def multi_signal_check(conn: Connection, ticker: str | None, public_date: date, 
     rows = conn.execute(select(events.c.id, events.c.event_type, events.c.payload, events.c.public_date, events.c.priority,
                                events.c.company_name, events.c.issuer_cik, events.c.source_url)
                         .where(and_(events.c.ticker == ticker, events.c.public_date >= lo, events.c.public_date <= public_date,
-                                    events.c.event_type != "MULTI_SIGNAL_EVENT",
+                                    events.c.event_type != "MULTI_SIGNAL_EVENT", events.c.superseded.is_(False),
                                     events.c.date_quality != "estimated"))  # inferred dates never combine
                         .order_by(events.c.public_date)).mappings().all()
     fam: dict[str, list] = defaultdict(list)
@@ -253,7 +283,7 @@ def multi_signal_check(conn: Connection, ticker: str | None, public_date: date, 
     # One rolling episode per independent source-group combination.  Family growth inside the
     # same evidence episode (CEO + CFO + cluster) must not emit repeated multi-signal alerts.
     prior = conn.execute(select(events.c.id, events.c.payload).where(and_(
-        events.c.ticker == ticker, events.c.event_type == "MULTI_SIGNAL_EVENT",
+        events.c.ticker == ticker, events.c.event_type == "MULTI_SIGNAL_EVENT", events.c.superseded.is_(False),
         events.c.public_date >= lo, events.c.public_date <= public_date,
     )).order_by(events.c.public_date.desc())).mappings().all()
     if any(sorted((r["payload"] or {}).get("source_groups") or []) == groups for r in prior):

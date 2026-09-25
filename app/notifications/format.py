@@ -2,8 +2,8 @@
 
 Every alert answers four questions in the same order:
   📌 Ne oldu?   💡 Neden önemli?   📊 Geçmişte benzer durumlarda ne oldu?   ⚠️ Nelere dikkat?
-The historical hit rate comes from this system's own no-look-ahead backtest.  It is descriptive
-research context, never an investment score or recommendation.
+The historical hit rate comes from this system's own no-look-ahead backtest and is shown only when
+the data-quality gate (app.backtest.quality) marks it TRUSTED; otherwise the message says why not.
 """
 from __future__ import annotations
 
@@ -150,47 +150,38 @@ def verdict(rate, risks: list[dict]) -> tuple[str, str]:
         return "🔴", "RİSKLİ — şirkette birden fazla ciddi uyarı var, çok dikkatli olunmalı"
     if high:
         return "🟠", "CİDDİ RİSK VAR — ayrıntılı inceleme gerekli"
-    return "⚪", "ARAŞTIRMA SİNYALİ — geçmiş oranı yatırım kararı skoru değildir"
+    return "⚪", "kayıtlı ciddi risk yok"
 
 
 def history_block(rate) -> list[str]:
+    """Measured historical frequency, shown ONLY when the data-quality gate says TRUSTED; otherwise a
+    short reason (never a silently optimistic number)."""
     if rate is None:
-        return ["📊 <b>Geçmişte ne oldu?</b>", "Henüz hesaplanmadı."]
+        return ["📊 <b>Geçmiş başarı oranı:</b> henüz hesaplanmadı"]
     if not rate.available:
-        if getattr(rate, "affected_samples", 0):
-            return ["📊 <b>GEÇMİŞ BAŞARI ORANI</b>",
-                    "Gösterilmiyor: fiyatı veya karşılaştırma verisi eksik olgun örnekler var "
-                    f"({rate.affected_samples} adet). Bu örnekleri dışlamak sonucu yapay biçimde yükseltebilir."]
-        return ["📊 <b>Geçmişte ne oldu?</b>",
-                f"Bu tür olay için yeterli bağımsız şirket örneği yok ({getattr(rate, 'company_n', 0)} şirket, "
-                f"{rate.n} olay). Güvenilir bir yüzde veremiyoruz."]
+        why = (getattr(rate, "blocked_reason", None) or "veri kalitesi eşiği sağlanmadı.").strip()
+        return ["📊 <b>Geçmiş başarı oranı:</b> gösterilmiyor", f"Neden: {e(why[:1].upper() + why[1:])}"]
     months = {30: "1 ay", 90: "3 ay", 180: "6 ay"}.get(rate.horizon_days, f"{rate.horizon_days} gün")
-    out = ["📊 <b>GEÇMİŞ BAŞARI ORANI</b>",
-           f"Geçmiş örneklem: {rate.n} olay / {getattr(rate, 'company_n', rate.n)} farklı şirket",
-           f"Şirket başına eşit ağırlıkla, hissenin {months} içinde borsa ortalamasını (S&amp;P 500) geçme oranı: "
-           f"<b>%{rate.probability * 100:.0f}</b>"
-           f"  <i>(karşılaştırma grubu: {e(rate.group)})</i>"]
+    out = [f"📊 <b>Geçmiş başarı oranı: %{rate.probability * 100:.0f}</b>",
+           f"Benzer durumlarda hisse {months} içinde borsa ortalamasını (S&amp;P 500) bu oranda geçti "
+           f"(her şirket eşit ağırlıkta; {getattr(rate, 'company_n', 0)} şirket, {getattr(rate, 'episodes', rate.n)} ayrı dönem; "
+           f"grup: {e(rate.group)})."]
     if getattr(rate, "ci_low", None) is not None:
-        out.append(f"Yaklaşık %95 güven aralığı: %{rate.ci_low * 100:.0f}–%{rate.ci_high * 100:.0f}")
+        out.append(f"Olası aralık: %{rate.ci_low * 100:.0f}–%{rate.ci_high * 100:.0f}")
     if rate.median_excess is not None:
         out.append(f"Tipik fark: borsa ortalamasına göre {pct(rate.median_excess)}")
     if rate.typical_drawdown is not None and rate.typical_drawdown < 0:
-        out.append(f"Bu süreçte arada tipik düşüş: {pct(rate.typical_drawdown, sign=False)} — bu kadar düşüş bu tür "
-                   "hisselerde normal görülmüş, tek başına panik sebebi değil.")
-    if rate.best_horizon:
-        span = {30: "1 ay", 90: "3 ay", 180: "6 ay"}.get(rate.best_horizon, f"{rate.best_horizon} gün")
-        out.append(f"Geçmişte en iyi sonuç genelde ~{span} tutunca alınmış.")
+        out.append(f"Bu süreçte arada tipik düşüş: {pct(rate.typical_drawdown, sign=False)}")
     return out
 
 
 def hit_rate_line(rate) -> str:
     if rate is None or not rate.available:
-        return "📐 <b>Historical hit rate:</b> gösterilmiyor"
-    return f"📐 <b>Historical hit rate: %{rate.probability * 100:.0f}</b> — yatırım kararı skoru değildir"
+        return "📊 Geçmiş başarı oranı: gösterilmiyor"
+    return f"📊 Geçmiş başarı oranı: %{rate.probability * 100:.0f}"
 
 
-# Compatibility for callers outside the formatter; wording is intentionally no longer a score.
-score_line = hit_rate_line
+score_line = hit_rate_line  # old name kept for external callers
 
 
 def risk_block(risks: list[dict], extra: list[str] | None = None) -> list[str]:
@@ -220,19 +211,28 @@ def what_happened(ev: dict) -> tuple[str, list[str], list[str]]:
                 f"değerinde şirket hissesi aldı ({tarih((p.get('transaction_dates') or [None])[0])})."]
         if p.get("holdings_increase"):
             what.append(f"Elindeki hisse miktarındaki artış: <b>{pct(p['holdings_increase'], 0, sign=False)}</b>")
+        if p.get("owner_attribution") == "joint":
+            what.append(f"Bu alım {len(p.get('joint_owner_ciks') or [])} kişi/kurum tarafından <b>ortak bildirildi</b>; "
+                        "tek bir alıcı olarak sayıldı.")
+        if "I" in (p.get("direct_indirect") or []):
+            what.append("Hisselerin bir kısmı dolaylı tutuluyor (ör. aile vakfı, şirket veya fon üzerinden).")
         why = ["Şirketi en iyi tanıyan kişinin kendi cebinden hisse alması, şirketin geleceğine güvendiğinin işareti sayılır."]
         if p.get("insider_type") == "opportunistic":
-            why.append("Bu kişi her yıl aynı zamanda işlem yapan biri değil; bu alım <b>alışılmışın dışında</b>. "
-                       "Bu etiket CMP çalışmasından esinlenen geçmişe dönük takvim düzeni heuristic'idir; "
-                       "makaledeki portföy metodolojisinin tam replikasyonu değildir.")
+            why.append("Bu kişi her yıl aynı zamanda işlem yapan biri değil; bu alım <b>alışılmışın dışında</b> "
+                       "(CMP-INSPIRED HEURISTIC: Cohen-Malloy-Pomorski çalışmasından esinlenen basit takvim kuralı, "
+                       "çalışmanın birebir kopyası değil).")
         elif p.get("insider_type") == "routine":
-            why.append("Ancak bu kişi her yıl aynı ayda işlem yapıyor (rutin). Rutin alımların bilgi değeri düşük sayılır.")
+            why.append("Ancak bu kişi her yıl aynı ayda işlem yapıyor (rutin; CMP-INSPIRED HEURISTIC). "
+                       "Rutin alımların bilgi değeri düşük sayılır.")
         if p.get("is_10b5_1"):
             why.append("Alım önceden planlanmış bir programa bağlı; sinyal değeri daha düşük.")
         return "🟢 YÖNETİCİ KENDİ ŞİRKETİNDEN HİSSE ALDI", what, why
     if t == "CLUSTER_INSIDER_BUY":
-        what = [f"{p.get('number_of_buyers')} farklı yönetici {p.get('span_days')} gün içinde toplam "
+        what = [f"{p.get('number_of_buyers')} birbirinden bağımsız alıcı {p.get('span_days')} gün içinde toplam "
                 f"<b>{money(p.get('aggregate_value'))}</b> hisse aldı:"]
+        ro = p.get("reporting_owners_in_window")
+        if ro and ro > (p.get("number_of_buyers") or 0):
+            what.append(f"({ro} ayrı bildirim sahibi vardı; aynı kişiye ait vakıf/şirket/fonlar tek alıcı sayıldı.)")
         what += [f"• {e(b.get('name'))} ({role_tr(b.get('role'), b)}): {money(b.get('value'))}" for b in (p.get("buyers") or [])[:5]]
         why = ["Birden fazla yöneticinin aynı dönemde alım yapması, tek kişinin alımından daha güçlü bir güven işareti sayılır."]
         return "🟢🟢 BİRDEN FAZLA YÖNETİCİ AYNI ANDA HİSSE ALDI", what, why
@@ -260,6 +260,20 @@ def what_happened(ev: dict) -> tuple[str, list[str], list[str]]:
         why = ["Birden fazla üyenin aynı hisseyi alması tek bir alımdan daha dikkat çekicidir."]
         why.append("HOUSE DATA ONLY / SENATE UNAVAILABLE")
         return "🏛🏛 BİRDEN FAZLA TEMSİLCİLER MECLİSİ ÜYESİ AYNI HİSSEYİ ALDI", what, why
+    if t == "TRUMP_OGE_DISCLOSURE":
+        pc = p.get("parse_confidence") or {}
+        what = [f"{e(p.get('person'))} için ABD Hükümet Etiği Ofisi'ne (OGE) yeni bir mali açıklama belgesi yayımlandı: "
+                f"<b>{e(p.get('doc_type'))}</b> ({tarih(p.get('doc_date'))})."]
+        if p.get("n_transactions"):
+            what.append(f"Belgede {p['n_transactions']} işlem var: {p.get('purchases', 0)} alım, {p.get('sales', 0)} satış.")
+            for tx in (p.get("top_transactions") or [])[:3]:
+                rng = f"{money(tx.get('amount_min'))}–{money(tx.get('amount_max'))}" if tx.get("amount_max") else money(tx.get("amount_min"))
+                what.append(f"• {e((tx.get('description') or '')[:90])} — {e(tx.get('tx_type'))}, {rng}")
+        why = ["Resmi (birincil) kaynak: OGE'nin kendi yayınladığı belge. Yorum yapılmadı, yalnız belgede yazanlar aktarıldı."]
+        if pc.get("LOW") or pc.get("MEDIUM"):
+            why.append(f"Belge taranmış görüntü; {pc.get('LOW', 0) + pc.get('MEDIUM', 0)} satır okunurken yazı tanıma "
+                       "hatası olabilir, rakamları belgeden kontrol edin.")
+        return "🇺🇸 TRUMP — OGE MALİ AÇIKLAMA BELGESİ", what, why
     if t == "TRUMP_FAMILY_SEC_EVENT":
         what = [f"{e(p.get('person'))} için SEC'e resmi bir bildirim yapıldı ({e(p.get('filing_type'))})."]
         if p.get("ownership"):
@@ -364,7 +378,7 @@ def format_alert(ev: dict, rate=None, risks: list[dict] | None = None, related: 
         out += ["", "🔁 <b>Aynı şirkette son zamanlarda:</b>"] + [f"• {e(r)}" for r in related[:4]]
     if thesis:
         out += ["", f"🧭 Takip notu: {e(thesis)}"]
-    out += [""] + history_block(rate) + ["", hit_rate_line(rate), f"{icon} <b>Risk notu: {verdict_txt}</b>", ""]
+    out += [""] + history_block(rate) + ["", f"{icon} <b>Risk notu: {verdict_txt}</b>", ""]
     out += risk_block(risks, extra_risk) + [""] + _source(ev)
     return "\n".join(out)
 
@@ -385,7 +399,7 @@ def format_discovery(ev: dict, risks: list[dict], sources: list[str], rate=None)
     out += ["", "💡 <b>Neden önemli?</b>",
             "Büyük sektörlerde kritik bir ihtiyacı çözen, henüz küçük ama gerçek satış/müşteri ilerlemesi gösteren şirketler "
             "erken fark edilirse büyüme potansiyeli taşıyabilir. Fiyat hareketi değil, resmi belgelerdeki iş ilerlemesi dikkate alındı."]
-    out += [""] + history_block(rate) + ["", hit_rate_line(rate), f"{icon} <b>Risk notu: {verdict_txt}</b>", ""]
+    out += [""] + history_block(rate) + ["", f"{icon} <b>Risk notu: {verdict_txt}</b>", ""]
     out += risk_block(risks) + ["", "🔗 Kaynaklar: " + e(", ".join(s for s in sources if s))]
     return "\n".join(out)
 

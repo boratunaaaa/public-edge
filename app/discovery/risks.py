@@ -23,6 +23,7 @@ TEXT_RISKS: dict[str, tuple[str, list[str], str]] = {
     "REVERSE_SPLIT": ("reverse stock split", ["8-K"], "MEDIUM"),
     "MIN_BID_DEFICIENCY": ("minimum bid price", ["8-K"], "HIGH"),
     "CONVERTIBLE_DEBT": ("convertible notes", ["8-K"], "LOW"),
+    "WARRANTS": ("warrants to purchase up to", ["8-K", "424B5"], "LOW"),
     "MATERIAL_WEAKNESS": ("material weakness in our internal control", ["10-K", "10-Q"], "MEDIUM"),
     "LATE_FILING": ("could not be eliminated without unreasonable effort or expense", ["NT 10-K", "NT 10-Q"], "MEDIUM"),
 }

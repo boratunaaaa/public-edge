@@ -1,5 +1,5 @@
 """V2 unit tests: news intelligence + discovery language/metrics (no database)."""
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -320,22 +320,26 @@ def test_turkish_alert_has_no_disclaimer_and_explains_terms():
     ev = _ev("INSIDER_OPEN_MARKET_BUY", {"owner": "Jane Doe", "role": "CEO", "is_ceo": True, "value": 740_000,
                                           "transaction_dates": [str(date.today())], "insider_type": "opportunistic",
                                           "holdings_increase": 0.4})
-    rate = SuccessRate(0.62, 0.63, 420, 90, "ceo+fırsatçı", 0.034, 0.05, -0.12, 90)
+    rate = SuccessRate(0.62, 0.63, 420, 90, "ceo+fırsatçı", 0.034, 0.05, -0.12, 90, company_n=210, ci_low=0.55,
+                       ci_high=0.68, status="TRUSTED", episodes=300)
     msg = format_alert(ev, rate=rate, risks=[{"risk": "LOW_LIQUIDITY", "severity": "HIGH"}], market_cap=420e6, bucket="EARLY_SMALL")
     assert "yatırım tavsiyesi" not in msg.lower() and "investment advice" not in msg.lower()
-    for must in ("Ne oldu?", "Neden önemli?", "GEÇMİŞ BAŞARI ORANI", "Historical hit rate: %62", "şirketin en üst yöneticisi",
-                 "740 bin $", "%40", "alışılmışın dışında", "geçme oranı: <b>%62</b>", "Hisse az işlem görüyor", "420,00 milyon $", "küçük şirket"):
+    for must in ("Ne oldu?", "Neden önemli?", "Geçmiş başarı oranı: %62", "210 şirket, 300 ayrı dönem", "şirketin en üst yöneticisi",
+                 "740 bin $", "%40", "alışılmışın dışında", "Hisse az işlem görüyor", "420,00 milyon $", "küçük şirket",
+                 "CMP-INSPIRED HEURISTIC", "Olası aralık: %55–%68"):
         assert must in msg, must
-    assert "Alım puanı" not in msg and "Sistem değerlendirmesi" not in msg
-    assert "tam replikasyonu değildir" in msg
+    assert "Alım puanı" not in msg and "Sistem değerlendirmesi" not in msg and "Historical" not in msg
+    assert "skoru değildir" not in msg
 
 
 def test_alert_without_enough_history_shows_no_percentage():
     from app.backtest.probability import SuccessRate
     from app.notifications.format import format_alert
     msg = format_alert(_ev("GOV_CONTRACT", {"recipient": "ABC", "agency": "DoD", "amount": 5e7, "value_to_mcap": 0.12}),
-                       rate=SuccessRate(None, None, 7, 90, "yetersiz veri", None, None, None, None))
-    assert "Historical hit rate:</b> gösterilmiyor" in msg and "ARAŞTIRMA SİNYALİ" in msg and "%12" in msg
+                       rate=SuccessRate(None, None, 7, 90, "yetersiz veri", None, None, None, None,
+                                        blocked_reason="yeterli bağımsız örnek yok (3 şirket, 3 bağımsız dönem; en az 30 gerekir)."))
+    assert "Geçmiş başarı oranı:</b> gösterilmiyor" in msg and "Neden: Yeterli bağımsız örnek yok" in msg and "%12" in msg
+    assert "Historical" not in msg and "skoru değildir" not in msg
     assert "'i kadar" not in msg and "&#x27;" not in msg  # no broken Turkish suffixes / escaped apostrophes
 
 
@@ -343,9 +347,10 @@ def test_history_is_blocked_when_missing_price_samples_exist():
     from app.backtest.probability import SuccessRate
     from app.notifications.format import history_block
     rate = SuccessRate(None, None, 80, 90, "tüm benzer olaylar", None, None, None, None,
-                       company_n=55, affected_samples=4, blocked_reason="missing_price_or_benchmark_data")
+                       company_n=55, affected_samples=47, blocked_reason="47 geçmiş örneğin fiyat verisi eksik (çoğu borsadan çıkmış şirket).")
     text = "\n".join(history_block(rate))
-    assert "Gösterilmiyor" in text and "4 adet" in text and "yapay" in text
+    assert "Geçmiş başarı oranı:</b> gösterilmiyor" in text and "Neden: 47 geçmiş örneğin fiyat verisi eksik" in text
+    assert "%" not in text.split("Neden")[0]  # no number before the reason
 
 
 def test_wilson_interval_is_wide_at_minimum_company_sample():
@@ -355,28 +360,36 @@ def test_wilson_interval_is_wide_at_minimum_company_sample():
     assert hi - lo > 0.25
 
 
-def test_13d_peer_group_excludes_immaterial_amendments():
-    from app.backtest.probability import success_rate
+def test_hit_rate_sample_sql_excludes_superseded_biased_and_low_timestamp_rows():
+    from app.backtest import quality as Q
 
-    class StopAfterSQL:
+    class Capture:
+        sql = ""
+
         def execute(self, statement, _params):
-            sql = str(statement)
-            assert "is_amendment" in sql and "change" in sql
-            raise RuntimeError("predicate checked")
+            Capture.sql = str(statement)
+            return type("R", (), {"mappings": lambda self: []})()
 
-    with pytest.raises(RuntimeError, match="predicate checked"):
-        success_rate(StopAfterSQL(), "ACTIVIST_13D", {"item4_class": "BOARD_CHANGE"})
+    Q.load_rows(Capture(), "ACTIVIST_13D", "TRUE", {}, 90)
+    for must in ("NOT e.superseded", "current_universe_survivorship_biased", "timestamp_confidence", "e.date_quality <> 'estimated'",
+                 "LEFT JOIN event_returns"):  # LEFT JOIN: events without prices are counted, never dropped
+        assert must in Capture.sql, must
 
 
-def test_historical_news_revenue_fails_closed_without_filing_timestamps():
+def test_historical_news_revenue_uses_filing_time_facts_only(monkeypatch):
     from datetime import datetime, timedelta, timezone
+    import app.discovery.pit_facts as pf
     from app.news.pipeline import annual_revenue
+    called = {}
+    monkeypatch.setattr(pf, "ttm_revenue_as_of", lambda conn, cik, as_of: called.setdefault("as_of", as_of) and 123.0)
 
     class MustNotQuery:
         def execute(self, *_args, **_kwargs):
             raise AssertionError("current XBRL frames must not be read for a historical story")
 
-    assert annual_revenue(MustNotQuery(), "0000000001", datetime.now(timezone.utc) - timedelta(days=30)) is None
+    when = datetime.now(timezone.utc) - timedelta(days=30)
+    assert annual_revenue(MustNotQuery(), "0000000001", when) == 123.0
+    assert called["as_of"] == when.date()
 
 
 def test_multiple_serious_risks_make_verdict_risky():
@@ -439,7 +452,13 @@ def test_growth_without_business_evidence_is_not_high_interest():
                    insider={"buy_value": 2e5, "buyers": 1}, activist_13d=False, gov_contract_ratio=None, risks=[], themes=[])
     assert S.score(f)[1] != "HIGH" and not S.has_real_progress(f)  # e.g. a shipping company with a good year
     f2 = dict(f, themes=["ROBOTICS"])
-    assert S.score(f2)[1] == "HIGH" and S.has_real_progress(f2)
+    assert S.score(f2)[1] != "HIGH"  # a theme + growth flags without any real-world evidence (no revenue data) is not HIGH
+    f3 = S.features(market_cap=900e6, metrics={"yoy_latest": 1.2, "yoy_prev": 0.8, "ttm_revenue": 60e6,
+                                               "flags": ["REVENUE_ACCELERATION", "MARGIN_INFLECTION"]},
+                    stage="PRODUCTION_RAMP", stage_prev="EARLY_COMMERCIAL", relations=[], signal_labels=[],
+                    insider={"buy_value": 2e5, "buyers": 1}, activist_13d=False, gov_contract_ratio=None, risks=[], themes=["ROBOTICS"])
+    assert "COMMERCIAL_REVENUE" in f3["strong_evidence"]
+    assert S.score(f3)[1] == "HIGH" and S.has_real_progress(f3)
 
 
 def test_already_scaled_is_never_high_interest():

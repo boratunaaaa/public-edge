@@ -5,7 +5,6 @@ import logging
 import signal
 import threading
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
@@ -86,7 +85,7 @@ def _source_loop(engine, sources) -> None:
             _dispatch(engine)
         if not _stop and time.time() - last_backtest > 1800:
             try:
-                r = compute_pending(engine, limit=300, time_budget_s=240)
+                r = compute_pending(engine, limit=300, time_budget_s=240, backfill=False)  # live events only
                 with engine.begin() as conn:
                     save_job_state(conn, "backtest_incremental", r)
                 log.info("backtest incremental %s", r)

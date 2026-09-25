@@ -15,7 +15,7 @@ import json
 from collections import defaultdict
 from datetime import date
 
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 
 from app.db.models import events, insider_transactions
@@ -34,10 +34,14 @@ def classify(history: set[tuple[int, int]], trade_date: date) -> str:
     return "opportunistic"
 
 
-def owner_history(conn: Connection, owner_cik: str, before: date) -> set[tuple[int, int]]:
-    rows = conn.execute(select(insider_transactions.c.trans_date).where(and_(
-        insider_transactions.c.owner_cik == owner_cik, insider_transactions.c.category.in_(TRADE_CATEGORIES),
-        insider_transactions.c.trans_date < date(before.year, 1, 1)))).all()
+def owner_history(conn: Connection, owner_cik: str, before: date, filed_before: date | None = None) -> set[tuple[int, int]]:
+    """(year, month) of the insider's prior-year trades that were PUBLIC before the classification:
+    a trade from an earlier year that was only reported later (late Form 4 / Form 5) is excluded."""
+    conds = [insider_transactions.c.owner_cik == owner_cik, insider_transactions.c.category.in_(TRADE_CATEGORIES),
+             insider_transactions.c.trans_date < date(before.year, 1, 1)]
+    if filed_before is not None:
+        conds.append(insider_transactions.c.filed_date < filed_before)
+    rows = conn.execute(select(insider_transactions.c.trans_date).where(and_(*conds))).all()
     return {(r[0].year, r[0].month) for r in rows if r[0]}
 
 
@@ -51,22 +55,26 @@ def holdings_increase(shares: float | None, shares_after: float | None) -> float
 def annotate_existing(engine: Engine, batch: int = 5000) -> int:
     """Add insider_type / holdings_increase to INSIDER_OPEN_MARKET_BUY events that lack them."""
     with engine.connect() as conn:
-        hist: dict[str, set] = defaultdict(set)
-        for owner, d in conn.execute(select(insider_transactions.c.owner_cik, insider_transactions.c.trans_date).where(
+        hist: dict[str, list] = defaultdict(list)
+        for owner, d, filed in conn.execute(select(insider_transactions.c.owner_cik, insider_transactions.c.trans_date,
+                                                   insider_transactions.c.filed_date).where(
                 insider_transactions.c.category.in_(TRADE_CATEGORIES))):
             if owner and d:
-                hist[owner].add((d.year, d.month))
-        todo = conn.execute(select(events.c.id, events.c.payload).where(and_(
-            events.c.event_type == "INSIDER_OPEN_MARKET_BUY", ~events.c.payload.has_key("insider_type")))).all()
+                hist[owner].append((d.year, d.month, filed))
+        todo = conn.execute(select(events.c.id, events.c.payload, events.c.public_date).where(and_(
+            events.c.event_type == "INSIDER_OPEN_MARKET_BUY",
+            or_(~events.c.payload.has_key("insider_type"), ~events.c.payload.has_key("insider_type_pit"))))).all()
     n = 0
     for i in range(0, len(todo), batch):
         with engine.begin() as conn:
-            for eid, p in todo[i:i + batch]:
+            for eid, p, public_date in todo[i:i + batch]:
                 dates = [date.fromisoformat(x) for x in (p.get("transaction_dates") or [])]
-                t = classify(hist.get(p.get("owner_cik") or "", set()), dates[0]) if dates else "unclassified"
+                # only trades filed BEFORE this event's filing are known history (no late-filing leakage)
+                known = {(y, m) for y, m, filed in hist.get(p.get("owner_cik") or "", []) if filed is None or filed < public_date}
+                t = classify(known, dates[0]) if dates else "unclassified"
                 inc = holdings_increase(p.get("shares"), p.get("shares_after"))
                 conn.execute(text("UPDATE events SET payload = payload || CAST(:extra AS jsonb) WHERE id = :id"),
                              {"id": eid, "extra": json.dumps({"insider_type": t, "holdings_increase": inc,
-                               "insider_type_method": "cmp_inspired_point_in_time_heuristic"})})
+                               "insider_type_method": "cmp_inspired_point_in_time_heuristic", "insider_type_pit": True})})
                 n += 1
     return n

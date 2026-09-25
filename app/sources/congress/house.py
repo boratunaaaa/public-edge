@@ -17,7 +17,7 @@ from app.entities.registry import resolver
 from app.parsers.house_ptr import parse_ptr_text, pdf_text
 from app.parsers.sec_common import to_date
 from app.signals import priority as P
-from app.signals.detect import _money, multi_signal_check
+from app.signals.detect import multi_signal_check
 from app.sources.base import RunResult, Source
 
 log = logging.getLogger(__name__)

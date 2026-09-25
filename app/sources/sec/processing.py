@@ -17,6 +17,7 @@ from app.parsers.schedule13d import classify_item4, is_13d, is_amendment, parse_
 from app.parsers.sec_common import Submission, index_url, parse_submission, primary_xml
 from app.signals import priority as P
 from app.signals.detect import _money, cluster_events_for_issuer, insider_buy_events, multi_signal_check
+from app.signals.owners import OwnerRef, attribute, joint_display_name, joint_roles, save_filing_owners
 
 log = logging.getLogger(__name__)
 
@@ -74,19 +75,25 @@ def process_form4(conn: Connection, sub: Submission, cik_for_url: str, *, is_bac
     ticker = doc.ticker or resolver.ticker_for_cik(doc.issuer_cik)
     if (not is_backfill) and doc.ticker and resolver.ticker_for_cik(doc.issuer_cik) and doc.ticker not in resolver.ticker_to_cik:
         ticker = resolver.ticker_for_cik(doc.issuer_cik)  # stale/odd symbol on the form -> official mapping
-    owner = doc.primary_owner if doc.owners else None
     filed = sub.filed_date or (sub.accepted_at.date() if sub.accepted_at else None)
+    refs = [OwnerRef(o.cik, o.name, o.is_director, o.is_officer, o.is_ten_pct, o.officer_title, o.is_ceo, o.is_cfo)
+            for o in doc.owners if o.cik]
+    save_filing_owners(conn, sub.accession, refs, doc.issuer_cik, filed)
     rows = []
     for t in doc.transactions:
+        who, how = attribute(refs, t.ownership_text(doc.footnotes))
+        roles = joint_roles(refs) if who is None else {
+            "is_director": who.is_director, "is_officer": who.is_officer, "is_ten_pct": who.is_ten_pct,
+            "officer_title": who.officer_title, "is_ceo": who.is_ceo, "is_cfo": who.is_cfo}
         rows.append({
             "accession": sub.accession, "line_key": t.line_key, "filing_id": fid, "issuer_cik": doc.issuer_cik,
-            "ticker": ticker, "issuer_name": doc.issuer_name, "owner_cik": owner.cik if owner else None,
-            "owner_name": owner.name if owner else "", "is_director": owner.is_director if owner else False,
-            "is_officer": owner.is_officer if owner else False, "is_ten_pct": owner.is_ten_pct if owner else False,
-            "officer_title": owner.officer_title if owner else None, "is_ceo": owner.is_ceo if owner else False,
-            "is_cfo": owner.is_cfo if owner else False, "security_title": t.security_title, "is_derivative": t.is_derivative,
+            "ticker": ticker, "issuer_name": doc.issuer_name, "owner_cik": who.cik if who else None,
+            "owner_name": who.name if who else (joint_display_name(refs) if refs else ""), **roles,
+            "security_title": t.security_title, "is_derivative": t.is_derivative,
             "trans_date": t.trans_date, "trans_code": t.trans_code, "acq_disp": t.acq_disp, "shares": t.shares,
             "price": t.price, "value": t.value, "shares_after": t.shares_after, "direct_indirect": t.direct_indirect,
+            "nature_of_ownership": t.nature_of_ownership, "owner_attribution": how,
+            "joint_owner_ciks": [o.cik for o in refs] if len(refs) > 1 else None,
             "is_10b5_1": t.is_10b5_1, "category": t.category, "filed_date": filed, "accepted_at": sub.accepted_at,
             "source": "backfill_xml" if is_backfill else "live", "source_url": url,
         })

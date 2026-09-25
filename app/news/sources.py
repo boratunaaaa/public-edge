@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
@@ -135,7 +135,7 @@ ITEM_NAMES = {"1.01": "Material Definitive Agreement", "1.02": "Termination of M
               "5.02": "Officer/Director Change", "5.03": "Charter/Bylaw Amendment", "7.01": "Regulation FD", "8.01": "Other Events"}
 
 
-def process_8k(conn, text: str, cik: str, ticker: str, *, backfill: bool = False) -> list[int]:
+def process_8k(conn, text: str, cik: str, ticker: str, *, backfill: bool = False, universe_quality: str | None = None) -> list[int]:
     sub = parse_submission(text)
     header = text.split("</SEC-HEADER>")[0]
     items = re.findall(r"ITEM INFORMATION:\s*(.+)", header)
@@ -146,7 +146,6 @@ def process_8k(conn, text: str, cik: str, ticker: str, *, backfill: bool = False
     if SPAC_RE.search(name):
         return []  # blank-check / trust vehicles: corporate actions are not operating-company news
     ex99 = next((body for t, _fn, body in sub.documents if t.upper().startswith("EX-99")), None)
-    main = next((body for t, _fn, body in sub.documents if t.upper().startswith("8-K")), "")
     item_list = "; ".join(i.strip() for i in items)
     if ex99:
         head, lead = headline_and_lead(ex99)
@@ -164,7 +163,7 @@ def process_8k(conn, text: str, cik: str, ticker: str, *, backfill: bool = False
                           form=sub.form_type, filed=sub.filed_date, max_sentences=400)
     return ingest(conn, RawItem("sec_8k", 1, sub.accession, url, headline, snippet, sub.accepted_at,
                                 publisher="SEC EDGAR", tickers=[ticker], ciks=[cik.zfill(10)], exact_time=True,
-                                backfill=backfill))
+                                backfill=backfill, universe_quality=universe_quality))
 
 
 class OpenFdaSource(Source):

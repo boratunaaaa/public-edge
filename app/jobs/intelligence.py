@@ -40,6 +40,25 @@ def discovery_due(st: dict, now: datetime) -> tuple[bool, bool]:
     return True, full
 
 
+def _weekly_walkforward(engine, now: datetime) -> None:
+    """Walk-forward threshold study once a week (Sunday): test-window results only."""
+    if now.weekday() != 6 or now.hour < 18:
+        return
+    y, w, _ = now.isocalendar()
+    key = f"{y}-W{w:02d}"
+    with engine.begin() as conn:
+        st = job_state(conn, "walkforward")
+    if st.get("last_week") == key:
+        return
+    try:
+        from app.backtest.walkforward import run_all
+        out = run_all(engine)
+        with engine.begin() as conn:
+            save_job_state(conn, "walkforward", {"last_week": key, "run_id": out["run_id"]}, status="idle")
+    except Exception:
+        log.exception("walk-forward failed")
+
+
 def main() -> None:
     logging_setup.setup()
     signal.signal(signal.SIGTERM, _sig)
@@ -75,6 +94,7 @@ def main() -> None:
                     deliver(engine, f"report:weekly:{y}-W{w:02d}", "report", weekly_report(engine, now))
                 except Exception:
                     log.exception("weekly report failed")
+        _weekly_walkforward(engine, now)
         HEARTBEAT.write_text(str(int(time.time())))
         for _ in range(30):
             if _stop:

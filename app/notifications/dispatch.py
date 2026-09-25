@@ -104,7 +104,7 @@ def _sent_last_hour(conn) -> int:
 
 THESIS_TR = {"THESIS_STRENGTHENING": "şirket hakkındaki olumlu görüş güçlendi", "THESIS_WEAKENING": "şirket hakkındaki görüş zayıfladı",
              "THESIS_INVALIDATION": "şirket hakkındaki görüş ciddi şekilde bozuldu", "NEUTRAL": "görüşte değişiklik yok"}
-NO_CHART = {"TRUMP_FAMILY_SEC_EVENT"}
+NO_CHART = {"TRUMP_FAMILY_SEC_EVENT", "TRUMP_OGE_DISCLOSURE"}
 
 
 def build_message(engine: Engine, ev: dict) -> tuple[str, bytes | None]:
@@ -114,15 +114,17 @@ def build_message(engine: Engine, ev: dict) -> tuple[str, bytes | None]:
     from app.notifications.chart import price_chart
     from app.notifications.format import one_line
     p = ev.get("payload") or {}
+    with engine.begin() as qconn:  # the quality verdict is cached (metrics_quality) for 6 hours
+        rate = success_rate(qconn, ev["event_type"], p, exclude_event_id=ev["id"], persist=True)
     with engine.connect() as conn:
         risks = [dict(r) for r in conn.execute(select(discovery_risks).where(discovery_risks.c.cik == ev.get("issuer_cik"))
                                                ).mappings().all()] if ev.get("issuer_cik") else []
-        rate = success_rate(conn, ev["event_type"], p, exclude_event_id=ev["id"])
         uni = conn.execute(select(universe_snapshots.c.market_cap, universe_snapshots.c.bucket).where(
             universe_snapshots.c.cik == ev.get("issuer_cik")).order_by(universe_snapshots.c.as_of.desc()).limit(1)).first() \
             if ev.get("issuer_cik") else None
         rel_rows = conn.execute(select(events).where(and_(
             events.c.ticker == ev["ticker"], events.c.id != ev["id"], events.c.is_backfill.is_(False),
+            events.c.superseded.is_(False),
             events.c.public_date >= ev["public_date"] - timedelta(days=60)))
             .order_by(events.c.public_date.desc()).limit(4)).mappings().all() if ev.get("ticker") else []
         related = [f"{one_line(dict(r))} ({(ev['public_date'] - r['public_date']).days} gün önce)" for r in rel_rows]
@@ -167,7 +169,8 @@ def _candidates(engine: Engine) -> list:
         and_(n.c.status == "sending", n.c.claimed_at < now - CLAIM_TTL),
     )
     q = (select(events).select_from(events.outerjoin(n, n.c.dedupe_key == func.concat("event:", events.c.id)))
-         .where(and_(events.c.is_backfill.is_(False), events.c.priority >= settings.alert_min_priority,
+         .where(and_(events.c.is_backfill.is_(False), events.c.superseded.is_(False),
+                     events.c.priority >= settings.alert_min_priority,
                      events.c.public_date >= date.today() - timedelta(days=MAX_AGE_DAYS), deliverable))
          .order_by(events.c.priority.desc(), events.c.id).limit(50))
     with engine.connect() as conn:

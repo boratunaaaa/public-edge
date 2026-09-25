@@ -24,21 +24,30 @@ def _ensure_spy(conn: Connection) -> list:
     return ensure_prices(conn, BENCHMARK, PRICE_HISTORY_START, date.today())
 
 
-def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600) -> dict:
-    """Compute/refresh returns for events whose horizons have (newly) elapsed."""
+def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600, backfill: bool | None = None) -> dict:
+    """Compute/refresh returns for events whose horizons have (newly) elapsed.
+
+    The price series is chosen by the security master (same CIK, never a reused symbol); an event
+    that cannot be priced is recorded with WHY (missing_reason) instead of silently disappearing.
+    backfill: None = all events, True/False = only historical / only live (separate processes)."""
+    from app.securitymaster.provider import get_security_master
     t0 = time.time()
     today = date.today()
     now = datetime.now(timezone.utc)
     due = or_(
         and_(events.c.returns_status.in_(["pending", "partial", "retry"]),
              or_(events.c.returns_checked_at.is_(None), events.c.returns_checked_at < now - timedelta(hours=RECHECK_HOURS))),
-        # confirmed no-data is re-verified monthly (symbol changes, provider backfills)
+        # confirmed no-data is re-verified monthly (symbol changes, provider backfills, new SEC actions)
         and_(events.c.returns_status == "no_data", events.c.returns_checked_at < now - timedelta(days=NO_DATA_RECHECK_DAYS)),
     )
+    conds = [or_(events.c.ticker.isnot(None), events.c.issuer_cik.isnot(None)), events.c.superseded.is_(False),
+             events.c.public_date <= today - timedelta(days=2), due]
+    if backfill is not None:
+        conds.append(events.c.is_backfill.is_(backfill))
     with engine.connect() as conn:
-        rows = conn.execute(select(events.c.id, events.c.ticker, events.c.public_date, events.c.public_at, events.c.returns_status)
-                            .where(and_(events.c.ticker.isnot(None), events.c.public_date <= today - timedelta(days=2), due))
-                            .order_by(events.c.ticker, events.c.public_date).limit(limit)).all()
+        rows = conn.execute(select(events.c.id, events.c.ticker, events.c.issuer_cik, events.c.public_date, events.c.public_at)
+                            .where(and_(*conds)).order_by(events.c.issuer_cik, events.c.ticker, events.c.public_date)
+                            .limit(limit)).all()
     if not rows:
         return {"processed": 0}
     try:
@@ -48,46 +57,96 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
         return {"processed": 0, "error": f"benchmark unavailable: {e}"}
     done = nodata = retry = 0
     cache: dict[str, list] = {}
-    failed_tickers: dict[str, str] = {}
-    for eid, ticker, pdate, pat, _st in rows:
+    failed: dict[str, str] = {}
+    for eid, ticker, cik, pdate, pat in rows:
         if time.time() - t0 > time_budget_s:
             break
         with engine.begin() as conn:
             now = datetime.now(timezone.utc)
-            if ticker in failed_tickers:
+            sm = get_security_master(conn)
+            sym, basis, missing = sm.price_symbol(cik, pdate, ticker)
+            dl = sm.delisting(cik) if cik else None
+            if sym is None:
+                status = "no_data" if (today - pdate).days > 10 else "pending"
+                nodata += status == "no_data"
                 conn.execute(events.update().where(events.c.id == eid).values(
-                    returns_status="retry", returns_checked_at=now, returns_error=failed_tickers[ticker]))
+                    returns_status=status, returns_checked_at=now, returns_error=None, price_symbol=None,
+                    price_symbol_basis=None, missing_reason=_missing(missing, dl, pdate)))
+                continue
+            if sym in failed:
+                conn.execute(events.update().where(events.c.id == eid).values(
+                    returns_status="retry", returns_checked_at=now, returns_error=failed[sym]))
                 retry += 1
                 continue
-            if ticker not in cache:
-                cache.clear()  # rows are ticker-ordered; keep memory bounded
+            key = f"{cik}|{sym}"
+            if key not in cache:
+                cache.clear()  # rows are issuer-ordered; keep memory bounded
                 try:
-                    cache[ticker] = ensure_prices(conn, ticker, min(pdate, today) - timedelta(days=10), today)
+                    ps = sm.get_historical_price(cik, min(pdate, today) - timedelta(days=10), today, on=pdate, ticker_hint=ticker)
+                    cache[key] = (ps.bars, ps.basis, ps.missing_reason)
                 except PriceFetchError as e:
                     # transient: keep the event retryable, never mark it as "no data"
-                    failed_tickers[ticker] = str(e)[:500]
+                    failed[sym] = str(e)[:500]
                     conn.execute(events.update().where(events.c.id == eid).values(
-                        returns_status="retry", returns_checked_at=now, returns_error=failed_tickers[ticker]))
+                        returns_status="retry", returns_checked_at=now, returns_error=failed[sym]))
                     retry += 1
                     continue
-            bars = [b for b in cache[ticker] if b.date >= pdate - timedelta(days=10) and b.date <= pdate + timedelta(days=400)]
-            res = compute_returns(bars, spy, pdate, pat, as_of=today)
+            all_bars, basis_used, series_missing = cache[key]
+            bars = [b for b in all_bars if pdate - timedelta(days=10) <= b.date <= pdate + timedelta(days=400)]
+            terminal = dl.date if (dl is not None and dl.date and basis_used == "historical_symbol_verified") else None
+            res = compute_returns(bars, spy, pdate, pat, as_of=today, terminal_date=terminal)
             if not res:
                 status = "no_data" if (today - pdate).days > 10 else "pending"
                 nodata += status == "no_data"
                 conn.execute(events.update().where(events.c.id == eid).values(
-                    returns_status=status, returns_checked_at=now, returns_error=None))
+                    returns_status=status, returns_checked_at=now, returns_error=None, price_symbol=sym,
+                    price_symbol_basis=basis_used, missing_reason=_missing(series_missing or "NO_PRICE_DATA", dl, pdate)
+                    if status == "no_data" else None))
                 continue
             for r in res:
                 vals = dict(entry_date=r.entry_date, entry_price=r.entry_price, exit_date=r.exit_date, exit_price=r.exit_price,
-                            ret=r.ret, spy_ret=r.spy_ret, excess_ret=r.excess_ret, mae=r.mae, mfe=r.mfe)
+                            ret=r.ret, spy_ret=r.spy_ret, excess_ret=r.excess_ret, mae=r.mae, mfe=r.mfe, exit_basis=r.exit_basis)
                 conn.execute(pg_insert(event_returns).values(event_id=eid, horizon_days=r.horizon_days, **vals)
                              .on_conflict_do_update(index_elements=["event_id", "horizon_days"], set_=vals))
             status = "complete" if len(res) == len(HORIZONS) else "partial"
             conn.execute(events.update().where(events.c.id == eid).values(
-                returns_status=status, returns_checked_at=now, returns_error=None))
+                returns_status=status, returns_checked_at=now, returns_error=None, price_symbol=sym,
+                price_symbol_basis=basis_used, missing_reason=None))
             done += 1
     return {"processed": done, "no_data": nodata, "retry": retry, "candidates": len(rows)}
+
+
+def _missing(reason: str | None, dl, pdate: date) -> str:
+    """Most specific explanation for an unpriced event (security-master delisting first)."""
+    if dl is not None and dl.date is not None and dl.date >= pdate:
+        return {"BANKRUPTCY": "DELISTED_BANKRUPTCY", "EXCHANGE_COMPLIANCE": "DELISTED_COMPLIANCE",
+                "MERGER": "DELISTED_MERGER"}.get(dl.reason, "DELISTED_OTHER")
+    return reason or "NO_PRICE_DATA"
+
+
+def revalidate_price_identity(engine: Engine, batch: int = 5000) -> dict:
+    """Returns computed before the security master used the event's display ticker as the price key.
+    Keep them only when the security master resolves the SAME symbol; otherwise drop and recompute."""
+    from app.securitymaster.provider import get_security_master
+    kept = recomputed = 0
+    with engine.connect() as conn:
+        rows = conn.execute(select(events.c.id, events.c.ticker, events.c.issuer_cik, events.c.public_date).where(and_(
+            events.c.returns_status.in_(["complete", "partial"]), events.c.price_symbol.is_(None)))
+            .order_by(events.c.id).limit(batch)).all()
+    for i in range(0, len(rows), 500):
+        with engine.begin() as conn:
+            sm = get_security_master(conn)
+            for eid, ticker, cik, pdate in rows[i:i + 500]:
+                sym, basis, _missing_reason = sm.price_symbol(cik, pdate, ticker)
+                if sym is not None and sym == ticker:
+                    conn.execute(events.update().where(events.c.id == eid).values(price_symbol=sym, price_symbol_basis=basis))
+                    kept += 1
+                else:
+                    conn.execute(event_returns.delete().where(event_returns.c.event_id == eid))
+                    conn.execute(events.update().where(events.c.id == eid).values(
+                        returns_status="pending", returns_checked_at=None, price_symbol=None, price_symbol_basis=None))
+                    recomputed += 1
+    return {"kept": kept, "sent_for_recompute": recomputed, "batch": len(rows)}
 
 
 # ---------------- statistics ----------------
@@ -112,7 +171,7 @@ def event_type_stats(conn: Connection, event_type: str, subgroup: str = "all", h
         # estimated public dates are never part of verified statistics
         q = text(f"""SELECT r.ret, r.excess_ret, r.mae, r.mfe FROM event_returns r JOIN events e ON e.id = r.event_id
                      WHERE e.event_type = :et AND r.horizon_days = :h AND e.date_quality <> 'estimated'
-                       AND {cond} {extra_where}""")
+                       AND NOT e.superseded AND {cond} {extra_where}""")
         rows = [dict(x._mapping) for x in conn.execute(q, {"et": event_type, "h": h, **(params or {})})]
         out[h] = summarize(rows, settings.min_sample_size).as_dict()
     return out
@@ -150,5 +209,6 @@ def stats_overview(conn: Connection) -> list[dict]:
                (avg((r.excess_ret > 0)::int) FILTER (WHERE r.excess_ret IS NOT NULL))::float8 spy_beat,
                avg(r.excess_ret) mean_excess, stddev_samp(r.ret) std, avg(r.mae) mae, avg(r.mfe) mfe
         FROM event_returns r JOIN events e ON e.id = r.event_id
+        WHERE NOT e.superseded
         GROUP BY 1, r.horizon_days ORDER BY 1, r.horizon_days""")).mappings().all()
     return [dict(r) | {"sufficient": r["n"] >= settings.min_sample_size} for r in rows]

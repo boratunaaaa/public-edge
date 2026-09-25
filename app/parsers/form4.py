@@ -80,6 +80,11 @@ class Transaction:
     footnote_ids: list[str]
     category: str
     is_10b5_1: bool = False
+    nature_of_ownership: str | None = None
+
+    def ownership_text(self, footnotes: dict[str, str]) -> str:
+        """Everything the filer wrote about who holds this row (used for joint-filing attribution)."""
+        return " ".join([self.nature_of_ownership or ""] + [footnotes.get(f, "") for f in self.footnote_ids]).strip()
 
     @property
     def value(self) -> float | None:
@@ -172,6 +177,7 @@ def parse_form4(xml: str) -> Form4:
                 direct_indirect=_val(tx, "ownershipNature/directOrIndirectOwnership"),
                 footnote_ids=fids,
                 category=classify(code, is_deriv),
+                nature_of_ownership=_val(tx, "ownershipNature/natureOfOwnership"),
             )
             # 10b5-1: the checkbox (2023+ forms) or an explicit plan reference in the
             # transaction's footnotes / remarks.

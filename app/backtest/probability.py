@@ -1,19 +1,22 @@
 """Historical success rate ("tarihsel başarı oranı") for an event.
 
-Not a promise and not a model guess: it is the measured share of comparable PAST events whose
+Not a promise and not a model guess: it is the measured share of comparable PAST episodes whose
 stock beat the S&P 500 (SPY) over the horizon, taken from this system's own no-look-ahead
 backtest. To stay honest:
-  * the most specific peer group with enough samples is used (hierarchical fallback);
-  * small samples are shrunk toward 50% (Beta(5,5) prior) so 3/3 wins never shows as 100%;
-  * with fewer than MIN_SAMPLE comparable events no percentage is shown at all.
+  * the most specific peer group with enough independent issuers is used (hierarchical fallback);
+  * events are clustered into episodes and weighted company-equal (app.backtest.quality);
+  * missing / delisted samples are never dropped silently; the quality gate withholds the number
+    unless it is TRUSTED;
+  * small samples are shrunk toward 50% (Beta(5,5) prior) so 3/3 wins never shows as 100%.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
 
-from sqlalchemy import text
 from sqlalchemy.engine import Connection
+
+from app.backtest import quality as Q
 
 MIN_SAMPLE = 30
 PRIOR = 5.0  # pseudo-wins and pseudo-losses (pulls toward 50%)
@@ -34,8 +37,15 @@ class SuccessRate:
     company_n: int = 0  # independent-ish issuer clusters (events from one issuer share one weight)
     ci_low: float | None = None
     ci_high: float | None = None
-    affected_samples: int = 0  # mature events omitted because price/benchmark data is unavailable
-    blocked_reason: str | None = None
+    affected_samples: int = 0  # unresolved mature episodes (missing price / benchmark / not yet computed)
+    blocked_reason: str | None = None  # short Turkish reason when the percentage is withheld
+    status: str = "BLOCKED"  # metrics_quality_status: TRUSTED | PARTIAL | BLOCKED
+    episodes: int = 0
+    unique_periods: int = 0
+    event_level_rate: float | None = None
+    sector_equal_rate: float | None = None
+    worst_case: float | None = None
+    best_case: float | None = None
 
     @property
     def available(self) -> bool:
@@ -98,78 +108,34 @@ def peer_groups(event_type: str, payload: dict) -> list[tuple[str, str, dict]]:
     return g
 
 
-def _query(conn: Connection, cond: str, params: dict, horizon: int) -> dict:
-    row = conn.execute(text(f"""
-        WITH sample AS (
-          SELECT r.*, COALESCE(e.issuer_cik, e.ticker, 'EVENT:' || e.id::text) issuer_key
-          FROM event_returns r JOIN events e ON e.id = r.event_id
-          WHERE e.event_type = :et AND r.horizon_days = :h AND r.excess_ret IS NOT NULL
-            AND e.date_quality <> 'estimated'
-            AND COALESCE(e.payload->>'universe_quality', '') <> 'current_universe_survivorship_biased'
-            AND {cond}
-        ), issuer_results AS (
-          SELECT issuer_key, avg((excess_ret > 0)::int)::float8 issuer_hit
-          FROM sample GROUP BY issuer_key
-        )
-        SELECT (SELECT count(*) FROM sample) n,
-               (SELECT count(*) FROM issuer_results) company_n,
-               (SELECT coalesce(sum(issuer_hit), 0) FROM issuer_results) weighted_wins,
-               percentile_cont(0.5) WITHIN GROUP (ORDER BY r.excess_ret) med_ex,
-               percentile_cont(0.5) WITHIN GROUP (ORDER BY r.ret) med_ret,
-               percentile_cont(0.5) WITHIN GROUP (ORDER BY r.mae) med_mae
-        FROM sample r"""), {**params, "h": horizon}).mappings().first()
-    return dict(row)
-
-
-def _affected(conn: Connection, cond: str, params: dict, horizon: int) -> int:
-    """Mature comparable events silently absent from the SPY-relative sample.
-
-    Any such omission can be survivorship/data-availability bias.  The displayed hit rate is
-    therefore disabled instead of assuming the missing securities were neutral.
-    """
-    row = conn.execute(text(f"""
-        SELECT count(*)
-        FROM events e
-        LEFT JOIN event_returns r ON r.event_id=e.id AND r.horizon_days=:h
-        WHERE e.event_type=:et AND e.date_quality <> 'estimated'
-          AND COALESCE(e.payload->>'universe_quality', '') <> 'current_universe_survivorship_biased' AND {cond}
-          AND e.public_date <= CURRENT_DATE - (:h * INTERVAL '1 day')
-          AND (e.returns_status = 'no_data' OR (r.event_id IS NOT NULL AND r.excess_ret IS NULL))
-    """), {**params, "h": horizon}).scalar()
-    return int(row or 0)
-
-
 def success_rate(conn: Connection, event_type: str, payload: dict, horizon: int = DEFAULT_HORIZON,
-                 exclude_event_id: int | None = None) -> SuccessRate:
+                 exclude_event_id: int | None = None, persist: bool = False) -> SuccessRate:
+    """Most specific peer group whose sample is large enough; its verdict comes from the data-quality
+    gate (app.backtest.quality). A percentage is filled in ONLY when the gate says TRUSTED.
+
+    exclude_event_id is kept for callers; the gated sample only contains MATURE events, so a new
+    event is never part of its own statistic anyway."""
+    chosen = None
     for label, cond, params in peer_groups(event_type, payload):
-        if event_type == "ACTIVIST_13D":
-            # Historical low-information amendments were emitted as fresh events.  Do not let
-            # them multiply the apparent evidence until the stored history can be rebuilt.
-            cond = (f"({cond}) AND (COALESCE((e.payload->>'is_amendment')::boolean, false) = false "
-                    "OR abs(COALESCE((e.payload->>'change')::float, 0)) >= 1)")
-        if exclude_event_id is not None:
-            cond = f"({cond}) AND e.id <> :xid"
-            params = {**params, "xid": exclude_event_id}
-        r = _query(conn, cond, params, horizon)
-        affected = _affected(conn, cond, params, horizon)
-        # MIN_SAMPLE applies to issuer clusters, not correlated event rows.
-        if r["company_n"] >= MIN_SAMPLE and affected == 0:
-            best, best_val = None, None
-            for h in (30, 90, 180):
-                x = _query(conn, cond, params, h)
-                if x["n"] >= MIN_SAMPLE and x["med_ex"] is not None and (best_val is None or x["med_ex"] > best_val):
-                    best, best_val = h, x["med_ex"]
-            lo, hi = wilson_interval(r["weighted_wins"], r["company_n"])
-            return SuccessRate(shrink(r["weighted_wins"], r["company_n"]),
-                               r["weighted_wins"] / r["company_n"], r["n"], horizon, label,
-                               r["med_ex"], r["med_ret"], r["med_mae"], best,
-                               company_n=r["company_n"], ci_low=lo, ci_high=hi)
-        if r["company_n"] >= MIN_SAMPLE and affected:
-            return SuccessRate(None, None, r["n"], horizon, label, r["med_ex"], r["med_ret"],
-                               r["med_mae"], None, company_n=r["company_n"], affected_samples=affected,
-                               blocked_reason="missing_price_or_benchmark_data")
-    total = _query(conn, "TRUE", {"et": event_type}, horizon)
-    affected = _affected(conn, "TRUE", {"et": event_type}, horizon)
-    return SuccessRate(None, None, int(total["n"] or 0), horizon, "yetersiz veri", None, None, None, None,
-                       company_n=int(total["company_n"] or 0), affected_samples=affected,
-                       blocked_reason="missing_price_or_benchmark_data" if affected else None)
+        st = Q.compute(conn, event_type, label, cond, params, horizon, persist=persist)
+        if st["company_n"] >= MIN_SAMPLE or chosen is None:
+            chosen = (label, st)
+        if st["company_n"] >= MIN_SAMPLE:
+            break  # the most specific group with enough independent issuers
+    label, st = chosen
+    trusted = st["status"] == "TRUSTED"
+    p_hat = st["company_equal_rate"]
+    lo = hi = None
+    if trusted and p_hat is not None:
+        lo, hi = wilson_interval(p_hat * st["company_n"], st["company_n"])
+    return SuccessRate(
+        probability=shrink(p_hat * st["company_n"], st["company_n"]) if (trusted and p_hat is not None) else None,
+        raw_rate=p_hat if trusted else None, n=st["unique_events"], horizon_days=horizon, group=label,
+        median_excess=st["median_excess"] if trusted else None, median_return=st["median_return"] if trusted else None,
+        typical_drawdown=st["median_mae"] if trusted else None, best_horizon=None,
+        company_n=st["company_n"], ci_low=lo, ci_high=hi,
+        affected_samples=st["unresolved_episodes"], blocked_reason=None if trusted else Q.reason_text_tr(st),
+        status=st["status"], episodes=st["unique_episodes"], unique_periods=st["unique_periods"],
+        event_level_rate=st["event_level_rate"] if trusted else None,
+        sector_equal_rate=st["sector_equal_rate"] if trusted else None,
+        worst_case=st["worst_case"], best_case=st["best_case"])

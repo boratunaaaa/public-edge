@@ -21,6 +21,8 @@ _HOST_RPS = {
     "query1.finance.yahoo.com": 2.0,
     "query2.finance.yahoo.com": 2.0,
     "api.telegram.org": 1.0,
+    "api.tiingo.com": 0.013,  # free tier: 50 requests / hour
+    "extapps2.oge.gov": 0.5,
 }
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 

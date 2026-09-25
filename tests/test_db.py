@@ -4,45 +4,15 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import func, select, text
 
 from app.db.models import (activist_filings, congress_transactions, event_returns, events, filings, form144_filings,
-                           insider_transactions, metadata, notifications, source_health)
+                           insider_transactions, notifications, source_health)
 
 FX = Path(__file__).parent / "fixtures"
 URL = os.environ.get("TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL not set")
-
-
-@pytest.fixture(scope="module")
-def engine():
-    eng = create_engine(URL)
-    metadata.drop_all(eng)
-    metadata.create_all(eng)
-    yield eng
-    metadata.drop_all(eng)
-
-
-@pytest.fixture(autouse=True)
-def no_network_charts(monkeypatch):
-    """Alert charts would fetch live prices; integration tests never touch the network."""
-    import app.notifications.chart as chart
-    monkeypatch.setattr(chart, "price_chart", lambda *a, **k: None)
-
-
-@pytest.fixture(autouse=True)
-def clean(engine):
-    with engine.begin() as c:
-        c.execute(text("TRUNCATE " + ", ".join(t.name for t in metadata.sorted_tables) + " RESTART IDENTITY CASCADE"))
-        from app.entities.registry import resolver, sync_registry
-        sync_registry(c, [
-            {"cik": "0001953926", "name": "Zenas BioPharma, Inc.", "ticker": "ZBIO", "exchange": "Nasdaq"},
-            {"cik": "0001737450", "name": "Opera Ltd", "ticker": "OPRA", "exchange": "Nasdaq"},
-            {"cik": "0001846069", "name": "Nextdoor Holdings, Inc.", "ticker": "KIND", "exchange": "NYSE"},
-            {"cik": "0000077543", "name": "Tutor Perini Corp", "ticker": "TPC", "exchange": "NYSE"},
-        ])
-        resolver.load(c, force=True)
-    yield
+pytestmark = [pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL not set"),
+              pytest.mark.usefixtures("clean", "no_network_charts")]
 
 
 def form4_submission(acc="0001104659-26-038031", owner_xml_patch=None, accepted="20260331163000", filed="20260331"):
@@ -542,7 +512,8 @@ def test_alert_scorecard_counts_only_sent_alerts(engine):
             c.execute(notifications.insert().values(dedupe_key=f"event:{eid}", event_id=eid, kind="event", status="sent",
                                                     attempts=1, sent_at=now - td(days=60)))
         lines = alert_scorecard(c, now)
-    assert "2 bildirimden 1 tanesinde" in lines[0]
+    assert "gönderilen 2 bildirim: 1 tanesinde" in lines[0] and "1 tanesinde geçemedi" in lines[0]
+    assert "0 tanesinin sonucu ölçülemedi" in lines[0]
 
 
 def test_evaluate_all_end_to_end(engine):

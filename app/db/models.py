@@ -118,6 +118,11 @@ insider_transactions = Table(
     Column("value", Numeric(24, 2)),
     Column("shares_after", Numeric(20, 4)),
     Column("direct_indirect", String(1)),
+    Column("nature_of_ownership", Text),
+    # single = one reporting owner | footnote = joint filing, owner named in the row's ownership text |
+    # joint = joint filing, not attributable to one owner (owner_cik NULL, never the "primary" owner)
+    Column("owner_attribution", String(16)),
+    Column("joint_owner_ciks", JSONB),
     Column("is_10b5_1", Boolean, nullable=False, server_default="false"),
     Column("category", String(32), nullable=False),
     Column("filed_date", Date, nullable=False),
@@ -179,6 +184,10 @@ government_awards = Table(
     Column("first_seen_date", Date),  # date this system first observed the record (documented)
     Column("public_date_basis", String(16)),  # first_seen | estimated
     Column("amount_basis", String(24)),  # amount_at_first_seen | current_total_at_backfill
+    Column("recipient_cik", String(10)),
+    # VERIFIED | HIGH_CONFIDENCE | MEDIUM | LOW - how the recipient was mapped to a listed parent
+    Column("mapping_confidence", String(16)),
+    Column("mapping_source", Text),
     Column("source_url", Text, nullable=False),
     _created(),
 )
@@ -284,9 +293,19 @@ events = Table(
     Column("returns_status", String(16), nullable=False, server_default="pending"),  # pending|partial|complete|retry|no_data
     _ts("returns_checked_at"),
     Column("returns_error", Text),
+    # legacy duplicates are never deleted: they are marked superseded and point at the canonical row
+    Column("superseded", Boolean, nullable=False, server_default="false"),
+    Column("canonical_id", BigInteger),
+    Column("superseded_reason", String(64)),
+    # price series identity (security master) - may differ from the filing-time display ticker
+    Column("price_symbol", String(16)),
+    Column("price_symbol_basis", String(32)),
+    # why a mature event has no SPY-relative return (DELISTED_BANKRUPTCY, TICKER_REUSED, NO_PRICE_DATA...)
+    Column("missing_reason", String(32)),
     _created(),
 )
 Index("ix_events_type_public", events.c.event_type, events.c.public_date)
+Index("ix_events_issuer", events.c.issuer_cik)
 Index("ix_events_returns_status", events.c.returns_status)
 
 event_returns = Table(
@@ -302,6 +321,7 @@ event_returns = Table(
     Column("excess_ret", Float),
     Column("mae", Float),
     Column("mfe", Float),
+    Column("exit_basis", String(20), nullable=False, server_default="horizon"),  # horizon | delisting_terminal
     _created(),
 )
 
@@ -395,6 +415,8 @@ discovery_companies = Table(
     Column("features", JSONB, nullable=False, server_default="{}"),
     Column("customers", JSONB, nullable=False, server_default="[]"),
     Column("metrics", JSONB, nullable=False, server_default="{}"),
+    Column("financing_risk_score", Float),
+    Column("financing_flags", JSONB, nullable=False, server_default="[]"),
     _ts("first_discovered_at"),
     _ts("last_scanned_at"),
 )
@@ -495,6 +517,12 @@ news_items = Table(
     Column("original_published_at", DateTime(timezone=True)),  # first published time as first observed
     Column("updated_at", DateTime(timezone=True)),  # later "updated" timestamps - never used for entry
     Column("first_seen_at", DateTime(timezone=True), nullable=False),
+    # HIGH = authoritative timestamp (SEC acceptance / wire timestamp consistent with first sight)
+    # MEDIUM = publisher timestamp without contradiction | LOW = missing / future-dated / seen much later
+    Column("timestamp_confidence", String(8)),
+    Column("canonical_url", Text),
+    Column("lead_signature", JSONB),  # MinHash of the headline+lead shingles (semantic copy detection)
+    Column("source_lineage", String(40)),  # originating wire / filer (SEC, PRNEWSWIRE, BUSINESSWIRE, ...)
     Column("tickers", JSONB, nullable=False, server_default="[]"),
     Column("ciks", JSONB, nullable=False, server_default="[]"),
     Column("entities", JSONB, nullable=False, server_default="[]"),
@@ -511,6 +539,11 @@ news_story_clusters = Table(
     Column("primary_item_id", BigInteger, nullable=False),
     Column("public_at", DateTime(timezone=True), nullable=False),  # earliest trustworthy public time
     Column("headline", Text, nullable=False),
+    Column("canonical_story", Text),  # normalized headline of the primary (most authoritative) copy
+    Column("first_published_at", DateTime(timezone=True)),
+    Column("first_seen_at", DateTime(timezone=True)),
+    Column("syndicated_count", Integer, nullable=False, server_default="0"),
+    Column("timestamp_confidence", String(8)),
     Column("n_items", Integer, nullable=False, server_default="1"),
     Column("sources", JSONB, nullable=False, server_default="[]"),
     Column("title_tokens", JSONB, nullable=False, server_default="[]"),
@@ -548,4 +581,211 @@ llm_usage = Table(
     Column("output_tokens", Integer, nullable=False),
     Column("cost_usd", Float, nullable=False),
     _created(),
+)
+
+
+# =====================================================================  data integrity (2026-09-25)
+
+# Every reporting owner of a Form 4 (joint filings list several; transactions are not per-owner).
+insider_filing_owners = Table(
+    "insider_filing_owners", metadata,
+    Column("accession", String(25), primary_key=True),
+    Column("owner_cik", String(10), primary_key=True),
+    Column("owner_index", Integer, nullable=False),
+    Column("owner_name", Text, nullable=False),
+    Column("is_director", Boolean, nullable=False, server_default="false"),
+    Column("is_officer", Boolean, nullable=False, server_default="false"),
+    Column("is_ten_pct", Boolean, nullable=False, server_default="false"),
+    Column("officer_title", Text),
+    Column("is_ceo", Boolean, nullable=False, server_default="false"),
+    Column("is_cfo", Boolean, nullable=False, server_default="false"),
+    Column("is_entity", Boolean, nullable=False, server_default="false"),
+    Column("issuer_cik", String(10), index=True),
+    Column("filed_date", Date),
+)
+
+# Person/entity graph: which reporting entities share one economic (beneficial) owner.
+beneficial_owner_links = Table(
+    "beneficial_owner_links", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("entity_key", String(40), nullable=False),  # owner CIK (or NAME:<norm>)
+    Column("entity_name", Text, nullable=False),
+    Column("beneficial_owner_key", String(40), nullable=False),
+    Column("beneficial_owner_name", Text, nullable=False),
+    Column("relationship_type", String(24), nullable=False),  # JOINT_FILER | NAMED_TRUST | FAMILY_VEHICLE | CONTROLLED_ENTITY
+    Column("confidence", String(8), nullable=False),  # HIGH | MEDIUM | LOW
+    Column("source", Text, nullable=False),  # accession / rule that produced the link
+    Column("issuer_cik", String(10)),
+    _created(),
+    UniqueConstraint("entity_key", "beneficial_owner_key", "relationship_type", name="uq_bo_links_entity_owner_type"),
+)
+Index("ix_bo_links_entity", beneficial_owner_links.c.entity_key)
+
+# Security master (SEC primary sources + public listing metadata).
+security_master = Table(
+    "security_master", metadata,
+    Column("cik", String(10), primary_key=True),
+    Column("name", Text),
+    Column("sic", String(8)),
+    Column("sic_description", Text),
+    Column("sector", String(40)),  # SIC division
+    Column("exchanges", JSONB, nullable=False, server_default="[]"),
+    Column("current_tickers", JSONB, nullable=False, server_default="[]"),
+    Column("former_names", JSONB, nullable=False, server_default="[]"),
+    Column("status", String(16), nullable=False, server_default="UNKNOWN"),  # ACTIVE | DELISTED | UNKNOWN
+    Column("delisting_date", Date),
+    Column("delisting_reason", String(32)),  # BANKRUPTCY | MERGER | EXCHANGE_COMPLIANCE | VOLUNTARY | UNKNOWN
+    Column("delisting_confidence", String(8)),
+    Column("delisting_source", Text),
+    _ts("submissions_fetched_at"),
+    _ts("updated_at"),
+)
+
+# Point-in-time symbol history: the symbol a CIK used on its own filings between two dates.
+security_symbols = Table(
+    "security_symbols", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False),
+    Column("symbol", String(16), nullable=False),
+    Column("first_seen", Date, nullable=False),
+    Column("last_seen", Date, nullable=False),
+    Column("n_obs", Integer, nullable=False, server_default="1"),
+    Column("source", String(24), nullable=False),  # form345_filing | sec_registry | listing_file
+    UniqueConstraint("cik", "symbol", "source", name="uq_security_symbols_cik_sym_src"),
+)
+Index("ix_security_symbols_symbol", security_symbols.c.symbol)
+Index("ix_security_symbols_cik", security_symbols.c.cik)
+
+# Public listing periods per symbol (exchange symbol directories / listing files).
+listing_periods = Table(
+    "listing_periods", metadata,
+    Column("symbol", String(16), primary_key=True),
+    Column("exchange", String(24), primary_key=True),
+    Column("start_date", Date),
+    Column("end_date", Date),
+    Column("asset_type", String(16)),
+    Column("source", String(24), nullable=False),
+)
+
+corporate_actions = Table(
+    "corporate_actions", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False, index=True),
+    # FORM25 | FORM25_NSE | FORM15 | BANKRUPTCY | CHANGE_IN_CONTROL | ACQ_DISPOSITION | LISTING_DEFICIENCY |
+    # UNREGISTERED_SALE | SHELF_REGISTRATION | PROSPECTUS_424B | MERGER_PROXY | TENDER_OFFER | SPLIT | REVERSE_SPLIT
+    Column("action", String(24), nullable=False),
+    Column("action_date", Date, nullable=False),
+    Column("accession", String(25), nullable=False, server_default=""),
+    Column("source", String(24), nullable=False),  # sec_full_index | sec_submissions | yahoo_events
+    Column("details", JSONB, nullable=False, server_default="{}"),
+    UniqueConstraint("cik", "action", "accession", "action_date", name="uq_corporate_actions_key"),
+)
+
+# XBRL facts with the filing date that disclosed them (point-in-time fundamentals).
+fundamental_facts = Table(
+    "fundamental_facts", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False),
+    Column("concept", String(64), nullable=False),
+    Column("period_start", Date),
+    Column("period_end", Date, nullable=False),
+    Column("val", Float, nullable=False),
+    Column("filed", Date, nullable=False),
+    Column("accession", String(25), nullable=False),
+    Column("form", String(16)),
+    UniqueConstraint("cik", "concept", "period_start", "period_end", "accession", name="uq_fundamental_facts_key"),
+)
+Index("ix_fundamental_facts_cik_filed", fundamental_facts.c.cik, fundamental_facts.c.concept, fundamental_facts.c.filed)
+
+# Audit trail for every legacy cleanup (dry runs included).
+data_cleanup_audit = Table(
+    "data_cleanup_audit", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("run_id", String(40), nullable=False, index=True),
+    Column("action", String(40), nullable=False),
+    Column("table_name", String(40), nullable=False),
+    Column("row_id", BigInteger),
+    Column("before", JSONB),
+    Column("after", JSONB),
+    Column("reason", Text, nullable=False),
+    Column("dry_run", Boolean, nullable=False),
+    _created(),
+)
+
+# Cached hit-rate quality verdicts (TRUSTED | PARTIAL | BLOCKED) per peer group / horizon.
+metrics_quality = Table(
+    "metrics_quality", metadata,
+    Column("metric_key", String(160), primary_key=True),
+    Column("status", String(8), nullable=False),
+    Column("reasons", JSONB, nullable=False, server_default="[]"),
+    Column("stats", JSONB, nullable=False, server_default="{}"),
+    _ts("computed_at"),
+)
+
+walkforward_results = Table(
+    "walkforward_results", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("run_id", String(40), nullable=False, index=True),
+    Column("study", String(64), nullable=False),
+    Column("fold", Integer, nullable=False),
+    Column("train_start", Date, nullable=False),
+    Column("train_end", Date, nullable=False),
+    Column("validation_end", Date, nullable=False),
+    Column("test_end", Date, nullable=False),
+    Column("chosen", JSONB, nullable=False, server_default="{}"),
+    Column("metrics", JSONB, nullable=False, server_default="{}"),
+    _created(),
+)
+
+discovery_validation = Table(
+    "discovery_validation", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("sample_id", String(40), nullable=False),
+    Column("cik", String(10), nullable=False),
+    Column("ticker", String(16)),
+    Column("level_at_sample", String(8), nullable=False),
+    Column("score_at_sample", Float),
+    Column("evidence_snapshot", JSONB, nullable=False, server_default="{}"),
+    # TRUE_DISCOVERY | PLAUSIBLE | FALSE_POSITIVE | INSUFFICIENT_DATA (NULL = not yet labelled)
+    Column("label", String(20)),
+    Column("reason_codes", JSONB, nullable=False, server_default="[]"),
+    Column("notes", Text),
+    Column("labeler", String(40)),
+    _ts("labeled_at"),
+    _created(),
+    UniqueConstraint("sample_id", "cik", name="uq_discovery_validation_sample_cik"),
+)
+
+# OGE public financial disclosures (primary source: extapps2.oge.gov).
+oge_documents = Table(
+    "oge_documents", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("doc_url", Text, nullable=False, unique=True),
+    Column("filer_name", Text, nullable=False),
+    Column("doc_type", String(40), nullable=False),  # 278 Transaction | Annual (YYYY) | ...
+    Column("doc_date", DateTime(timezone=True)),  # OGE posting timestamp
+    Column("agency", Text),
+    Column("title", Text),
+    Column("sha256", String(64)),
+    Column("n_pages", Integer),
+    Column("text_gz", LargeBinary),
+    Column("parse_status", String(16), nullable=False, server_default="pending"),
+    Column("parse_note", Text),
+    _created(),
+)
+
+oge_transactions = Table(
+    "oge_transactions", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("doc_id", BigInteger, ForeignKey("oge_documents.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("line_no", Integer, nullable=False),
+    Column("description", Text, nullable=False),
+    Column("tx_type", String(16)),  # PURCHASE | SALE | EXCHANGE | UNKNOWN
+    Column("tx_date", Date),
+    Column("amount_min", Numeric(16, 2)),
+    Column("amount_max", Numeric(16, 2)),
+    Column("amount_text", Text),
+    Column("ticker", String(16)),  # only when the filer wrote an explicit exchange ticker
+    Column("parse_confidence", String(8), nullable=False),  # HIGH | MEDIUM | LOW (OCR text layer)
+    UniqueConstraint("doc_id", "line_no", name="uq_oge_transactions_doc_line"),
 )

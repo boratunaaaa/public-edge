@@ -68,15 +68,17 @@ def alert_scorecard(conn, now: datetime) -> list[str]:
     from sqlalchemy import text as _t
     rows = conn.execute(_t("""
         SELECT e.event_type, r.excess_ret FROM notifications n JOIN events e ON e.id = n.event_id
-        JOIN event_returns r ON r.event_id = e.id AND r.horizon_days = 30
-        WHERE n.kind = 'event' AND n.status = 'sent' AND n.sent_at BETWEEN :a AND :b AND r.excess_ret IS NOT NULL"""),
+        LEFT JOIN event_returns r ON r.event_id = e.id AND r.horizon_days = 30
+        WHERE n.kind = 'event' AND n.status = 'sent' AND n.sent_at BETWEEN :a AND :b"""),
         {"a": now - timedelta(days=120), "b": now - timedelta(days=30)}).all()
     if not rows:
         return ["Henüz sonucu ölçülebilecek kadar eski bildirim yok (bildirimden en az 30 gün geçmesi gerekiyor)."]
-    wins = sum(1 for _, x in rows if x > 0)
-    avg = sum(x for _, x in rows) / len(rows)
-    return [f"Son 1-4 ayda gönderilen {len(rows)} bildirimden {wins} tanesinde hisse 1 ay içinde borsa ortalamasını geçti.",
-            f"Ortalama fark: {'+' if avg >= 0 else ''}{avg * 100:.1f}%".replace(".", ",")]
+    measured = [x for _, x in rows if x is not None]
+    wins = sum(1 for x in measured if x > 0)
+    unknown = len(rows) - len(measured)
+    # counts only - an unmeasured alert is reported, never silently dropped from the tally
+    return [f"Son 1-4 ayda gönderilen {len(rows)} bildirim: {wins} tanesinde hisse 1 ay içinde borsa ortalamasını geçti, "
+            f"{len(measured) - wins} tanesinde geçemedi, {unknown} tanesinin sonucu ölçülemedi (fiyat verisi yok)."]
 
 
 def weekly_report(engine: Engine, now: datetime | None = None) -> str:

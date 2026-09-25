@@ -13,7 +13,7 @@ from app.db.session import get_engine
 from app.db.store import save_job_state
 from app.entities.registry import resolver, sync_registry
 from app.sources.congress.house import HousePtrSource
-from app.sources.sec.backfill import backfill_13d, backfill_form4_gap, backfill_form345, disk_ok
+from app.sources.sec.backfill import backfill_13d, backfill_form4_gap, backfill_form345
 from app.sources.trump.tracker import TrumpFamilySource
 from app.sources.usaspending.awards import UsaSpendingSource
 
@@ -40,6 +40,30 @@ def step(engine, name, fn):
             save_job_state(conn, f"backfill_{name}_error", {"error": str(e)[:1000]}, status="error", error=str(e)[:1000])
 
 
+def returns_loop(engine) -> None:
+    """Historical returns run continuously next to the other steps (prices come from Yahoo, not SEC).
+    First the price identity of already computed returns is verified, then pending events are priced."""
+    from app.backtest.jobs import revalidate_price_identity
+    while not _stop:
+        try:
+            r = revalidate_price_identity(engine, batch=5000)
+            if r["batch"]:
+                log.info("returns identity revalidation %s", r)
+                continue
+            r = compute_pending(engine, limit=3000, time_budget_s=1800, backfill=True)
+            with engine.begin() as conn:
+                save_job_state(conn, "backfill_returns", r, status="running")
+            log.info("backfill returns batch %s", r)
+            if r.get("processed") or r.get("no_data"):
+                continue
+        except Exception:
+            log.exception("backfill returns loop failed")
+        for _ in range(90):  # idle / after an error: 15 minutes
+            if _stop:
+                return
+            time.sleep(10)
+
+
 def run_once(engine) -> None:
     years = settings.backfill_years
     with engine.begin() as conn:
@@ -47,26 +71,24 @@ def run_once(engine) -> None:
         resolver.load(conn, force=True)
     step(engine, "trump", lambda: TrumpFamilySource().run_backfill(engine).items)
     step(engine, "form345", lambda: backfill_form345(engine, years))
+    # data integrity: point-in-time security master (symbols, owners, delistings, sectors), joint-filing
+    # attribution of XML rows, then legacy duplicate cleanup (superseded, never deleted; audited)
+    from app.securitymaster.build import run_security_master
+    step(engine, "security_master", lambda: run_security_master(engine, years))
+    from app.integrity.reattribute import reattribute_xml_rows
+    step(engine, "reattribute_xml", lambda: reattribute_xml_rows(engine, batch=100000))
+    from app.integrity.cleanup import run_cleanup_safe
+    step(engine, "integrity_cleanup", lambda: run_cleanup_safe(engine))
     step(engine, "form4_gap", lambda: backfill_form4_gap(engine))
-    # routine vs opportunistic insider label for historical buy events (Cohen-Malloy-Pomorski 2012)
+    # routine vs opportunistic label (CMP-inspired point-in-time heuristic) for historical buy events
     from app.signals.insider_type import annotate_existing
     step(engine, "insider_type", lambda: annotate_existing(engine))
     step(engine, "house", lambda: HousePtrSource().run_backfill(engine, years).items)
     step(engine, "usaspending", lambda: UsaSpendingSource().run_backfill(engine, years).items)
     step(engine, "sc13d", lambda: backfill_13d(engine, years))
-    # V2: official 8-K history for the news backtest (needs a discovery universe snapshot first)
+    # official 8-K history for the news backtest: point-in-time listed universe (not today's list)
     from app.news.backfill import backfill_news_8k
     step(engine, "news_8k", lambda: backfill_news_8k(engine, days=settings.news_backfill_days))
-    # returns for every historical event (prices are fetched per ticker, cached in market_prices)
-    while not _stop and disk_ok():
-        r = compute_pending(engine, limit=2000, time_budget_s=1800)
-        with engine.begin() as conn:
-            save_job_state(conn, "backfill_returns", r, status="running")
-        log.info("backfill returns batch %s", r)
-        if not r.get("processed") and not r.get("no_data"):
-            break
-    with engine.begin() as conn:
-        save_job_state(conn, "backfill_returns", {"finished": True}, status="done")
 
 
 def main() -> None:
@@ -75,6 +97,9 @@ def main() -> None:
     signal.signal(signal.SIGINT, _sig)
     engine = get_engine()
     loop = "--once" not in sys.argv
+    import threading
+    rt = threading.Thread(target=returns_loop, args=(engine,), name="returns", daemon=True)
+    rt.start()
     while not _stop:
         run_once(engine)
         if not loop:

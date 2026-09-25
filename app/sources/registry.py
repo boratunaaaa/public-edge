@@ -5,6 +5,7 @@ from app.news.sources import news_sources
 from app.sources.base import PlannedSource, Source
 from app.sources.congress.house import HousePtrSource, SenateSource
 from app.sources.sec.live import Sec13DSource, SecForm4Source, SecForm144Source
+from app.sources.trump.oge import TrumpOgeSource
 from app.sources.trump.tracker import TrumpFamilySource
 from app.sources.usaspending.awards import UsaSpendingSource
 
@@ -16,6 +17,7 @@ SOURCES: list[Source] = [
     SenateSource(),
     UsaSpendingSource(),
     TrumpFamilySource(),
+    TrumpOgeSource(),
     # V2 news intelligence (Tier 1 official sources first)
     *news_sources(),
     PlannedSource("news_globenewswire", "GlobeNewswire RSS does not answer from the server (connection timeout)"),

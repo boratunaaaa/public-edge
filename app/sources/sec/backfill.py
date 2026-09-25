@@ -25,6 +25,7 @@ from app.entities.registry import resolver
 from app.parsers.form4 import PLAN_RE, classify, role_flags
 from app.parsers.sec_common import index_url, normalize_symbol, to_date, to_float
 from app.signals.detect import cluster_events_for_issuer, insider_buy_events
+from app.signals.owners import OwnerRef, attribute, joint_display_name, joint_roles, save_filing_owners
 from app.sources.sec import edgar
 from app.sources.sec.processing import process_text
 
@@ -73,6 +74,39 @@ def _download_dataset(q: str) -> bytes:
     raise last
 
 
+def dataset_owner_refs(owner_rows: list[dict]) -> list[OwnerRef]:
+    refs = []
+    for o in owner_rows:
+        rel = (o.get("RPTOWNER_RELATIONSHIP") or "").lower()
+        title = o.get("RPTOWNER_TITLE") or None
+        is_ceo, is_cfo = role_flags(" ".join(x for x in (title, o.get("RPTOWNER_TXT")) if x))
+        cik = (o.get("RPTOWNERCIK") or "").strip()
+        if not cik:
+            continue
+        refs.append(OwnerRef(cik.zfill(10), o.get("RPTOWNERNAME") or "", "director" in rel, "officer" in rel,
+                             "tenpercent" in rel.replace(" ", "") or "10%" in rel, title, is_ceo, is_cfo))
+    return refs
+
+
+def dataset_row_text(t: dict, footnotes: dict[str, str]) -> str:
+    """Ownership text of one dataset row: NATURE_OF_OWNERSHIP + every footnote the row references."""
+    ids = set()
+    for k, v in t.items():
+        if k.endswith("_FN") and v:
+            ids.update(x.strip() for x in v.split(",") if x.strip())
+    return " ".join([t.get("NATURE_OF_OWNERSHIP") or ""] + [footnotes.get(i, "") for i in sorted(ids)]).strip()
+
+
+def dataset_row_owner(refs: list[OwnerRef], text_: str) -> dict:
+    who, how = attribute(refs, text_)
+    roles = joint_roles(refs) if who is None else {
+        "is_director": who.is_director, "is_officer": who.is_officer, "is_ten_pct": who.is_ten_pct,
+        "officer_title": who.officer_title, "is_ceo": who.is_ceo, "is_cfo": who.is_cfo}
+    return {"owner_cik": who.cik if who else None,
+            "owner_name": who.name if who else (joint_display_name(refs) if refs else ""), **roles,
+            "owner_attribution": how, "joint_owner_ciks": [o.cik for o in refs] if len(refs) > 1 else None}
+
+
 def load_form345_quarter(engine: Engine, q: str) -> dict:
     z = zipfile.ZipFile(io.BytesIO(_download_dataset(q)))
     subs = {}
@@ -82,30 +116,29 @@ def load_form345_quarter(engine: Engine, q: str) -> dict:
         subs[s["ACCESSION_NUMBER"]] = s
     trans = [t for t in _tsv(z, "NONDERIV_TRANS.tsv") if t.get("TRANS_CODE") in ("P", "S") and t["ACCESSION_NUMBER"] in subs]
     need = {t["ACCESSION_NUMBER"] for t in trans}
-    owners: dict[str, dict] = {}
+    owners: dict[str, list[dict]] = defaultdict(list)
     for o in _tsv(z, "REPORTINGOWNER.tsv"):
-        a = o["ACCESSION_NUMBER"]
-        if a in need and a not in owners:
-            owners[a] = o
+        if o["ACCESSION_NUMBER"] in need:
+            owners[o["ACCESSION_NUMBER"]].append(o)  # ALL reporting owners (joint filings list several)
     plan_acc: set[str] = set()
+    notes: dict[str, dict[str, str]] = defaultdict(dict)
     for fn in _tsv(z, "FOOTNOTES.tsv"):
         a = fn.get("ACCESSION_NUMBER")
-        if a in need and PLAN_RE.search(fn.get("FOOTNOTE_TXT", "") or ""):
-            plan_acc.add(a)
+        if a in need:
+            notes[a][fn.get("FOOTNOTE_ID") or ""] = fn.get("FOOTNOTE_TXT", "") or ""
+            if PLAN_RE.search(fn.get("FOOTNOTE_TXT", "") or ""):
+                plan_acc.add(a)
     with engine.connect() as conn:
         resolver.load(conn)
         existing = {a for (a,) in conn.execute(select(insider_transactions.c.accession).where(
             insider_transactions.c.accession.in_(list(need)), insider_transactions.c.source != "dataset")).all()} if need else set()
     rows = []
+    refs_by_acc = {a: dataset_owner_refs(owners.get(a, [])) for a in need}
     for t in trans:
         a = t["ACCESSION_NUMBER"]
         if a in existing:
             continue  # already ingested from the live XML
         s = subs[a]
-        o = owners.get(a, {})
-        rel = (o.get("RPTOWNER_RELATIONSHIP") or "").lower()
-        title = o.get("RPTOWNER_TITLE") or None
-        is_ceo, is_cfo = role_flags(" ".join(x for x in (title, o.get("RPTOWNER_TXT")) if x))
         shares = to_float(t.get("TRANS_SHARES"))
         price = to_float(t.get("TRANS_PRICEPERSHARE"))
         issuer = (s.get("ISSUERCIK") or "").zfill(10)
@@ -116,19 +149,21 @@ def load_form345_quarter(engine: Engine, q: str) -> dict:
         cik_url = issuer.lstrip("0") or "0"
         rows.append({
             "accession": a, "line_key": f"DS{t['NONDERIV_TRANS_SK']}", "issuer_cik": issuer, "ticker": ticker,
-            "issuer_name": s.get("ISSUERNAME"), "owner_cik": (o.get("RPTOWNERCIK") or "").zfill(10) or None,
-            "owner_name": o.get("RPTOWNERNAME") or "", "is_director": "director" in rel, "is_officer": "officer" in rel,
-            "is_ten_pct": "tenpercent" in rel.replace(" ", "") or "10%" in rel, "officer_title": title,
-            "is_ceo": is_ceo, "is_cfo": is_cfo, "security_title": t.get("SECURITY_TITLE"), "is_derivative": False,
+            "issuer_name": s.get("ISSUERNAME"), **dataset_row_owner(refs_by_acc[a], dataset_row_text(t, notes.get(a, {}))),
+            "security_title": t.get("SECURITY_TITLE"), "is_derivative": False,
             "trans_date": to_date(t.get("TRANS_DATE")), "trans_code": t.get("TRANS_CODE"),
             "acq_disp": t.get("TRANS_ACQUIRED_DISP_CD"), "shares": shares, "price": price,
             "value": round(shares * price, 2) if (shares is not None and price is not None) else None,
             "shares_after": to_float(t.get("SHRS_OWND_FOLWNG_TRANS")), "direct_indirect": t.get("DIRECT_INDIRECT_OWNERSHIP"),
+            "nature_of_ownership": t.get("NATURE_OF_OWNERSHIP") or None,
             "is_10b5_1": (s.get("AFF10B5ONE", "").lower() in ("1", "true")) or a in plan_acc,
             "category": classify(t.get("TRANS_CODE"), False), "filed_date": to_date(s.get("FILING_DATE")),
             "accepted_at": None, "source": "dataset", "source_url": index_url(cik_url, a),
         })
     with engine.begin() as conn:
+        for a in need - existing:
+            s = subs[a]
+            save_filing_owners(conn, a, refs_by_acc[a], (s.get("ISSUERCIK") or "").zfill(10), to_date(s.get("FILING_DATE")))
         n = insert_rows(conn, insider_transactions, rows, ["accession", "line_key"])
     buys = {r["accession"] for r in rows if r["trans_code"] == "P"}
     events_created = insider_events_from_dataset(engine, buys)

@@ -29,6 +29,7 @@ class HorizonReturn:
     excess_ret: float | None
     mae: float | None
     mfe: float | None
+    exit_basis: str = "horizon"  # horizon | delisting_terminal
 
 
 def _adj_factor(b: Bar) -> float:
@@ -74,8 +75,25 @@ def _exit_bar(bars: list[Bar], entry: Bar, horizon: int, as_of: date) -> Bar | N
     return last
 
 
+def _terminal_exit(bars: list[Bar], entry: Bar, horizon: int, as_of: date, terminal_date: date | None) -> Bar | None:
+    """Delisted security: when the horizon ends after the documented delisting, the position ends at
+    the last traded price (cash-out / final quote) - the CRSP-style delisting return - instead of
+    silently disappearing from the sample."""
+    if terminal_date is None or entry.date + timedelta(days=horizon) <= terminal_date:
+        return None
+    if entry.date + timedelta(days=horizon) > as_of:
+        return None
+    cand = [b for b in bars if entry.date < b.date <= terminal_date + timedelta(days=3) and b.close]
+    if not cand or (terminal_date - cand[-1].date).days > 10:
+        return None
+    return cand[-1]
+
+
 def compute_returns(bars: list[Bar], spy_bars: list[Bar] | None, public_date: date, public_at: datetime | None,
-                    as_of: date | None = None, horizons: tuple[int, ...] = HORIZONS) -> list[HorizonReturn]:
+                    as_of: date | None = None, horizons: tuple[int, ...] = HORIZONS,
+                    terminal_date: date | None = None) -> list[HorizonReturn]:
+    """terminal_date: documented delisting date (security master). Horizons that end after it exit at
+    the last traded price; the benchmark still runs to the full horizon (cash earns nothing)."""
     bars = sorted((b for b in bars if b.close), key=lambda b: b.date)
     if not bars:
         return []
@@ -89,8 +107,13 @@ def compute_returns(bars: list[Bar], spy_bars: list[Bar] | None, public_date: da
     spy = {b.date: b for b in (spy_bars or [])}
     spy_e = spy.get(e.date)
     out = []
+    spy_sorted = sorted(spy.values(), key=lambda b: b.date)
     for h in horizons:
+        basis = "horizon"
         x = _exit_bar(bars, e, h, as_of)
+        if x is None:
+            x = _terminal_exit(bars, e, h, as_of, terminal_date)
+            basis = "delisting_terminal"
         if x is None:
             continue
         xp = _adj_close(x)
@@ -103,11 +126,16 @@ def compute_returns(bars: list[Bar], spy_bars: list[Bar] | None, public_date: da
         mae = (min(lows) / ep - 1.0) if lows else None
         mfe = (max(highs) / ep - 1.0) if highs else None
         spy_ret = None
-        spy_x = spy.get(x.date)
+        if basis == "delisting_terminal":
+            target = e.date + timedelta(days=h)
+            later = [b for b in spy_sorted if e.date < b.date <= target]
+            spy_x = later[-1] if later and (target - later[-1].date).days <= 7 else None
+        else:
+            spy_x = spy.get(x.date)
         if spy_e is not None and spy_x is not None and _adj_open(spy_e) and _adj_close(spy_x):
             spy_ret = _adj_close(spy_x) / _adj_open(spy_e) - 1.0
         out.append(HorizonReturn(h, e.date, ep, x.date, xp, ret, spy_ret,
-                                 (ret - spy_ret) if spy_ret is not None else None, mae, mfe))
+                                 (ret - spy_ret) if spy_ret is not None else None, mae, mfe, basis))
     return out
 
 
