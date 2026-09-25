@@ -373,3 +373,31 @@ def test_price_context_line():
         "Hisse son 3 ayda %32 düştü. Fiyat son bir yılın en düşük seviyelerine yakın."
     assert price_context_line({"change_3m": 0.1, "range_pos": 0.5}) == "Hisse son 3 ayda %10 yükseldi."
     assert price_context_line(None) is None and price_context_line({"change_3m": None}) is None
+
+
+def test_theme_keywords_are_whole_words():
+    assert "BIOTECH" not in L.themes_in("International alternative external operations in our international markets.")
+    assert "BIOTECH" in L.themes_in("Our mRNA therapy and our RNA platform: therapy candidates.")
+
+
+def test_established_revenue_is_not_early_stage():
+    assert L.classify_stage([], 200e6, 0.05)[0] == "MASS_PRODUCTION"  # $200M, +5% is not "early commercial"
+    assert L.classify_stage([], 30e6, 0.9)[0] == "PRODUCTION_RAMP"
+    assert L.classify_stage([], 8e6, 0.2)[0] == "EARLY_COMMERCIAL"
+
+
+def test_growth_without_business_evidence_is_not_high_interest():
+    f = S.features(market_cap=900e6, metrics={"yoy_latest": 1.2, "yoy_prev": 0.8, "flags": ["REVENUE_ACCELERATION", "MARGIN_INFLECTION"]},
+                   stage="PRODUCTION_RAMP", stage_prev="EARLY_COMMERCIAL", relations=[], signal_labels=[],
+                   insider={"buy_value": 2e5, "buyers": 1}, activist_13d=False, gov_contract_ratio=None, risks=[], themes=[])
+    assert S.score(f)[1] != "HIGH" and not S.has_real_progress(f)  # e.g. a shipping company with a good year
+    f2 = dict(f, themes=["ROBOTICS"])
+    assert S.score(f2)[1] == "HIGH" and S.has_real_progress(f2)
+
+
+def test_already_scaled_is_never_high_interest():
+    f = S.features(market_cap=18e9, metrics={"yoy_latest": 1.2, "yoy_prev": 0.8, "flags": ["REVENUE_ACCELERATION"]},
+                   stage="PRODUCTION_RAMP", stage_prev=None, relations=[{"counterparty": "NVIDIA", "category": "TOP_SEMICONDUCTOR",
+                   "strength": 1.0, "hedged": False, "relation": "customer"}], signal_labels=["SOLE_SUPPLIER"], insider={},
+                   activist_13d=False, gov_contract_ratio=None, risks=[], themes=["AI_INFRASTRUCTURE"])
+    assert S.score(f)[1] == "MEDIUM"

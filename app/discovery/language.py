@@ -189,14 +189,19 @@ THEMES: dict[str, list[str]] = {
 }
 
 
+_THEME_RES = {theme: re.compile(r"(?<![a-z])(" + "|".join(re.escape(k) for k in sorted(kws, key=len, reverse=True)) + r")(?![a-z])")
+              for theme, kws in THEMES.items()}
+
+
 def themes_in(text: str) -> list[str]:
+    """Whole-word keyword counts ("rna" must not match "international", "plc" not "complcated")."""
     t = (text or "").lower()
     scored = []
-    for theme, kws in THEMES.items():
-        n = sum(t.count(k) for k in kws)
-        if n:
+    for theme, rx in _THEME_RES.items():
+        n = len(rx.findall(t))
+        if n >= 2:
             scored.append((n, theme))
-    return [th for n, th in sorted(scored, reverse=True) if n >= 2][:4]
+    return [th for n, th in sorted(scored, reverse=True)][:4]
 
 
 _KNOWN_TERMS = {k for kws in THEMES.values() for k in kws}
@@ -255,9 +260,15 @@ def classify_stage(signal_labels: list[str], ttm_revenue: float | None, yoy_grow
         return stage, reasons + ["TTM revenue < $1M"]
     if text_stage in ("MASS_PRODUCTION", "PRODUCTION_RAMP"):
         return text_stage, reasons
-    if rev >= 250e6 and (yoy_growth or 0) < 0.4:
-        return "MASS_PRODUCTION", reasons + ["revenue > $250M"]
-    if text_stage in ("EARLY_COMMERCIAL",) or rev >= 1e6:
-        return ("PRODUCTION_RAMP" if (yoy_growth or 0) >= 0.5 and rev >= 20e6 else "EARLY_COMMERCIAL"), \
-            reasons + [f"TTM revenue {rev / 1e6:.1f}M, YoY {((yoy_growth or 0) * 100):.0f}%"]
-    return text_stage or "PRE-COMMERCIAL", reasons
+    g = yoy_growth or 0.0
+    info = f"TTM revenue {rev / 1e6:.1f}M, YoY {g * 100:.0f}%"
+    # an established business (large or slow-growing revenue) is not "early", whatever it announces
+    if rev >= 250e6 and g < 0.4:
+        return "MASS_PRODUCTION", reasons + [info]
+    if rev >= 100e6 and g < 0.3:
+        return "MASS_PRODUCTION", reasons + [info]
+    if rev >= 20e6 and g >= 0.5:
+        return "PRODUCTION_RAMP", reasons + [info]
+    if rev < 50e6 or text_stage == "EARLY_COMMERCIAL":
+        return "EARLY_COMMERCIAL", reasons + [info]
+    return "MASS_PRODUCTION", reasons + [info]

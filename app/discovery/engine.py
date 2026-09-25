@@ -71,13 +71,13 @@ def evaluate(conn: Connection, u: dict, *, is_backfill: bool) -> dict:
     gov = conn.execute(select(func.max(government_awards.c.value_to_mcap)).where(and_(
         government_awards.c.ticker == ticker, government_awards.c.public_date_basis == "first_seen",
         government_awards.c.award_date >= date.today() - timedelta(days=365)))).scalar()
+    themes = L.themes_in(" ".join(texts[:400]) + " " + (u.get("name") or ""))
     feats = S.features(market_cap=u.get("market_cap"), metrics=met, stage=stage, stage_prev=prev[0] if prev else None,
                        relations=rels, signal_labels=labels, insider=_insider(conn, cik), activist_13d=bool(act),
-                       gov_contract_ratio=gov, risks=risks)
+                       gov_contract_ratio=gov, risks=risks, themes=themes)
     feats["stage_reasons"] = stage_reasons
     sc, level, why = S.score(feats)
     candidate = S.has_real_progress(feats)
-    themes = L.themes_in(" ".join(texts[:400]) + " " + (u.get("name") or ""))
     now = datetime.now(timezone.utc)
     customers = sorted({(r["counterparty"], r["category"], r["agreement"]) for r in rels if r["strength"] >= 0.6})
     vals = dict(ticker=ticker, name=u.get("name"), market_cap=u.get("market_cap"), bucket=u.get("bucket"), themes=themes,

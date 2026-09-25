@@ -27,7 +27,7 @@ RISK_PENALTY = {("GOING_CONCERN", "HIGH"): 3.0, ("DILUTION", "HIGH"): 2.0, ("DIL
 
 def features(*, market_cap: float | None, metrics: dict, stage: str | None, stage_prev: str | None,
              relations: list[dict], signal_labels: list[str], insider: dict, activist_13d: bool,
-             gov_contract_ratio: float | None, risks: list[dict]) -> dict:
+             gov_contract_ratio: float | None, risks: list[dict], themes: list[str] | None = None) -> dict:
     strong_customers = [r for r in relations if r["category"] in MAJOR_CATEGORIES and r["strength"] >= 0.6 and not r["hedged"]
                         and r.get("relation") not in ("competitor", "supplier")]
     return {
@@ -52,6 +52,7 @@ def features(*, market_cap: float | None, metrics: dict, stage: str | None, stag
         "runway_months": metrics.get("runway_months"),
         "positive_ocf": (metrics.get("annual_ocf") or 0) > 0,
         "risks": [f"{r['risk']}:{r['severity']}" for r in risks],
+        "themes": themes or [],
     }
 
 
@@ -116,11 +117,26 @@ def score(f: dict) -> tuple[float, str, list[str]]:
         risk, sev = rk.split(":")
         s -= RISK_PENALTY.get((risk, sev), 0.0)
     level = "HIGH" if s >= 6 else "MEDIUM" if s >= 3.5 else "LOW"
+    # HIGH interest needs business evidence of the kind this engine looks for (a technology theme, a
+    # validated customer or a bottleneck position) - revenue growth alone (shipping, miners...) is not enough
+    if level == "HIGH" and not has_business_evidence(f):
+        level = "MEDIUM"
+    if level == "HIGH" and (f.get("market_cap") or 0) >= 10e9:
+        level = "MEDIUM"  # already scaled: monitored, not "early discovery"
     return round(s, 2), level, why
 
 
+def has_business_evidence(f: dict) -> bool:
+    return bool(f.get("themes") or f.get("major_customer_count") or f.get("bottleneck_signals")
+                or f.get("government_backed") or (f.get("gov_contract_to_mcap") or 0) >= 0.05)
+
+
 def has_real_progress(f: dict) -> bool:
-    """A company only becomes a discovery candidate on business evidence - never on price action."""
-    return bool(f.get("major_customer_count") or f.get("inflection_flags") and set(f["inflection_flags"]) - {"CASH_RUNWAY_RISK"}
-                or f.get("stage") in PROGRESS_STAGES or f.get("insider_buyers_90d", 0) >= 2
-                or f.get("bottleneck_signals") or (f.get("gov_contract_to_mcap") or 0) >= 0.05)
+    """A company only becomes a discovery candidate on business evidence - never on price action.
+    Revenue-only progress (growth flags / early stage) additionally needs a technology theme."""
+    if not has_business_evidence(f) and not f.get("insider_buyers_90d", 0) >= 2:
+        return False
+    growth = bool(set(f.get("inflection_flags") or []) - {"CASH_RUNWAY_RISK"}) or \
+        (f.get("stage") in PROGRESS_STAGES and (f.get("revenue_yoy") or 0) >= 0.25) or bool(f.get("stage_advanced"))
+    return bool(f.get("major_customer_count") or f.get("bottleneck_signals") or (f.get("gov_contract_to_mcap") or 0) >= 0.05
+                or f.get("insider_buyers_90d", 0) >= 2 or growth)
