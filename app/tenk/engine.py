@@ -33,7 +33,8 @@ DAILY_INDEX_URL = "https://www.sec.gov/Archives/edgar/daily-index/{y}/QTR{q}/for
 MAX_DOC_BYTES = 25_000_000
 ANNUAL_FORMS = {"10-K", "10-K405", "10-KT"}
 CONSECUTIVE_MAX_DAYS = 550  # a "previous" 10-K older than ~18 months is not consecutive
-HISTORY_YEARS = 6
+HISTORY_YEARS = 5
+MIN_FREE_BYTES = 10 * 1024**3  # the 10-K history stops well before the disk gets tight
 EVENT_PRIORITY = 2  # below ALERT_MIN_PRIORITY: an unvalidated signal is recorded, not alerted
 POSITIVE = {"RISK_DECREASE", "LIQUIDITY_IMPROVEMENT", "REMOVED_GOING_CONCERN", "NEW_CAPACITY_EXPANSION",
             "NEW_COMMERCIALIZATION_LANGUAGE", "NEW_MAJOR_CUSTOMER"}
@@ -238,7 +239,10 @@ def run_backfill(engine: Engine, max_docs: int = 120, time_budget_s: float = 900
     """Resumable, survivorship-free historical pass. The universe is point-in-time: every 10-K filer in
     the EDGAR full index of a quarter that had an exchange ticker AT THAT filing date (delisted and
     merged companies included). Quarters newest first; per CIK all 10-Ks of the window at once."""
+    import shutil
     from app.securitymaster.provider import get_security_master
+    if shutil.disk_usage("/").free < MIN_FREE_BYTES:
+        return {"skipped": "LOW_DISK", "free_gb": round(shutil.disk_usage("/").free / 1024**3, 1)}
     name = "tenk_backfill"
     t0 = time.time()
     with engine.begin() as conn:

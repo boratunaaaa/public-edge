@@ -78,7 +78,7 @@ def tenk_loop(engine) -> None:
         try:
             r = run_backfill(engine, max_docs=150, time_budget_s=900)
             log.info("10-K backfill batch %s", r)
-            if not r.get("docs") and not r.get("not_listed"):
+            if r.get("skipped") or (not r.get("docs") and not r.get("not_listed")):
                 pause = 6 * 3600  # history complete: look again for late filers every 6 hours
         except Exception:
             log.exception("10-K backfill failed")
