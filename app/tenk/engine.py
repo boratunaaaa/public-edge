@@ -34,6 +34,7 @@ MAX_DOC_BYTES = 25_000_000
 ANNUAL_FORMS = {"10-K", "10-K405", "10-KT"}
 CONSECUTIVE_MAX_DAYS = 550  # a "previous" 10-K older than ~18 months is not consecutive
 HISTORY_YEARS = 5
+MAX_CIK_FAILS = 5
 MIN_FREE_BYTES = 10 * 1024**3  # the 10-K history stops well before the disk gets tight
 EVENT_PRIORITY = 2  # below ALERT_MIN_PRIORITY: an unvalidated signal is recorded, not alerted
 POSITIVE = {"RISK_DECREASE", "LIQUIDITY_IMPROVEMENT", "REMOVED_GOING_CONCERN", "NEW_CAPACITY_EXPANSION",
@@ -52,9 +53,7 @@ def acceptance_to_utc(s: str | None) -> datetime | None:
     return naive.replace(tzinfo=ET).astimezone(timezone.utc)
 
 
-def annual_filings(sub: dict) -> list[dict]:
-    """10-K filings from a submissions JSON (recent block), oldest first."""
-    r = (sub.get("filings") or {}).get("recent") or {}
+def _annual_from_block(r: dict) -> list[dict]:
     out = []
     for i, form in enumerate(r.get("form") or []):
         if form not in ANNUAL_FORMS:
@@ -65,16 +64,51 @@ def annual_filings(sub: dict) -> list[dict]:
                         "primary_doc": r["primaryDocument"][i], "period": r.get("reportDate", [None] * (i + 1))[i] or None})
         except (KeyError, IndexError, ValueError):
             continue
-    return sorted(out, key=lambda f: f["filing_date"])
+    return out
+
+
+def annual_filings(sub: dict) -> list[dict]:
+    """10-K filings from a submissions JSON (recent block only), oldest first."""
+    return sorted(_annual_from_block((sub.get("filings") or {}).get("recent") or {}), key=lambda f: f["filing_date"])
+
+
+ARCHIVE_URL = "https://data.sec.gov/submissions/{name}"
+
+
+def all_annual_filings(sub: dict, since: date, getter=None) -> list[dict]:
+    """10-Ks from the recent block PLUS every archived submissions file (filings.files) whose date range
+    reaches back to `since` - long-lived filers have their older years only in those archives.
+    Raises on an archive fetch error so the caller retries the company instead of storing a gap."""
+    getter = getter or (lambda url: http.get(url, retries=2).json())
+    out = {f["accession"]: f for f in _annual_from_block((sub.get("filings") or {}).get("recent") or {})}
+    for fmeta in (sub.get("filings") or {}).get("files") or []:
+        try:
+            to = date.fromisoformat(fmeta.get("filingTo") or "9999-12-31")
+        except ValueError:
+            to = date.max
+        if to < since:
+            continue
+        for f in _annual_from_block(getter(ARCHIVE_URL.format(name=fmeta["name"]))):
+            out.setdefault(f["accession"], f)
+    return sorted(out.values(), key=lambda f: f["filing_date"])
+
+
+class FetchError(Exception):
+    """Transient document fetch failure: the filing stays retryable."""
 
 
 def fetch_text(cik: str, f: dict) -> str | None:
+    """Document text; None = permanently missing (404/410); FetchError = transient (retry later)."""
     url = DOC_URL.format(cik=int(cik), acc=f["accession"].replace("-", ""), doc=f["primary_doc"])
     try:
         r = http.get(url, retries=2)
     except http.HttpError as e:
         log.info("10-K %s %s: %s", cik, f["accession"], e)
-        return None
+        if e.status in (404, 410):
+            return None
+        raise FetchError(str(e)) from e
+    except Exception as e:  # timeouts / connection resets
+        raise FetchError(f"{type(e).__name__}: {e}") from e
     raw = r.content[:MAX_DOC_BYTES].decode("utf-8", "ignore")
     return html_to_text(raw) if "<" in raw[:5000] else raw
 
@@ -83,57 +117,124 @@ def _doc_url(cik: str, f: dict) -> str:
     return DOC_URL.format(cik=int(cik), acc=f["accession"].replace("-", ""), doc=f["primary_doc"])
 
 
+RETRYABLE = ("fetch_failed",)
+
+
 def process_filing(engine: Engine, cik: str, ticker: str | None, name: str | None, f: dict, *, is_backfill: bool) -> dict:
-    """Fingerprint one 10-K and compare it with the stored previous 10-K of the same CIK."""
+    """Fingerprint one 10-K and compare it with the stored previous 10-K of the same CIK.
+    A transient fetch failure is stored as retryable (status fetch_failed) and retried on the next run;
+    when the filing later succeeds, its successor's comparison is recomputed too."""
     with engine.connect() as conn:
-        if conn.execute(select(tenk_filings.c.id).where(tenk_filings.c.accession == f["accession"])).first():
-            return {"skipped": "known"}
-    txt = fetch_text(cik, f)
+        existing = conn.execute(select(tenk_filings.c.id, tenk_filings.c.status)
+                                .where(tenk_filings.c.accession == f["accession"])).first()
+    if existing and existing[1] not in RETRYABLE:
+        return {"skipped": "known"}
+    vals = dict(cik=cik, ticker=ticker, form=f["form"], filing_date=f["filing_date"], accepted_at=f["accepted_at"],
+                period=date.fromisoformat(f["period"]) if f.get("period") else None, source_url=_doc_url(cik, f),
+                is_backfill=is_backfill)
+    try:
+        txt = fetch_text(cik, f)
+    except FetchError as e:
+        if not existing:
+            with engine.begin() as conn:
+                conn.execute(pg_insert(tenk_filings).values(accession=f["accession"], sections=[], profile={},
+                                                            status="fetch_failed", **vals)
+                             .on_conflict_do_nothing(index_elements=["accession"]))
+        return {"status": "fetch_failed", "retryable": True, "error": str(e)[:200]}
     items = extract_items(txt) if txt else {}
     prof = build_profile(items)
-    status = "ok" if len(items) >= 2 else ("no_sections" if txt else "fetch_failed")
+    status = "ok" if len(items) >= 2 else ("no_sections" if txt else "not_found")
     with engine.begin() as conn:
-        fid = conn.execute(pg_insert(tenk_filings).values(
-            cik=cik, ticker=ticker, accession=f["accession"], form=f["form"], filing_date=f["filing_date"],
-            accepted_at=f["accepted_at"], period=date.fromisoformat(f["period"]) if f.get("period") else None,
-            source_url=_doc_url(cik, f), sections=sorted(items), profile=prof, status=status, is_backfill=is_backfill,
-        ).on_conflict_do_nothing(index_elements=["accession"]).returning(tenk_filings.c.id)).scalar()
+        if existing:
+            conn.execute(tenk_filings.update().where(tenk_filings.c.id == existing[0]).values(
+                sections=sorted(items), profile=prof, status=status, **vals))
+            fid = existing[0]
+        else:
+            fid = conn.execute(pg_insert(tenk_filings).values(accession=f["accession"], sections=sorted(items), profile=prof,
+                                                              status=status, **vals)
+                               .on_conflict_do_nothing(index_elements=["accession"]).returning(tenk_filings.c.id)).scalar()
         if fid is None or status != "ok":
             return {"status": status}
-        prev = conn.execute(select(tenk_filings).where(and_(
-            tenk_filings.c.cik == cik, tenk_filings.c.status == "ok", tenk_filings.c.filing_date < f["filing_date"],
-            tenk_filings.c.filing_date >= f["filing_date"] - timedelta(days=CONSECUTIVE_MAX_DAYS)))
-            .order_by(tenk_filings.c.filing_date.desc()).limit(1)).mappings().first()
-        if not prev:
-            return {"status": "first"}
-        changes = compare(prev["profile"], prof, items)
-        conn.execute(tenk_filings.update().where(tenk_filings.c.id == fid).values(prev_accession=prev["accession"],
-                                                                                   n_changes=len(changes)))
-        for c in changes:
-            conn.execute(pg_insert(tenk_changes).values(
-                filing_id=fid, cik=cik, ticker=ticker, filing_date=f["filing_date"], public_timestamp=f["accepted_at"],
-                section=c.section, change_type=c.change_type, materiality=c.materiality, n_new=c.n_new, n_removed=c.n_removed,
-                old_text_hash=c.old_text_hash, new_text_hash=c.new_text_hash, examples=c.examples,
-                source_url=_doc_url(cik, f), prev_accession=prev["accession"],
-            ).on_conflict_do_nothing(index_elements=["filing_id", "change_type"]))
-        material = [c for c in changes if c.materiality in ("HIGH", "MEDIUM")]
-        if not material:
-            return {"status": "no_material_change", "changes": len(changes)}
-        pos = sum(c.change_type in POSITIVE for c in material)
-        neg = sum(c.change_type in NEGATIVE for c in material)
-        direction = "POSITIVE" if pos > neg else "NEGATIVE" if neg > pos else "MIXED"
-        types = sorted({c.change_type for c in material})
-        eid = create_event(
-            conn, event_type="TENK_CHANGE", dedupe_key=f"tenk:{f['accession']}", public_date=(
-                f["accepted_at"].astimezone(ET).date() if f["accepted_at"] else f["filing_date"]),
-            public_at=f["accepted_at"], ticker=ticker, company_name=name, issuer_cik=cik, is_backfill=is_backfill,
-            priority=EVENT_PRIORITY, date_quality="exact" if f["accepted_at"] else "date", source_url=_doc_url(cik, f),
-            title=f"{ticker or cik} 10-K değişimi: {', '.join(types)}",
-            payload={"accession": f["accession"], "prev_accession": prev["accession"], "direction": direction,
-                     "change_types": types, "high": sum(c.materiality == "HIGH" for c in material),
-                     "changes": [{"type": c.change_type, "section": c.section, "materiality": c.materiality,
-                                  "n_new": c.n_new, "n_removed": c.n_removed} for c in material]})
-        return {"status": "event" if eid else "event_exists", "changes": len(changes), "direction": direction}
+        row = dict(conn.execute(select(tenk_filings).where(tenk_filings.c.id == fid)).mappings().one())
+        res = _compare_and_emit(conn, row, items, name)
+        res["successor"] = _recompare_successor(conn, row, name)
+        return res
+
+
+def _prev_of(conn, row: dict) -> dict | None:
+    r = conn.execute(select(tenk_filings).where(and_(
+        tenk_filings.c.cik == row["cik"], tenk_filings.c.status == "ok", tenk_filings.c.filing_date < row["filing_date"],
+        tenk_filings.c.filing_date >= row["filing_date"] - timedelta(days=CONSECUTIVE_MAX_DAYS)))
+        .order_by(tenk_filings.c.filing_date.desc()).limit(1)).mappings().first()
+    return dict(r) if r else None
+
+
+def _compare_and_emit(conn, row: dict, items: dict | None, name: str | None) -> dict:
+    prev = _prev_of(conn, row)
+    if not prev:
+        return {"status": "first"}
+    changes = compare(prev["profile"], row["profile"], items)
+    fid, cik, ticker = row["id"], row["cik"], row["ticker"]
+    conn.execute(tenk_filings.update().where(tenk_filings.c.id == fid).values(prev_accession=prev["accession"],
+                                                                               n_changes=len(changes)))
+    for c in changes:
+        conn.execute(pg_insert(tenk_changes).values(
+            filing_id=fid, cik=cik, ticker=ticker, filing_date=row["filing_date"], public_timestamp=row["accepted_at"],
+            section=c.section, change_type=c.change_type, materiality=c.materiality, n_new=c.n_new, n_removed=c.n_removed,
+            old_text_hash=c.old_text_hash, new_text_hash=c.new_text_hash, examples=c.examples,
+            source_url=row["source_url"], prev_accession=prev["accession"],
+        ).on_conflict_do_nothing(index_elements=["filing_id", "change_type"]))
+    material = [c for c in changes if c.materiality in ("HIGH", "MEDIUM")]
+    if not material:
+        return {"status": "no_material_change", "changes": len(changes)}
+    pos = sum(c.change_type in POSITIVE for c in material)
+    neg = sum(c.change_type in NEGATIVE for c in material)
+    direction = "POSITIVE" if pos > neg else "NEGATIVE" if neg > pos else "MIXED"
+    types = sorted({c.change_type for c in material})
+    acc = row["accession"]
+    eid = create_event(
+        conn, event_type="TENK_CHANGE", dedupe_key=f"tenk:{acc}", public_date=(
+            row["accepted_at"].astimezone(ET).date() if row["accepted_at"] else row["filing_date"]),
+        public_at=row["accepted_at"], ticker=ticker, company_name=name, issuer_cik=cik, is_backfill=row["is_backfill"],
+        priority=EVENT_PRIORITY, date_quality="exact" if row["accepted_at"] else "date", source_url=row["source_url"],
+        title=f"{ticker or cik} 10-K değişimi: {', '.join(types)}",
+        payload={"accession": acc, "prev_accession": prev["accession"], "direction": direction,
+                 "change_types": types, "high": sum(c.materiality == "HIGH" for c in material),
+                 "changes": [{"type": c.change_type, "section": c.section, "materiality": c.materiality,
+                              "n_new": c.n_new, "n_removed": c.n_removed} for c in material]})
+    return {"status": "event" if eid else "event_exists", "changes": len(changes), "direction": direction}
+
+
+def _recompare_successor(conn, row: dict, name: str | None) -> str | None:
+    """A predecessor that arrives late (retried fetch, archive backfill) changes its successor's
+    comparison. A successor stored as 'first' is simply compared now; one compared against an older
+    filing is superseded (renamed + audited, never deleted) and re-created from its stored fingerprint."""
+    nxt = conn.execute(select(tenk_filings).where(and_(
+        tenk_filings.c.cik == row["cik"], tenk_filings.c.status == "ok", tenk_filings.c.filing_date > row["filing_date"],
+        tenk_filings.c.filing_date <= row["filing_date"] + timedelta(days=CONSECUTIVE_MAX_DAYS)))
+        .order_by(tenk_filings.c.filing_date).limit(1)).mappings().first()
+    if not nxt:
+        return None
+    nxt = dict(nxt)
+    if nxt["prev_accession"] == row["accession"]:
+        return None
+    if nxt["prev_accession"] is None:
+        return _compare_and_emit(conn, nxt, None, name)["status"]
+    from sqlalchemy import text as sql
+    run_id = f"tenk-late-predecessor-{date.today().isoformat()}"
+    conn.execute(sql("UPDATE tenk_filings SET status = 'superseded', accession = left(accession || '#rp', 25) WHERE id = :i"),
+                 {"i": nxt["id"]})
+    conn.execute(sql("""UPDATE events SET superseded = true, superseded_reason = 'TENK_PREDECESSOR_ARRIVED',
+                        dedupe_key = left(dedupe_key || '#rp', 200) WHERE dedupe_key = :k AND NOT superseded"""),
+                 {"k": f"tenk:{nxt['accession']}"})
+    conn.execute(sql("""INSERT INTO data_cleanup_audit (run_id, action, table_name, row_id, before, after, reason, dry_run)
+                        VALUES (:r, 'supersede', 'tenk_filings', :i, CAST(:b AS jsonb), '{"status": "superseded"}'::jsonb,
+                                :why, false)"""),
+                 {"r": run_id, "i": nxt["id"], "b": f'{{"accession": "{nxt["accession"]}", "prev": "{nxt["prev_accession"]}"}}',
+                  "why": f"late predecessor {row['accession']} arrived; comparison recomputed"})
+    new = {k: v for k, v in nxt.items() if k not in ("id", "created_at", "prev_accession", "n_changes")}
+    nid = conn.execute(tenk_filings.insert().values(**new).returning(tenk_filings.c.id)).scalar_one()
+    return _compare_and_emit(conn, {**new, "id": nid}, None, name)["status"]
 
 
 def process_cik(engine: Engine, cik: str, ticker: str | None, name: str | None, *, history_from: date,
@@ -145,11 +246,16 @@ def process_cik(engine: Engine, cik: str, ticker: str | None, name: str | None, 
         sub = http.get(SUBMISSIONS_URL.format(cik=cik), retries=2).json()
     except http.HttpError as e:
         return {"error": str(e)}
-    fl = [f for f in annual_filings(sub) if f["filing_date"] >= history_from - timedelta(days=CONSECUTIVE_MAX_DAYS)]
+    since = history_from - timedelta(days=CONSECUTIVE_MAX_DAYS)
+    try:
+        fl = [f for f in all_annual_filings(sub, since) if f["filing_date"] >= since]
+    except Exception as e:  # an archive file failed: retry the whole company later, never store a gap
+        return {"error": f"archive: {type(e).__name__}: {e}"[:300]}
     with engine.connect() as conn:
-        known = {a for (a,) in conn.execute(select(tenk_filings.c.accession).where(tenk_filings.c.cik == cik)).all()}
+        known = {a for (a,) in conn.execute(select(tenk_filings.c.accession).where(and_(
+            tenk_filings.c.cik == cik, tenk_filings.c.status.notin_(RETRYABLE)))).all()}
     todo = [f for f in fl if f["accession"] not in known][-max_docs:]
-    res = {"docs": 0, "events": 0}
+    res = {"docs": 0, "events": 0, "failed": 0}
     for f in todo:  # oldest first, so each one finds its predecessor
         tk = ticker
         if tk is None or f["filing_date"] < live_from:  # the ticker AT the filing date, never today's
@@ -158,6 +264,7 @@ def process_cik(engine: Engine, cik: str, ticker: str | None, name: str | None, 
                 tk = get_security_master(conn).resolve_ticker_at_date(cik, f["filing_date"]) or tk
         r = process_filing(engine, cik, tk, name or sub.get("name"), f, is_backfill=f["filing_date"] < live_from)
         res["docs"] += 1
+        res["failed"] += bool(r.get("retryable"))
         res["events"] += r.get("status") == "event"
     return res
 
@@ -249,6 +356,8 @@ def run_backfill(engine: Engine, max_docs: int = 120, time_budget_s: float = 900
         st = job_state(conn, name)
     done = set(st.get("done_ciks") or [])
     finished_q = set(st.get("done_quarters") or [])
+    fails: dict[str, int] = dict(st.get("fail_counts") or {})
+    gave_up = set(st.get("gave_up") or [])
     history_from = date.today() - timedelta(days=365 * years)
     live_from = date.today() - timedelta(days=6)
     out = {"ciks": 0, "docs": 0, "events": 0, "not_listed": 0}
@@ -272,8 +381,19 @@ def run_backfill(engine: Engine, max_docs: int = 120, time_budget_s: float = 900
                 done.add(cik)  # not exchange-listed at that date (funds, ABS trusts, private debt issuers)
                 continue
             r = process_cik(engine, cik, None, None, history_from=history_from, live_from=live_from, max_docs=years + 2)
-            if "error" in r:
+            if "error" in r or r.get("failed"):
+                # keep the quarter open so this company is retried on the next run; after MAX_CIK_FAILS
+                # attempts it is recorded as given up (visible in job_state), not silently dropped
+                fails[cik] = fails.get(cik, 0) + 1
+                out["failed"] = out.get("failed", 0) + 1
+                out["docs"] += r.get("docs", 0)
+                if fails[cik] >= MAX_CIK_FAILS:
+                    gave_up.add(cik)
+                    done.add(cik)
+                else:
+                    complete = False
                 continue
+            fails.pop(cik, None)
             done.add(cik)
             out["ciks"] += 1
             out["docs"] += r["docs"]
@@ -281,8 +401,10 @@ def run_backfill(engine: Engine, max_docs: int = 120, time_budget_s: float = 900
         if complete and filers:
             finished_q.add(qk)
         with engine.begin() as conn:
-            save_job_state(conn, name, {"done_ciks": sorted(done), "done_quarters": sorted(finished_q)}, status="idle")
+            save_job_state(conn, name, {"done_ciks": sorted(done), "done_quarters": sorted(finished_q),
+                                        "fail_counts": fails, "gave_up": sorted(gave_up)}, status="idle")
     out["quarters_done"] = len(finished_q)
+    out["gave_up"] = len(gave_up)
     return out
 
 

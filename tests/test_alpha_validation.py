@@ -456,3 +456,132 @@ def test_oge_pdf_extraction_runs_isolated_with_a_memory_cap():
     assert n >= 1 and len(txt) > 50
     with pytest.raises(RuntimeError):
         oge.pdf_text(b"not a pdf at all")  # a failure is an exception for this document, never a crash of the caller
+
+
+# ------------------------------------------------------------------ review fixes (Codex, 2026-09-25)
+
+class _SplitAfterEntry:
+    """A fresh provider series AFTER a 2:1 split (2024-04-15) and a 2% dividend: every price is on the
+    post-split basis (the entry day's 100 now reads 50) and pre-dividend adj_close is 2% lower."""
+
+    def get_historical_prices(self, symbol, start, end):
+        out, d = [], start
+        while d <= end:
+            if d.weekday() < 5:
+                adj = 49.0 if d < date(2024, 4, 15) else 50.0
+                out.append(Bar(d, 50.0, 50.5, 49.5, 50.0, adj, 100000))
+            d += timedelta(days=1)
+        return out
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_paper_valuation_stop_and_sale_survive_a_split_after_entry(engine, monkeypatch):
+    import app.marketdata.provider as mp
+    from app.paper import ledger
+    from app.paper.proposals import create_proposal, decide
+    with engine.begin() as c:
+        _universe(c)
+        _bars(c, "ZBIO", date(2024, 1, 2), 200, 100.0, 0.0)  # what the cache held at entry time
+        _bars(c, "SPY", date(2024, 1, 2), 200, 400.0, 0.5)
+        eid = _event(c)
+    p = create_proposal(engine, eid, research_only=True, now=datetime(2024, 3, 1, 15, tzinfo=timezone.utc))
+    decide(engine, p["code"], True, by="t", now=datetime(2024, 3, 1, 16, tzinfo=timezone.utc))
+    with engine.begin() as c:
+        assert ledger.fill_orders(c, date(2024, 3, 10))["filled"] == 5  # bought at 100 (pre-split basis)
+    monkeypatch.setattr(mp, "get_provider", lambda: _SplitAfterEntry())
+    ledger.run(engine, today=date(2024, 5, 10))
+    with engine.begin() as c:
+        rows = {r["strategy"]: dict(r) for r in c.execute(text(
+            "SELECT a.strategy, p.* FROM paper_positions p JOIN paper_accounts a ON a.id = p.account_id")).mappings()}
+        e = rows["E_STOP_TIME"]
+        assert e["status"] == "OPEN"  # a naive fixed factor would read 50 vs entry 100 and trigger the 15% stop
+        value, px, _ = ledger.position_value(c, e, date(2024, 5, 10))
+        assert px == pytest.approx(100 * 50 / 49, rel=1e-6)  # dividend counted as reinvested, split neutral
+        a = rows["A_30D"]  # sold at the first open on/after 2024-04-03, still before the split
+        assert a["status"] == "CLOSED" and a["exit_price"] == pytest.approx(100 * (1 - 0.002), rel=1e-6)
+        assert a["realized_pnl"] == pytest.approx(a["shares"] * a["exit_price"] - 1.0 - a["cost"])
+        nav = c.execute(text("SELECT nav FROM paper_performance p JOIN paper_accounts a ON a.id = p.account_id "
+                             "WHERE a.strategy = 'B_90D'")).scalar()
+        assert nav > 10_000 - 5  # no phantom 50% loss
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_tenk_transient_fetch_failure_is_retried_and_the_successor_recompared(engine, monkeypatch):
+    from app.db.models import events, tenk_filings
+    from app.tenk import engine as te
+    docs = {"b1": _doc([_risk(i) for i in range(20)], BASE_MDNA),
+            "b2": _doc([_risk(i) for i in range(20)], BASE_MDNA + [
+                "There is substantial doubt about our ability to continue as a going concern within one year after issuance. ",
+                "Our independent registered public accounting firm has expressed substantial doubt about our ability to "
+                "continue as a going concern. "])}
+    flaky = {"b1": 1}
+
+    def fetch(cik, f):
+        if flaky.get(f["accession"]):
+            flaky[f["accession"]] -= 1
+            raise te.FetchError("HTTP 503")
+        return docs[f["accession"]]
+    monkeypatch.setattr(te, "fetch_text", fetch)
+    f1 = {"accession": "b1", "form": "10-K", "filing_date": date(2023, 3, 1), "accepted_at": te.acceptance_to_utc("2023-03-01T16:30:00Z"),
+          "primary_doc": "k.htm", "period": None}
+    f2 = {**f1, "accession": "b2", "filing_date": date(2024, 3, 1), "accepted_at": te.acceptance_to_utc("2024-03-01T16:30:00Z")}
+    assert te.process_filing(engine, "0001953926", "ZBIO", "Z", f1, is_backfill=True)["retryable"] is True
+    assert te.process_filing(engine, "0001953926", "ZBIO", "Z", f2, is_backfill=True)["status"] == "first"
+    r = te.process_filing(engine, "0001953926", "ZBIO", "Z", f1, is_backfill=True)  # retry succeeds
+    assert r["status"] == "first" and r["successor"] == "event"
+    with engine.connect() as c:
+        st = dict(c.execute(select(tenk_filings.c.accession, tenk_filings.c.status)).all())
+        b2_prev = c.execute(select(tenk_filings.c.prev_accession).where(tenk_filings.c.accession == "b2")).scalar()
+        ev = c.execute(select(events.c.payload).where(events.c.event_type == "TENK_CHANGE")).scalar_one()
+    assert st == {"b1": "ok", "b2": "ok"} and b2_prev == "b1" and ev["prev_accession"] == "b1"
+    assert te.process_filing(engine, "0001953926", "ZBIO", "Z", f1, is_backfill=True) == {"skipped": "known"}
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_tenk_backfill_keeps_a_quarter_open_until_a_failed_company_succeeds(engine, monkeypatch):
+    import app.securitymaster.provider as smp
+    from app.db.store import job_state
+    from app.tenk import engine as te
+
+    class SM:
+        def resolve_ticker_at_date(self, cik, d):
+            return "ZBIO"
+    monkeypatch.setattr(smp, "get_security_master", lambda conn: SM())
+    monkeypatch.setattr(te, "_quarters", lambda years: ["2024Q1"])
+    monkeypatch.setattr(te, "quarter_10k_ciks", lambda y, q: [("0001953926", date(2024, 3, 1))])
+    calls = []
+
+    def proc(engine_, cik, *a, **k):
+        calls.append(cik)
+        return {"error": "HTTP 503"} if len(calls) == 1 else {"docs": 1, "events": 0, "failed": 0}
+    monkeypatch.setattr(te, "process_cik", proc)
+    r1 = te.run_backfill(engine)
+    with engine.connect() as c:
+        st = job_state(c, "tenk_backfill")
+    assert r1["failed"] == 1 and "2024Q1" not in st["done_quarters"] and "0001953926" not in st["done_ciks"]
+    te.run_backfill(engine)  # e.g. after a restart
+    with engine.connect() as c:
+        st = job_state(c, "tenk_backfill")
+    assert calls == ["0001953926", "0001953926"] and "2024Q1" in st["done_quarters"] and st["fail_counts"] == {}
+
+
+def test_tenk_history_reads_archived_submissions_files():
+    from app.tenk.engine import all_annual_filings
+    sub = {"filings": {"recent": {"form": ["10-K", "8-K"], "accessionNumber": ["r25", "x"],
+                                  "filingDate": ["2025-03-01", "2025-02-01"], "acceptanceDateTime": ["", ""],
+                                  "primaryDocument": ["a.htm", "b.htm"], "reportDate": ["", ""]},
+                       "files": [{"name": "CIK0000000001-submissions-001.json", "filingFrom": "2015-01-01", "filingTo": "2024-12-31"},
+                                 {"name": "CIK0000000001-submissions-002.json", "filingFrom": "2001-01-01", "filingTo": "2010-12-31"}]}}
+    fetched = []
+
+    def getter(url):
+        fetched.append(url)
+        return {"form": ["10-K", "10-K", "10-Q"], "accessionNumber": ["a23", "a24", "q"],
+                "filingDate": ["2023-03-01", "2024-03-01", "2024-05-01"], "acceptanceDateTime": ["", "", ""],
+                "primaryDocument": ["k23.htm", "k24.htm", "q.htm"], "reportDate": ["", "", ""]}
+    fl = all_annual_filings(sub, date(2020, 1, 1), getter)
+    assert [f["accession"] for f in fl] == ["a23", "a24", "r25"]
+    assert len(fetched) == 1 and fetched[0].endswith("submissions-001.json")  # the 2001-2010 archive is out of range

@@ -947,7 +947,7 @@ paper_positions = Table(
     Column("entry_date", Date, nullable=False),
     Column("entry_price", Float, nullable=False),  # incl. slippage
     Column("cost", Float, nullable=False),  # incl. commission
-    Column("adj_factor", Float, nullable=False, server_default="1"),  # adj_close/close on the entry day (splits, dividends)
+    Column("adj_factor", Float, nullable=False, server_default="1"),  # unused (kept): valuation uses one fresh series per run
     Column("stop_price", Float),
     Column("planned_exit_date", Date),
     Column("sector_etf", String(8)),

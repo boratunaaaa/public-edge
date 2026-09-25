@@ -5,7 +5,10 @@ Execution model (no market-order fantasy):
     strictly after the decision (09:30 ET rule, same as the event backtest)
   * fill price = that open +/- slippage (microcaps pay more), plus a configurable commission
   * exits are SELL orders filled the same way: at the next session's open after the exit trigger
-  * split/dividend-safe: positions are valued with adj_close relative to the entry day's factor
+  * split/dividend-safe: a position's value is its entry price times the growth measured INSIDE ONE
+    freshly fetched price series (entry-day adjusted open -> today's adjusted close), so the entry and
+    the current price always share the same adjustment basis; a split after entry changes nothing and
+    dividends count as reinvested (total return). Cached series are only a fallback.
 Every strategy book (A-E) is a separate account with its own cash - results are never mixed.
 """
 from __future__ import annotations
@@ -105,15 +108,53 @@ def _factor(b) -> float:
     return (b.adj_close / b.close) if (b.adj_close and b.close) else 1.0
 
 
+def fresh_bars(conn: Connection, symbol: str, start: date, end: date):
+    """Bars from ONE provider request (one adjustment basis). Falls back to the cache when the
+    provider has nothing (offline, delisted)."""
+    from app.marketdata.provider import get_provider
+    try:
+        got = get_provider().get_historical_prices(symbol, start, end)
+    except Exception:
+        got = []
+    got = [b for b in got if b.open and b.close and start <= b.date <= end]
+    return got or _bars(conn, symbol, start, end)
+
+
+def _entry_open(conn: Connection, pos: dict) -> float:
+    """Raw open paid at entry (slippage removed), in entry-day share units."""
+    r = conn.execute(select(paper_trades.c.price, paper_trades.c.slippage_bps).where(and_(
+        paper_trades.c.position_id == pos["id"], paper_trades.c.side == "BUY"))).first()
+    return r[0] / (1 + (r[1] or 0) / 1e4) if r else pos["entry_price"]
+
+
+class Growth:
+    """Per-entry-share prices from one consistently adjusted series."""
+
+    def __init__(self, bars, entry_date: date, entry_open: float):
+        e = next((b for b in bars if b.date == entry_date), None)
+        self.base = e.open * _factor(e) if e else None
+        self.entry_open = entry_open
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.base)
+
+    def close(self, b) -> float:
+        return self.entry_open * (b.adj_close or b.close) / self.base
+
+    def open(self, b) -> float:
+        return self.entry_open * b.open * _factor(b) / self.base
+
+
 def position_value(conn: Connection, pos: dict, on: date) -> tuple[float, float | None, date | None]:
-    """(value, price per entry-share, price date) using the last close on/before `on`."""
-    bars = _bars(conn, pos["ticker"], on - timedelta(days=10), on)
-    if not bars:
+    """(value, price per entry-share, price date) at the last close on/before `on`."""
+    bars = fresh_bars(conn, pos["ticker"], pos["entry_date"], on)
+    g = Growth(bars, pos["entry_date"], _entry_open(conn, pos))
+    if not bars or not g.ok:
         px = pos.get("last_price") or pos["entry_price"]
         return pos["shares"] * px, pos.get("last_price"), pos.get("last_price_date")
-    b = bars[-1]
-    px = (b.adj_close or b.close) / (pos["adj_factor"] or 1.0)
-    return pos["shares"] * px, px, b.date
+    px = g.close(bars[-1])
+    return pos["shares"] * px, px, bars[-1].date
 
 
 def nav_of(conn: Connection, account_id: int, on: date) -> float:
@@ -163,15 +204,22 @@ def fill_orders(conn: Connection, today: date) -> dict:
             from app.backtest.sector import etf_for_sector
             pos_id = conn.execute(paper_positions.insert().values(
                 account_id=o["account_id"], proposal_id=o["proposal_id"], ticker=o["ticker"], cik=info.get("cik"),
-                shares=shares, entry_date=b.date, entry_price=px, cost=notional + comm, adj_factor=_factor(b),
+                shares=shares, entry_date=b.date, entry_price=px, cost=notional + comm, adj_factor=1.0,
                 stop_price=px * (1 - STOP_PCT), planned_exit_date=b.date + timedelta(days=hold),
                 sector_etf=etf_for_sector(sector), status="OPEN", last_price=px, last_price_date=b.date,
             ).returning(paper_positions.c.id)).scalar_one()
             gross = notional
             _move_cash(conn, o["account_id"], b.date, -(notional + comm), "BUY", o["id"])
         else:
-            pos = conn.execute(select(paper_positions).where(paper_positions.c.id == o["position_id"])).mappings().first()
-            px = b.open * _factor(b) / (pos["adj_factor"] or 1.0) * (1 - bps / 1e4)
+            pos = dict(conn.execute(select(paper_positions).where(paper_positions.c.id == o["position_id"])).mappings().first())
+            series = fresh_bars(conn, o["ticker"], pos["entry_date"], today)
+            g = Growth(series, pos["entry_date"], _entry_open(conn, pos))
+            sb = next((x for x in series if x.date >= o["not_before"]), None) if g.ok else None
+            if sb is None:
+                out["waiting"] += 1
+                continue
+            b = sb
+            px = g.open(b) * (1 - bps / 1e4)
             shares = pos["shares"]
             gross = shares * px
             pos_id = pos["id"]
@@ -215,15 +263,17 @@ def check_exits(conn: Connection, today: date) -> dict:
     for p in rows:
         p = dict(p)
         rule = STRATEGIES[p["strategy"]][2]
-        bars = [b for b in _bars(conn, p["ticker"], p["entry_date"], today) if b.date > p["entry_date"]]
+        series = fresh_bars(conn, p["ticker"], p["entry_date"], today)
+        g = Growth(series, p["entry_date"], _entry_open(conn, p))
+        bars = [b for b in series if b.date > p["entry_date"]] if g.ok else []
         if bars:
             last = bars[-1]
             conn.execute(paper_positions.update().where(paper_positions.c.id == p["id"]).values(
-                last_price=(last.adj_close or last.close) / (p["adj_factor"] or 1.0), last_price_date=last.date))
+                last_price=g.close(last), last_price_date=last.date))
         trigger, reason, not_before = None, None, None
         if rule == "STOP":
             for b in bars:
-                if (b.adj_close or b.close) / (p["adj_factor"] or 1.0) <= p["stop_price"]:
+                if g.close(b) <= p["stop_price"]:
                     trigger, reason = b.date, "STOP"
                     break
         if rule == "THESIS" and trigger is None:
