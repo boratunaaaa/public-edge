@@ -114,8 +114,14 @@ def evaluate_gate(conn: Connection, ev: dict, *, family_ok: tuple[bool, str], pr
         g.failed.append("SEVERE_FINANCING_RISK")
     else:
         g.passed.append("NO_SEVERE_FINANCING_RISK")
-    # 6. signal family evidence
+    # 6. direction: a long-only paper book never buys on a NEGATIVE signal (e.g. a new 10-K risk)
+    direction = (ev.get("payload") or {}).get("direction")
+    if direction in ("NEGATIVE", "MIXED"):
+        g.failed.append("NOT_A_LONG_SIGNAL")
+    # 7. signal family evidence
     allowed, why = family_ok
+    if allowed and why != "FAMILY_OUTPERFORMING":
+        why += ":RESEARCH_MODE_OVERRIDE"  # allowed only because research mode is on - never shown as "passed"
     (g.passed if allowed else g.failed).append(why)
     if not allowed and why in ("FAMILY_UNDERPERFORMING",):
         g.info["family_warning"] = why
@@ -146,9 +152,23 @@ FAMILY_TR = {"INSIDER_BUY": "yönetici hisse alımı", "INSIDER_CLUSTER": "birde
              "NEWS": "önemli haber", "DISCOVERY": "erken keşif"}
 
 
+TENK_TR = {"RISK_DECREASE": "risk bölümü belirgin şekilde kısaldı", "LIQUIDITY_IMPROVEMENT": "nakit durumu dili iyileşti",
+           "REMOVED_GOING_CONCERN": "'faaliyetin sürekliliği' şüphesi rapordan kalktı",
+           "NEW_CAPACITY_EXPANSION": "üretim kapasitesi artışı anlatılıyor", "NEW_COMMERCIALIZATION_LANGUAGE": "ticari satışa geçiş dili eklendi",
+           "NEW_MAJOR_CUSTOMER": "büyük müşteri/sözleşme eklendi"}
+
+
+def thesis_tr(ev: dict) -> str:
+    p = ev.get("payload") or {}
+    if ev["event_type"] == "TENK_CHANGE":
+        parts = [TENK_TR[t] for t in p.get("change_types", []) if t in TENK_TR]
+        return "Yıllık raporda (10-K) önceki yıla göre: " + ("; ".join(parts) or "önemli değişiklik")
+    from app.notifications.format import one_line
+    return one_line(ev)
+
+
 def create_proposal(engine: Engine, event_id: int, *, research_only: bool = False, now: datetime | None = None) -> dict:
     """Run the gate for one event and store a PENDING proposal when it passes."""
-    from app.notifications.format import one_line
     from app.paper.alpha import EVENT_FAMILY, proposal_allowed
     from app.securitymaster.provider import get_security_master
     now = now or datetime.now(timezone.utc)
@@ -177,8 +197,8 @@ def create_proposal(engine: Engine, event_id: int, *, research_only: bool = Fals
             code=code, ticker=sym, cik=ev.get("issuer_cik"), event_id=event_id, signal_family=fam, event_type=ev["event_type"],
             proposal_created_at=now, reference_date=ref[0], entry_reference_price=ref[1],
             suggested_position_pct=g.suggested_pct, max_position_pct=g.max_pct, stop_reference=round(ref[1] * (1 - STOP_PCT), 4),
-            thesis=one_line(ev)[:500], risks=risks_tr, reasons=[FAMILY_TR.get(fam, fam)], data_quality=g.data_quality,
-            gate={"passed": g.passed, "failed": g.failed, **g.info}, approval_status="PENDING",
+            thesis=thesis_tr(ev)[:500], risks=risks_tr, reasons=[FAMILY_TR.get(fam, fam)], data_quality=g.data_quality,
+            gate={"passed": g.passed, "failed": g.failed, "family_check": fam_ok[1], **g.info}, approval_status="PENDING",
             expires_at=now + timedelta(hours=PROPOSAL_TTL_HOURS), research_only=fam_ok[1] != "FAMILY_OUTPERFORMING",
         ).returning(proposed_trades.c.id)).scalar_one()
     return {"created": True, "id": pid, "code": code}
@@ -243,7 +263,8 @@ def format_proposal(p: dict, dashboard_url: str | None = None) -> str:
     risks = p.get("risks") or []
     lines = ["🧪 <b>PUBLIC EDGE – SANAL İŞLEM ADAYI</b>", "",
              f"Hisse: <b>{p['ticker']}</b>",
-             f"Neden: {', '.join(p.get('reasons') or [])} — {p.get('thesis', '')}",
+             f"Sinyal: {', '.join(p.get('reasons') or [])}",
+             f"Ne oldu: {p.get('thesis', '')}",
              f"Veri kalitesi: {'iyi' if p.get('data_quality') == 'OK' else 'yalnız tarih bazlı' if p.get('data_quality') == 'DATE_ONLY' else p.get('data_quality')}",
              f"Önerilen büyüklük: sanal portföyün {pct_txt(p['suggested_position_pct'])} (en fazla {pct_txt(p['max_position_pct'])})",
              f"Referans fiyat: {p['entry_reference_price']:.2f} $ ({p['reference_date']:%d.%m.%Y} kapanış)",

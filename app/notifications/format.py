@@ -344,7 +344,23 @@ def what_happened(ev: dict) -> tuple[str, list[str], list[str]]:
                 "THESIS_WEAKENING": "🟠 TAKİP ETTİĞİMİZ ŞİRKETTE OLUMSUZ GELİŞME",
                 "THESIS_INVALIDATION": "🔴 TAKİP ETTİĞİMİZ ŞİRKETTE CİDDİ OLUMSUZ GELİŞME"}[t]
         return head, [f"<i>{e(p.get('headline'))}</i>"], [e(p.get("explanation"))]
+    if t == "TENK_CHANGE":
+        tr = {**TENK_CHANGE_TR}
+        what = ["Bir önceki yıla göre: " + "; ".join(tr.get(c, c) for c in p.get("change_types", []))]
+        return "📄 YILLIK RAPORDA (10-K) ÖNEMLİ DEĞİŞİKLİK", what, \
+            ["Şirketler yıllık raporlarını çoğunlukla aynen kopyalar; belirgin değişiklikler bilgi taşıyabilir. "
+             "Bu sinyalin geçmiş başarısı henüz ölçülüyor."]
     return f"ℹ️ {e(t)}", [e(ev.get("title"))], []
+
+
+TENK_CHANGE_TR = {
+    "RISK_INCREASE": "risk bölümü belirgin şekilde uzadı", "RISK_DECREASE": "risk bölümü belirgin şekilde kısaldı",
+    "LIQUIDITY_DETERIORATION": "nakit/likidite dili kötüleşti", "LIQUIDITY_IMPROVEMENT": "nakit/likidite dili iyileşti",
+    "NEW_CUSTOMER_CONCENTRATION": "tek müşteriye bağımlılık vurgusu arttı", "NEW_SUPPLY_RISK": "yeni tedarik riski",
+    "NEW_LEGAL_RISK": "yeni hukuki risk / dava", "NEW_REGULATORY_RISK": "yeni düzenleme/gümrük riski",
+    "NEW_GOING_CONCERN": "'faaliyetin sürekliliği' şüphesi eklendi", "REMOVED_GOING_CONCERN": "'faaliyetin sürekliliği' şüphesi kalktı",
+    "NEW_CAPACITY_EXPANSION": "üretim kapasitesi artışı", "NEW_COMMERCIALIZATION_LANGUAGE": "ticari satışa geçiş dili",
+    "NEW_MAJOR_CUSTOMER": "büyük müşteri/sözleşme", "OTHER_MATERIAL_CHANGE": "yönetim yorumu büyük ölçüde yeniden yazıldı"}
 
 
 ITEM4_TR = {"SALE_OF_COMPANY": "şirketin satılmasını istiyor", "MERGER": "birleşme", "STRATEGIC_ALTERNATIVES": "stratejik seçenekleri değerlendirme",
@@ -421,7 +437,9 @@ def one_line(ev: dict) -> str:
     head, what, _ = what_happened(ev)
     tk = ev.get("ticker")
     first = html.unescape(re_strip_tags(what[0])) if what else ""
-    return f"{head.split(' ', 1)[-1].capitalize()} — {tk + ': ' if tk else ''}{first[:140]}"
+    h = head.split(' ', 1)[-1]
+    h = h[:1] + h[1:].replace("İ", "i").replace("I", "ı").lower()  # Turkish casing (İ/I), not str.capitalize()
+    return f"{h} — {tk + ': ' if tk else ''}{first[:140]}"
 
 
 def re_strip_tags(s: str) -> str:

@@ -161,6 +161,9 @@ def test_alpha_verdicts():
 
 def test_proposal_telegram_text_is_turkish_and_simple():
     from app.paper.proposals import format_proposal
+    from app.paper.proposals import thesis_tr
+    t = thesis_tr({"event_type": "TENK_CHANGE", "payload": {"change_types": ["REMOVED_GOING_CONCERN", "NEW_LEGAL_RISK"]}})
+    assert "sürekliliği" in t and "LEGAL" not in t
     txt = format_proposal({"code": "PEABC123", "ticker": "ZBIO", "reasons": ["yönetici hisse alımı"], "thesis": "CEO aldı",
                            "data_quality": "OK", "suggested_position_pct": 0.02, "max_position_pct": 0.02,
                            "entry_reference_price": 12.5, "reference_date": date(2026, 9, 25), "stop_reference": 10.63,
@@ -281,6 +284,11 @@ def test_gate_rules(engine):
         assert g.ok and g.max_pct == 0.05
         g = evaluate_gate(c, ev, family_ok=(False, "FAMILY_UNDERPERFORMING"), price_basis="current_ticker_same_cik")
         assert not g.ok and "FAMILY_UNDERPERFORMING" in g.failed
+        g = evaluate_gate(c, ev, family_ok=(True, "FAMILY_BLOCKED"), price_basis="current_ticker_same_cik")
+        assert g.ok and "FAMILY_BLOCKED:RESEARCH_MODE_OVERRIDE" in g.passed  # never shown as a plain pass
+        g = evaluate_gate(c, {**ev, "payload": {"direction": "NEGATIVE"}}, family_ok=(True, "FAMILY_OUTPERFORMING"),
+                          price_basis="current_ticker_same_cik")
+        assert "NOT_A_LONG_SIGNAL" in g.failed  # a new 10-K risk never becomes a buy proposal
         g = evaluate_gate(c, ev, family_ok=(True, "x"), price_basis="ticker_only_unverified")
         assert "UNRESOLVED_SECURITY_MAPPING" in g.failed and g.data_quality == "BLOCKED"
         c.execute(text("INSERT INTO discovery_risks (cik, risk, severity) VALUES ('0001953926', 'GOING_CONCERN', 'HIGH'), "
