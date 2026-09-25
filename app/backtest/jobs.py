@@ -105,6 +105,8 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
             bars = [b for b in all_bars if pdate - timedelta(days=10) <= b.date <= pdate + timedelta(days=400)]
             terminal = dl.date if (dl is not None and dl.date and basis_used in (
                 "historical_symbol_verified", "vendor_trusted", "vendor_validated")) else None
+            if terminal and basis_used.startswith("vendor") and all_bars and all_bars[-1].date < terminal - timedelta(days=15):
+                terminal = None  # the source's coverage ended before the delisting: no cash-out at a stale price
             res = compute_returns(bars, spy, pdate, pat, as_of=today, terminal_date=terminal)
             if not res:
                 status = "no_data" if (today - pdate).days > 10 else "pending"

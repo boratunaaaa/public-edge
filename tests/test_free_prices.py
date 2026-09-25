@@ -326,3 +326,55 @@ def test_finsaber_rows_are_filtered_to_unresolved_ciks_and_identity_is_the_cik(e
     with engine.connect() as c:
         ref = c.execute(text("SELECT source_ref, identity_basis FROM price_sources")).one()
     assert ref[1] == "cik" and "2022:" in ref[0]
+
+
+def test_ticker_change_is_spliced_but_a_long_gap_is_not():
+    from app.pricesources.finsaber import splice_ticker_changes
+    a = series(date(2021, 1, 4), 230, 20.0, 0.0)  # ends 2021-11-19
+    b = series(a[-1].date + timedelta(days=3), 100, 20.2, 0.0)  # renamed next trading day, continuous price
+    c = series(date(2022, 9, 1), 50, 5.0, 0.0)  # months later: new equity after a reorganisation
+    out = splice_ticker_changes({"COG": a, "CTRA": b, "NEWC": c})
+    assert [(s, ch) for s, _, ch in out] == [("CTRA", ["COG", "CTRA"]), ("NEWC", ["NEWC"])]
+    jump = series(a[-1].date + timedelta(days=3), 50, 60.0, 0.0)  # +200% at the junction: not the same security
+    assert len(splice_ticker_changes({"COG": a, "XYZ": jump})) == 2
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_series_cut_by_the_dataset_end_is_accepted_but_never_cashes_out(engine):
+    from app.pricesources.store import save_source
+    bars = series(date(2025, 6, 2), 150)  # ends at the snapshot end 2025-12-26..31, company delisted later
+    with engine.begin() as c:
+        _company(c, delisted=date(2026, 4, 8), reason_marker="MERGER_PROXY", last=date(2026, 3, 1))
+        _, v = save_source(c, cik=OLD, symbol="OLDB", provider="finsaber", bars=bars, identity="cik", source_ref="t",
+                           source_end=bars[-1].date)
+    assert v.status == "TRUSTED" and v.checks["cut_by_source_end"] is True
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_otc_tail_after_delisting_is_truncated_and_downgraded(engine):
+    from app.pricesources import finsaber
+    from app.pricesources.store import load_bars
+    with engine.begin() as c:
+        _company(c, delisted=date(2023, 3, 17))
+        _unresolved_event(c)
+    bars = series(date(2022, 6, 1), 300)  # keeps "trading" until 2023-07 (OTC quotes after the delisting)
+    out_calls = {}
+
+    def fake_load(y, ciks, fetch=None):
+        out_calls[y] = True
+        return ({(OLD, "OLDB"): bars}, "sha") if y == 2022 else ({}, "sha")
+    import app.pricesources.finsaber as fm
+    orig = fm.load_year
+    fm.load_year = fake_load
+    try:
+        out = finsaber.run(engine, years=(2022,))
+    finally:
+        fm.load_year = orig
+    with engine.connect() as c:
+        row = c.execute(text("SELECT id, validation_status, last_date, reasons FROM price_sources")).mappings().one()
+        kept = load_bars(c, row["id"])
+    assert out["truncated"] == 1 and row["validation_status"] == "VALIDATED_FALLBACK"
+    assert row["last_date"] <= date(2023, 3, 17) and kept[-1].date <= date(2023, 3, 17)
+    assert "TRUNCATED_AT_SEC_DELISTING" in row["reasons"]

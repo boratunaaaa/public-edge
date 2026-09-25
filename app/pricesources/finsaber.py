@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -49,6 +49,27 @@ def load_year(y: int, ciks: set[str], fetch=None) -> tuple[dict[tuple[str, str],
     return out, sha
 
 
+SOURCE_END = date(2025, 12, 31)  # last date of the V2 snapshot
+
+
+def splice_ticker_changes(parts: dict[str, list[Bar]]) -> list[tuple[str, list[Bar], list[str]]]:
+    """Same CIK, consecutive symbols (COG -> CTRA, VIAC -> PARA): one series when the next symbol starts
+    within 9 calendar days of the previous one's end and the price is continuous (|jump| < 50%).
+    A long gap (e.g. old equity cancelled in bankruptcy, new equity issued later) is never spliced."""
+    segs = sorted(((s, sorted(b, key=lambda x: x.date)) for s, b in parts.items() if b), key=lambda t: t[1][0].date)
+    out: list[tuple[str, list[Bar], list[str]]] = []
+    for sym, bars in segs:
+        if out:
+            psym, pbars, chain = out[-1]
+            gap = (bars[0].date - pbars[-1].date).days
+            pa, pb = (pbars[-1].adj_close or pbars[-1].close), (bars[0].adj_close or bars[0].close)
+            if 0 < gap <= 9 and pa and pb and abs(pb / pa - 1) < 0.5:
+                out[-1] = (sym, pbars + bars, chain + [sym])
+                continue
+        out.append((sym, bars, [sym]))
+    return out
+
+
 def run(engine: Engine, years: tuple[int, ...] = (2020, 2021, 2022, 2023, 2024, 2025), fetch=None) -> dict:
     ciks = unresolved_ciks(engine)
     series: dict[tuple[str, str], list[Bar]] = {}
@@ -58,9 +79,26 @@ def run(engine: Engine, years: tuple[int, ...] = (2020, 2021, 2022, 2023, 2024, 
         for k, v in part.items():
             series.setdefault(k, []).extend(v)
     ref = "hf://finsaber-team/FINSABER-V2-Data/price_daily " + " ".join(f"{y}:{shas[y][:16]}" for y in years)
-    out = {"ciks_with_rows": len({c for c, _ in series}), "series": len(series), "verdicts": {}}
+    by_cik: dict[str, dict[str, list[Bar]]] = {}
     for (cik, sym), bars in series.items():
-        with engine.begin() as conn:
-            _, v = save_source(conn, cik=cik, symbol=sym, provider="finsaber", bars=bars, identity="cik", source_ref=ref)
-        out["verdicts"][v.status] = out["verdicts"].get(v.status, 0) + 1
+        by_cik.setdefault(cik, {})[sym] = bars
+    out = {"ciks_with_rows": len(by_cik), "series": 0, "spliced": 0, "truncated": 0, "verdicts": {}}
+    from app.securitymaster.provider import get_security_master
+    for cik, parts in by_cik.items():
+        with engine.connect() as conn:
+            dl = get_security_master(conn).delisting(cik)
+        for sym, bars, chain in splice_ticker_changes(parts):
+            truncated = False
+            if dl and dl.date and bars[-1].date > dl.date + timedelta(days=30):
+                pre = [b for b in bars if b.date <= dl.date]
+                if len(pre) >= 20 and pre[0].date < dl.date - timedelta(days=30):
+                    bars, truncated = pre, True  # keep only the exchange-listed part; OTC/successor quotes dropped
+            with engine.begin() as conn:
+                _, v = save_source(conn, cik=cik, symbol=sym, provider="finsaber", bars=bars, identity="cik", source_ref=ref,
+                                   source_end=SOURCE_END, truncated_at_delisting=truncated,
+                                   extra_checks={"symbol_chain": chain})
+            out["series"] += 1
+            out["spliced"] += len(chain) > 1
+            out["truncated"] += truncated
+            out["verdicts"][v.status] = out["verdicts"].get(v.status, 0) + 1
     return out

@@ -40,7 +40,8 @@ def other_series(conn: Connection, cik: str, provider: str) -> list[list[Bar]]:
 
 def save_source(conn: Connection, *, cik: str, symbol: str, provider: str, bars: list[Bar], source_ref: str,
                 identity: str, raw: bytes | None = None, vendor_name: str | None = None,
-                delisting_date: date | None = None) -> tuple[int, Verdict]:
+                delisting_date: date | None = None, source_end: date | None = None,
+                truncated_at_delisting: bool = False, extra_checks: dict | None = None) -> tuple[int, Verdict]:
     cik = cik.zfill(10)
     bars = sorted({b.date: b for b in bars}.values(), key=lambda b: b.date)
     if delisting_date is None:
@@ -48,7 +49,9 @@ def save_source(conn: Connection, *, cik: str, symbol: str, provider: str, bars:
         dl = get_security_master(conn).delisting(cik)
         delisting_date = dl.date if dl else None
     verdict = classify(conn, cik, symbol, bars, identity=identity, vendor_name=vendor_name,
-                       delisting_date=delisting_date, other_series=other_series(conn, cik, provider))
+                       delisting_date=delisting_date, other_series=other_series(conn, cik, provider),
+                       source_end=source_end, truncated_at_delisting=truncated_at_delisting)
+    verdict.checks.update(extra_checks or {})
     vals = dict(source_ref=source_ref, retrieved_at=datetime.now(timezone.utc),
                 raw_sha256=hashlib.sha256(raw).hexdigest() if raw else None,
                 raw_gz=gzip.compress(raw, 6) if raw else None, n_bars=len(bars),
@@ -76,6 +79,8 @@ def queue_recompute(conn: Connection, cik: str) -> int:
 
 
 def vendor_series(conn: Connection, cik: str | None, on: date) -> tuple[list[Bar], str, str] | None:
+    """The caller must not apply a delisting terminal exit beyond the series' last bar when the series was
+    cut by its source (checks.cut_by_source_end): see app.backtest.jobs."""
     """Best ACCEPTED series of this CIK that covers `on` (entry within 10 days): (bars, basis, symbol)."""
     if not cik:
         return None

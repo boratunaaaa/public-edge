@@ -90,7 +90,10 @@ class Verdict:
 
 def classify(conn: Connection, cik: str, symbol: str, bars: list[Bar], *, identity: str, vendor_name: str | None = None,
              delisting_date: date | None = None, other_series: list[list[Bar]] | None = None,
-             today: date | None = None) -> Verdict:
+             today: date | None = None, source_end: date | None = None, truncated_at_delisting: bool = False) -> Verdict:
+    """source_end: last date the SOURCE covers (a dataset snapshot); a series ending there is cut by the
+    source, not by the company. truncated_at_delisting: exchange part of a series that continued past the
+    SEC delisting (OTC / successor quotes removed) - never better than VALIDATED_FALLBACK."""
     today = today or date.today()
     bars = sorted((b for b in bars if b.close is not None), key=lambda b: b.date)
     v = Verdict("LOW_CONFIDENCE", 0.0)
@@ -133,13 +136,15 @@ def classify(conn: Connection, cik: str, symbol: str, bars: list[Bar], *, identi
             low.append("VENDOR_NAME_WEAK_MATCH")
             identity = "symbol"
     # --- delisting consistency
+    cut_by_source = source_end is not None and last >= source_end - timedelta(days=4)
+    ck["cut_by_source_end"] = cut_by_source
     if delisting_date:
         ck["delisting_date"] = delisting_date.isoformat()
         if last > delisting_date + timedelta(days=DELIST_AFTER_DAYS):
             conflict.append("TRADES_AFTER_DELISTING")
-        elif last < delisting_date - timedelta(days=DELIST_BEFORE_DAYS):
+        elif last < delisting_date - timedelta(days=DELIST_BEFORE_DAYS) and not cut_by_source:
             low.append("ENDS_BEFORE_DELISTING")
-    elif last < today - timedelta(days=DELIST_AFTER_DAYS):
+    elif last < today - timedelta(days=DELIST_AFTER_DAYS) and not cut_by_source:
         if identity == "symbol":
             low.append("ENDED_WITHOUT_SEC_DELISTING")
         else:
@@ -162,7 +167,11 @@ def classify(conn: Connection, cik: str, symbol: str, bars: list[Bar], *, identi
     if low:
         v.status, v.confidence, v.reasons = "LOW_CONFIDENCE", 0.3, low
         return v
-    if identity in ("cik", "name"):
+    if truncated_at_delisting:
+        ck["truncated_at_delisting"] = True
+        v.status, v.confidence = "VALIDATED_FALLBACK", 0.6
+        v.reasons.append("TRUNCATED_AT_SEC_DELISTING")
+    elif identity in ("cik", "name"):
         v.status = "TRUSTED"
         v.confidence = 0.95 if cross_ok else 0.85
         if not xv:
