@@ -370,7 +370,8 @@ def price_context_line(ctx: dict | None) -> str | None:
 
 
 def format_alert(ev: dict, rate=None, risks: list[dict] | None = None, related: list[str] | None = None,
-                 thesis: str | None = None, market_cap=None, bucket=None, price_ctx: dict | None = None) -> str:
+                 thesis: str | None = None, market_cap=None, bucket=None, price_ctx: dict | None = None,
+                 person_line: str | None = None) -> str:
     risks = risks or []
     p = ev.get("payload") or {}
     head, what, why = what_happened(ev)
@@ -389,7 +390,7 @@ def format_alert(ev: dict, rate=None, risks: list[dict] | None = None, related: 
         out += ["", "🔁 <b>Aynı şirkette son zamanlarda:</b>"] + [f"• {e(r)}" for r in related[:4]]
     if thesis:
         out += ["", f"🧭 Takip notu: {e(thesis)}"]
-    out += [""] + history_block(rate) + ["", f"{icon} <b>Risk notu: {verdict_txt}</b>", ""]
+    out += [""] + history_block(rate) + ([person_line] if person_line else []) + ["", f"{icon} <b>Risk notu: {verdict_txt}</b>", ""]
     out += risk_block(risks, extra_risk) + [""] + _source(ev)
     return "\n".join(out)
 

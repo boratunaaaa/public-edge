@@ -20,6 +20,12 @@ x-app: &app
     TIINGO_API_KEY: ${TIINGO_API_KEY:-}
     # optional: hit-rate episode windows per event family, e.g. {"NEWS": 45}
     EPISODE_WINDOWS: ${EPISODE_WINDOWS:-}
+    # paper trading (virtual money only - there is no broker integration)
+    PAPER_STARTING_CAPITAL: ${PAPER_STARTING_CAPITAL:-10000}
+    PAPER_COMMISSION_USD: ${PAPER_COMMISSION_USD:-1}
+    PAPER_RESEARCH_MODE: ${PAPER_RESEARCH_MODE:-0}
+    PAPER_DASHBOARD_URL: ${PAPER_DASHBOARD_URL:-}
+    INSIDER_PROFILE_MIN_EPISODES: ${INSIDER_PROFILE_MIN_EPISODES:-8}
     SEC_MAX_RPS: "3"
   depends_on:
     db:
@@ -77,6 +83,7 @@ services:
   worker:
     <<: *app
     command: ["python", "-m", "app.jobs.worker"]
+    cpu_shares: 1024  # HIGH: live filings / news are never delayed by historical work
     healthcheck:
       # heartbeat is written every loop (~5s); a stuck worker goes unhealthy after 10 minutes
       test: ["CMD", "python", "-c", "import time,sys,pathlib; p=pathlib.Path('/tmp/public_edge_worker_heartbeat'); sys.exit(0 if p.exists() and time.time()-int(p.read_text())<600 else 1)"]
@@ -89,6 +96,7 @@ services:
   intelligence:
     <<: *app
     command: ["nice", "-n", "5", "python", "-m", "app.jobs.intelligence"]
+    cpu_shares: 512  # MEDIUM: discovery, paper ledger, 10-K live pass
     environment:
       <<: *appenv
       SEC_MAX_RPS: "2"
@@ -103,6 +111,7 @@ services:
   backfill:
     <<: *app
     command: ["nice", "-n", "10", "python", "-m", "app.jobs.backfill"]
+    cpu_shares: 256  # LOW: history, 10-K backfill, OCR
     environment:
       <<: *appenv
       SEC_MAX_RPS: "3"  # worker 3 + backfill 3 + intelligence 2 = 8 < SEC's 10 req/s

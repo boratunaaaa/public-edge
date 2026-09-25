@@ -793,3 +793,197 @@ oge_transactions = Table(
     Column("parse_confidence", String(8), nullable=False),  # HIGH | MEDIUM | LOW (OCR text layer)
     UniqueConstraint("doc_id", "line_no", name="uq_oge_transactions_doc_line"),
 )
+
+# ------------------------------------------------------------------ 10-K text changes (Lazy Prices)
+
+tenk_filings = Table(
+    "tenk_filings", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False),
+    Column("ticker", String(16)),  # ticker AT the filing date (security master), never today's
+    Column("accession", String(25), nullable=False, unique=True),
+    Column("form", String(10), nullable=False),
+    Column("filing_date", Date, nullable=False),
+    _ts("accepted_at"),  # SEC acceptance timestamp = public time (entry basis)
+    Column("period", Date),  # informational only; never used for timing
+    Column("source_url", Text, nullable=False),
+    Column("sections", JSONB, nullable=False, server_default="[]"),
+    Column("profile", JSONB, nullable=False, server_default="{}"),  # sentence fingerprints per section
+    Column("status", String(16), nullable=False),  # ok | no_sections | fetch_failed
+    Column("prev_accession", String(25)),
+    Column("n_changes", Integer),
+    Column("is_backfill", Boolean, nullable=False, server_default="false"),
+    _created(),
+)
+Index("ix_tenk_filings_cik_date", tenk_filings.c.cik, tenk_filings.c.filing_date)
+
+tenk_changes = Table(
+    "tenk_changes", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("filing_id", BigInteger, ForeignKey("tenk_filings.id", ondelete="CASCADE"), nullable=False),
+    Column("cik", String(10), nullable=False, index=True),
+    Column("ticker", String(16)),
+    Column("filing_date", Date, nullable=False),
+    _ts("public_timestamp"),
+    Column("section", String(32), nullable=False),
+    Column("change_type", String(40), nullable=False),
+    Column("materiality", String(8), nullable=False),  # HIGH | MEDIUM | LOW
+    Column("n_new", Integer, nullable=False, server_default="0"),
+    Column("n_removed", Integer, nullable=False, server_default="0"),
+    Column("old_text_hash", String(40)),
+    Column("new_text_hash", String(40)),
+    Column("examples", JSONB, nullable=False, server_default="[]"),
+    Column("source_url", Text, nullable=False),
+    Column("prev_accession", String(25)),
+    _created(),
+    UniqueConstraint("filing_id", "change_type", name="uq_tenk_changes_filing_type"),
+)
+
+# ------------------------------------------------------------------ insider person track record (point-in-time snapshot)
+
+insider_profiles = Table(
+    "insider_profiles", metadata,
+    Column("person_id", String(64), primary_key=True),  # owner CIK, or N:<normalized name> when the filer has none
+    Column("name", Text, nullable=False),
+    Column("issuer_count", Integer, nullable=False),
+    Column("completed_buy_count", Integer, nullable=False),
+    Column("episode_count", Integer, nullable=False),
+    Column("unique_company_count", Integer, nullable=False),
+    Column("median_30d_excess", Float),
+    Column("median_90d_excess", Float),
+    Column("median_180d_excess", Float),
+    Column("spy_beat_rate_90d", Float),
+    Column("sector_beat_rate_90d", Float),
+    Column("ci_low", Float),
+    Column("ci_high", Float),
+    Column("unresolved_share", Float),
+    Column("data_quality", String(16), nullable=False),  # OK | PARTIAL | BLOCKED
+    Column("label", String(24), nullable=False),  # INSUFFICIENT_HISTORY | HISTORICALLY_STRONG | MIXED | HISTORICALLY_WEAK
+    Column("last_updated", DateTime(timezone=True), nullable=False),
+)
+
+# ------------------------------------------------------------------ paper trading (virtual money only, never a broker)
+
+paper_accounts = Table(
+    "paper_accounts", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String(64), nullable=False, unique=True),
+    Column("strategy", String(16), nullable=False),  # A_30D | B_90D | C_180D | D_THESIS | E_STOP_TIME
+    Column("starting_capital", Float, nullable=False),
+    Column("commission_per_trade", Float, nullable=False, server_default="0"),
+    Column("active", Boolean, nullable=False, server_default="true"),
+    _created(),
+)
+
+paper_cash = Table(  # cash ledger: every movement, balance reproducible
+    "paper_cash", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("account_id", Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True),
+    Column("on_date", Date, nullable=False),
+    Column("delta", Float, nullable=False),
+    Column("balance_after", Float, nullable=False),
+    Column("reason", String(32), nullable=False),  # DEPOSIT | BUY | SELL | COMMISSION
+    Column("ref_id", BigInteger),
+    _created(),
+)
+
+proposed_trades = Table(
+    "proposed_trades", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("code", String(12), nullable=False, unique=True),  # short approval code shown in Telegram
+    Column("ticker", String(16), nullable=False),
+    Column("cik", String(10)),
+    Column("event_id", BigInteger, ForeignKey("events.id")),
+    Column("signal_family", String(32), nullable=False),
+    Column("event_type", String(40), nullable=False),
+    _ts("proposal_created_at", nullable=False),
+    Column("reference_date", Date, nullable=False),
+    Column("entry_reference_price", Float, nullable=False),
+    Column("suggested_position_pct", Float, nullable=False),
+    Column("max_position_pct", Float, nullable=False),
+    Column("stop_reference", Float),
+    Column("thesis", Text, nullable=False),
+    Column("risks", JSONB, nullable=False, server_default="[]"),
+    Column("reasons", JSONB, nullable=False, server_default="[]"),
+    Column("data_quality", String(16), nullable=False),
+    Column("gate", JSONB, nullable=False, server_default="{}"),
+    Column("approval_status", String(10), nullable=False, server_default="PENDING"),  # PENDING|APPROVED|REJECTED|EXPIRED
+    _ts("expires_at", nullable=False),
+    _ts("decided_at"),
+    Column("decided_by", String(40)),
+    Column("research_only", Boolean, nullable=False, server_default="false"),
+    Column("notified", Boolean, nullable=False, server_default="false"),
+)
+Index("ix_proposed_trades_status", proposed_trades.c.approval_status, proposed_trades.c.ticker)
+
+paper_orders = Table(
+    "paper_orders", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("account_id", Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True),
+    Column("proposal_id", BigInteger, ForeignKey("proposed_trades.id")),
+    Column("position_id", BigInteger),  # set for SELL orders
+    Column("ticker", String(16), nullable=False),
+    Column("side", String(4), nullable=False),  # BUY | SELL
+    _ts("requested_at", nullable=False),
+    Column("not_before", Date, nullable=False),  # first session the order may fill (never the decision day)
+    Column("target_pct", Float),
+    Column("status", String(10), nullable=False, server_default="PENDING"),  # PENDING | FILLED | CANCELLED
+    Column("fill_date", Date),
+    Column("fill_price", Float),
+    Column("shares", Float),
+    Column("slippage_bps", Float),
+    Column("commission", Float),
+    Column("note", Text),
+)
+
+paper_positions = Table(
+    "paper_positions", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("account_id", Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True),
+    Column("proposal_id", BigInteger, ForeignKey("proposed_trades.id")),
+    Column("ticker", String(16), nullable=False),
+    Column("cik", String(10)),
+    Column("shares", Float, nullable=False),
+    Column("entry_date", Date, nullable=False),
+    Column("entry_price", Float, nullable=False),  # incl. slippage
+    Column("cost", Float, nullable=False),  # incl. commission
+    Column("adj_factor", Float, nullable=False, server_default="1"),  # adj_close/close on the entry day (splits, dividends)
+    Column("stop_price", Float),
+    Column("planned_exit_date", Date),
+    Column("sector_etf", String(8)),
+    Column("status", String(8), nullable=False, server_default="OPEN"),  # OPEN | CLOSING | CLOSED
+    Column("exit_date", Date),
+    Column("exit_price", Float),
+    Column("exit_reason", String(24)),  # TIME | STOP | THESIS_INVALIDATION
+    Column("realized_pnl", Float),
+    Column("last_price", Float),
+    Column("last_price_date", Date),
+)
+
+paper_trades = Table(  # executed fills
+    "paper_trades", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("account_id", Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True),
+    Column("order_id", BigInteger, ForeignKey("paper_orders.id"), nullable=False, unique=True),
+    Column("position_id", BigInteger, ForeignKey("paper_positions.id")),
+    Column("ticker", String(16), nullable=False),
+    Column("side", String(4), nullable=False),
+    Column("trade_date", Date, nullable=False),
+    Column("price", Float, nullable=False),
+    Column("shares", Float, nullable=False),
+    Column("gross", Float, nullable=False),
+    Column("commission", Float, nullable=False),
+    Column("slippage_bps", Float, nullable=False),
+    _created(),
+)
+
+paper_performance = Table(
+    "paper_performance", metadata,
+    Column("account_id", Integer, ForeignKey("paper_accounts.id"), primary_key=True),
+    Column("on_date", Date, primary_key=True),
+    Column("nav", Float, nullable=False),
+    Column("cash", Float, nullable=False),
+    Column("positions_value", Float, nullable=False),
+    Column("spy_nav", Float),  # same capital held in SPY from the account's first trade
+    Column("n_open", Integer, nullable=False),
+)

@@ -5,7 +5,7 @@ import html
 import json
 from datetime import date, datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import and_, desc, func, select, text
 
@@ -107,7 +107,8 @@ def api_sources():
 
 
 STAT_TYPES = ["INSIDER_OPEN_MARKET_BUY", "CLUSTER_INSIDER_BUY", "ACTIVIST_13D", "ACTIVIST_CROWDING", "GOV_CONTRACT", "CONGRESS_BUY",
-              "CONGRESS_CLUSTER_BUY", "MATERIAL_NEWS", "MULTI_SIGNAL_EVENT", "EARLY_DISCOVERY"]
+              "CONGRESS_CLUSTER_BUY", "MATERIAL_NEWS", "MULTI_SIGNAL_EVENT", "EARLY_DISCOVERY",
+              "TENK_CHANGE"]
 
 
 def gated_stats(horizons=(30, 90, 180)) -> list[dict]:
@@ -192,6 +193,8 @@ def _page(title: str, active: str, body: str) -> HTMLResponse:
     nav += f'<a class="{"on" if active == "sources" else ""}" href="/sources">Kaynak Durumu</a>'
     nav += f'<a class="{"on" if active == "stats" else ""}" href="/stats">Geçmiş Performans</a>'
     nav += f'<a class="{"on" if active == "data-quality" else ""}" href="/data-quality">Veri Kalitesi</a>'
+    nav += f'<a class="{"on" if active == "alpha" else ""}" href="/alpha">Alpha Doğrulama</a>'
+    nav += f'<a class="{"on" if active == "paper" else ""}" href="/paper">Sanal Portföy</a>'
     return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PUBLIC EDGE - {html.escape(title)}</title><style>{CSS}</style></head><body><header><b>PUBLIC EDGE</b>
 <span class="muted"> &nbsp;ABD kamu verisinden şirket olayları ve erken keşif</span></header><nav>{nav}</nav><main>{body}</main></body></html>""")
@@ -561,3 +564,107 @@ def data_quality_page():
         "<h3>Keşif doğrulama veri seti</h3>", _tbl(d["discovery_validation"]),
     ]
     return _page("data quality", "data-quality", "".join(body))
+
+
+# ------------------------------------------------------------------ ALPHA VALIDATION + paper trading
+
+VERDICT_TR = {"OUTPERFORMING": "✅ SPY'yi geçiyor", "UNDERPERFORMING": "❌ GERİDE (UNDERPERFORMING)",
+              "INCONCLUSIVE": "➖ belirsiz", "BLOCKED": "⛔ ölçülemiyor (BLOCKED)"}
+
+
+def _p(x, digits=0):
+    return "" if x is None else f"%{x * 100:.{digits}f}"
+
+
+@app.get("/api/alpha")
+def api_alpha():
+    from app.paper.alpha import all_families
+    with get_engine().begin() as conn:
+        return _jsonable(all_families(conn))
+
+
+@app.get("/alpha", response_class=HTMLResponse)
+def alpha_page():
+    fams = api_alpha()
+    rows = []
+    for f in fams:
+        for h, d in f["horizons"].items():
+            rows.append({"aile": f["family"], "ufuk": f"{h}g", "veri kalitesi": d["status"], "karar": VERDICT_TR.get(d["verdict"], d["verdict"]),
+                         "şirket": d["companies"], "bağımsız dönem": d["episodes"], "çözümsüz": _p(d["unresolved_share"]),
+                         "medyan fazla getiri": _p(d["median_excess"], 1), "SPY'yi geçme": _p(d["spy_beat_rate"]),
+                         "sektörü geçme": _p(d["sector_beat_rate"]),
+                         "%95 aralık": f"{_p(d['ci'][0])}–{_p(d['ci'][1])}" if d["ci"] else "",
+                         "sınırlar (PARTIAL)": f"{_p(d['worst_case'])}–{_p(d['best_case'])}" if d["worst_case"] is not None else "",
+                         "walk-forward": (f["walk_forward"] or {}).get("status") if str(h) == "90" else "",
+                         "not": d["reason"] or ""})
+    body = ["<p class=muted>Her sinyal ailesi için dürüst karar. Oranlar yalnız veri kalitesi TRUSTED olduğunda gösterilir. "
+            "PARTIAL'da en kötü/en iyi durum sınırları, BLOCKED'da sebep görünür. GERİDE (UNDERPERFORMING) veya "
+            "kanıtlanmamış aileler otomatik sanal işlem önerisi üretmez.</p>", _tbl(rows)]
+    return _page("Alpha Doğrulama", "alpha", "".join(body))
+
+
+@app.get("/api/paper")
+def api_paper():
+    from app.db.models import paper_accounts, paper_positions, proposed_trades, tenk_changes
+    from app.paper.ledger import account_metrics
+    with get_engine().connect() as conn:
+        ids = [r[0] for r in conn.execute(select(paper_accounts.c.id).order_by(paper_accounts.c.id)).all()]
+        accounts = [account_metrics(conn, i) for i in ids]
+        props = [dict(r) for r in conn.execute(select(proposed_trades).order_by(desc(proposed_trades.c.id)).limit(50)).mappings()]
+        pos = [dict(r) for r in conn.execute(select(paper_positions).where(paper_positions.c.status != "CLOSED")
+                                             .order_by(paper_positions.c.id)).mappings()]
+        tk = [dict(r) for r in conn.execute(select(tenk_changes.c.ticker, tenk_changes.c.filing_date, tenk_changes.c.change_type,
+                                                   tenk_changes.c.materiality, tenk_changes.c.section, tenk_changes.c.n_new)
+                                            .where(tenk_changes.c.materiality != "LOW")
+                                            .order_by(desc(tenk_changes.c.id)).limit(30)).mappings()]
+        prof = [dict(r) for r in conn.execute(text("""SELECT label, count(*) n FROM insider_profiles GROUP BY 1 ORDER BY 2 DESC""")).mappings()]
+    return _jsonable({"accounts": accounts, "proposals": props, "open_positions": pos, "tenk_changes": tk, "insider_labels": prof})
+
+
+@app.post("/api/paper/proposals/{code}/decision")
+def api_paper_decision(code: str, request: Request):
+    """Human approval from the tailnet dashboard. Requires the custom header that only the page's own
+    script sends (a cross-site form cannot set it). Approval creates PAPER orders only."""
+    if request.headers.get("x-pe-action") not in ("approve", "reject"):
+        raise HTTPException(400, "missing x-pe-action header")
+    from app.paper.proposals import decide
+    return decide(get_engine(), code, request.headers["x-pe-action"] == "approve", by="dashboard")
+
+
+@app.get("/paper", response_class=HTMLResponse)
+def paper_page():
+    d = api_paper()
+    acc = [{"hesap": a["account"], "strateji": a["strategy"], "NAV": f"{a['nav']:,.0f} $", "nakit": f"{a['cash']:,.0f} $",
+            "SPY aynı sermaye": f"{a['spy_nav']:,.0f} $", "açık": a["open_positions"], "kapanan": a["closed_positions"],
+            "gerçekleşen K/Z": f"{a['realized_pnl']:,.0f} $", "gerçekleşmemiş K/Z": f"{a['unrealized_pnl']:,.0f} $",
+            "maks. düşüş": _p(a["max_drawdown"], 1), "kazanma oranı": _p(a["win_rate"]),
+            "ort. elde tutma": f"{a['avg_holding_days']:.0f} g" if a["avg_holding_days"] else "",
+            "sektöre göre ort.": _p(a["avg_sector_adjusted_return"], 1)} for a in d["accounts"]]
+    props = []
+    for p in d["proposals"]:
+        btn = (f"<button onclick=\"dec('{html.escape(p['code'])}','approve')\">ONAYLA</button> "
+               f"<button onclick=\"dec('{html.escape(p['code'])}','reject')\">REDDET</button>") if p["approval_status"] == "PENDING" else ""
+        props.append({"kod": p["code"], "hisse": p["ticker"], "aile": p["signal_family"], "durum": p["approval_status"],
+                      "ref. fiyat": p["entry_reference_price"], "önerilen": _p(p["suggested_position_pct"], 1),
+                      "maks.": _p(p["max_position_pct"], 1), "araştırma modu": "evet" if p["research_only"] else "",
+                      "son geçerlilik": p["expires_at"], "_btn": btn})
+    ptab = "<p class=muted>öneri yok</p>"
+    if props:
+        cols = [c for c in props[0] if c != "_btn"]
+        ptab = ("<table><tr>" + "".join(f"<th>{html.escape(c)}</th>" for c in cols) + "<th></th></tr>" +
+                "".join("<tr>" + "".join(f"<td>{html.escape(str(r[c]) if r[c] is not None else '')}</td>" for c in cols) +
+                        f"<td>{r['_btn']}</td></tr>" for r in props) + "</table>")
+    pos = [{"hesap": p["account_id"], "hisse": p["ticker"], "giriş": p["entry_date"], "giriş fiyatı": round(p["entry_price"], 2),
+            "son fiyat": round(p["last_price"] or 0, 2), "adet": round(p["shares"], 3), "planlanan çıkış": p["planned_exit_date"],
+            "durum": p["status"]} for p in d["open_positions"]]
+    js = """<script>async function dec(c,a){const r=await fetch('/api/paper/proposals/'+encodeURIComponent(c)+'/decision',
+{method:'POST',headers:{'x-pe-action':a}});const j=await r.json();document.getElementById('msg').textContent=c+': '+JSON.stringify(j);
+setTimeout(()=>location.reload(),1500)}</script>"""
+    body = ["<p class=muted><b>Bu sayfadaki her şey SANALDIR.</b> Gerçek para, aracı kurum veya gerçek emir yoktur. "
+            "Onaylanan öneri bir sonraki seansın açılışında kayma ve komisyonla sanal olarak alınır. "
+            "Her çıkış stratejisi (A 30 gün, B 90 gün, C 180 gün, D tez bozulması, E zarar-kes + süre) ayrı hesapta ölçülür.</p>",
+            "<h3>Sanal hesaplar</h3>", _tbl(acc), "<h3>İşlem önerileri</h3><p id=msg class=muted></p>", ptab,
+            "<h3>Açık sanal pozisyonlar</h3>", _tbl(pos),
+            "<h3>Son 10-K metin değişimleri (MEDIUM/HIGH)</h3>", _tbl(d["tenk_changes"]),
+            "<h3>Insider kişi profilleri — etiket dağılımı</h3>", _tbl(d["insider_labels"]), js]
+    return _page("Sanal Portföy", "paper", "".join(body))

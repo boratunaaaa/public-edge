@@ -59,11 +59,58 @@ def _weekly_walkforward(engine, now: datetime) -> None:
         log.exception("walk-forward failed")
 
 
+PAPER_HOUR_UTC = 22  # after the US close, once the day's prices exist
+TENK_HOUR_UTC = 11
+PROPOSAL_EVERY_S = 1800
+
+
+def _alpha_tasks(engine, now: datetime, last_scan: list[float]) -> None:
+    """MEDIUM priority: 10-K live pass, insider profiles, paper proposals and the paper ledger.
+    Every task is isolated: one failing never blocks the others or the discovery schedule."""
+    with engine.begin() as conn:
+        st = job_state(conn, "alpha_daily")
+    today = now.date().isoformat()
+    tasks = []
+    if st.get("tenk") != today and now.hour >= TENK_HOUR_UTC:
+        from app.tenk.engine import run_live
+        tasks.append(("tenk", lambda: run_live(engine)))
+    if st.get("insider_profiles") != today and now.hour >= TENK_HOUR_UTC:
+        from app.signals.insider_profile import refresh_all
+        tasks.append(("insider_profiles", lambda: refresh_all(engine)))
+    if st.get("paper") != today and now.hour >= PAPER_HOUR_UTC:
+        from app.paper.ledger import run as paper_run
+        tasks.append(("paper", lambda: paper_run(engine)))
+    for name, fn in tasks:
+        try:
+            res = fn()
+            log.info("%s done: %s", name, res)
+            with engine.begin() as conn:
+                st = job_state(conn, "alpha_daily")
+                save_job_state(conn, "alpha_daily", {**st, name: today, f"{name}_result": res}, status="idle")
+                health_success(conn, f"alpha:{name}")
+        except Exception as e:
+            log.exception("%s failed", name)
+            with engine.begin() as conn:
+                health_failure(conn, f"alpha:{name}", f"{type(e).__name__}: {e}")
+    if time.time() - last_scan[0] >= PROPOSAL_EVERY_S:
+        last_scan[0] = time.time()
+        try:
+            from app.paper.proposals import expire, notify_pending, scan_new_events
+            expire(engine)
+            r = scan_new_events(engine)
+            n = notify_pending(engine)
+            if r.get("created") or n:
+                log.info("paper proposals %s, notified %s", r, n)
+        except Exception:
+            log.exception("paper proposal scan failed")
+
+
 def main() -> None:
     logging_setup.setup()
     signal.signal(signal.SIGTERM, _sig)
     signal.signal(signal.SIGINT, _sig)
     engine = get_engine()
+    last_scan = [0.0]
     while not _stop:
         now = datetime.now(timezone.utc)
         with engine.begin() as conn:
@@ -95,6 +142,7 @@ def main() -> None:
                 except Exception:
                     log.exception("weekly report failed")
         _weekly_walkforward(engine, now)
+        _alpha_tasks(engine, now, last_scan)
         HEARTBEAT.write_text(str(int(time.time())))
         for _ in range(30):
             if _stop:

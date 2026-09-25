@@ -69,6 +69,42 @@ def returns_loop(engine) -> None:
             time.sleep(10)
 
 
+def tenk_loop(engine) -> None:
+    """LOW priority: survivorship-free 10-K history, in small resumable batches with pauses, so it never
+    competes with live ingestion (worker) or the daily steps for long."""
+    from app.tenk.engine import run_backfill
+    while not _stop:
+        pause = 120
+        try:
+            r = run_backfill(engine, max_docs=150, time_budget_s=900)
+            log.info("10-K backfill batch %s", r)
+            if not r.get("docs") and not r.get("not_listed"):
+                pause = 6 * 3600  # history complete: look again for late filers every 6 hours
+        except Exception:
+            log.exception("10-K backfill failed")
+            pause = 900
+        for _ in range(pause // 10):
+            if _stop:
+                return
+            time.sleep(10)
+
+
+def tiingo_loop(engine) -> None:
+    """Delisted prices from Tiingo, one free-tier hour of quota per batch (resumable). Started only
+    when the operator configured TIINGO_API_KEY."""
+    from app.securitymaster.tiingo_backfill import run as tiingo_run
+    while not _stop:
+        try:
+            r = tiingo_run(engine)
+            log.info("tiingo backfill batch %s", r)
+        except Exception:
+            log.exception("tiingo backfill failed")
+        for _ in range(360):
+            if _stop:
+                return
+            time.sleep(10)
+
+
 def run_once(engine) -> None:
     years = settings.backfill_years
     with engine.begin() as conn:
@@ -107,6 +143,13 @@ def main() -> None:
     import threading
     rt = threading.Thread(target=returns_loop, args=(engine,), name="returns", daemon=True)
     rt.start()
+    if loop:
+        threading.Thread(target=tenk_loop, args=(engine,), name="tenk", daemon=True).start()
+        from app.securitymaster.tiingo_backfill import configured as tiingo_configured
+        if tiingo_configured():
+            threading.Thread(target=tiingo_loop, args=(engine,), name="tiingo", daemon=True).start()
+        else:
+            log.info("TIINGO_API_KEY not set: delisted prices stay unresolved (reported in data quality)")
     while not _stop:
         run_once(engine)
         if not loop:

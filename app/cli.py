@@ -11,6 +11,14 @@
   python -m app.cli validation-sample SAMPLE_ID
   python -m app.cli validation-label SAMPLE_ID TICKER LABEL REASON[,REASON] "notes" LABELER
   python -m app.cli validation-precision SAMPLE_ID
+  python -m app.cli alpha                               # ALPHA VALIDATION verdict per signal family
+  python -m app.cli tenk-live | tenk-backfill [MAX_DOCS]  # 10-K text-change engine
+  python -m app.cli insider-profiles                    # refresh insider person track records
+  python -m app.cli paper-init | paper-run | paper-status
+  python -m app.cli paper-propose EVENT_ID [--research] # gate + PENDING proposal (never an order)
+  python -m app.cli paper-approve CODE | paper-reject CODE
+  python -m app.cli paper-notify                        # send pending proposals to Telegram
+  python -m app.cli tiingo-backfill | provider-coverage
 """
 from __future__ import annotations
 
@@ -92,6 +100,49 @@ def main(argv: list[str]) -> int:
         from app.discovery.validation import precision
         with eng.connect() as conn:
             _print(precision(conn, argv[1]))
+    elif cmd == "alpha":
+        from app.paper.alpha import all_families
+        with eng.begin() as conn:
+            _print(all_families(conn, use_cache="--fresh" not in argv))
+    elif cmd == "tenk-live":
+        from app.tenk.engine import run_live
+        _print(run_live(eng))
+    elif cmd == "tenk-backfill":
+        from app.tenk.engine import run_backfill
+        _print(run_backfill(eng, max_docs=int(argv[1]) if len(argv) > 1 else 120))
+    elif cmd == "insider-profiles":
+        from app.signals.insider_profile import refresh_all
+        _print(refresh_all(eng))
+    elif cmd == "paper-init":
+        from app.paper.ledger import ensure_accounts
+        with eng.begin() as conn:
+            _print(ensure_accounts(conn))
+    elif cmd == "paper-run":
+        from app.paper.ledger import run
+        _print(run(eng))
+    elif cmd == "paper-status":
+        from app.paper.ledger import account_metrics
+        from app.paper.proposals import pending_summary
+        with eng.connect() as conn:
+            ids = [r[0] for r in conn.exec_driver_sql("SELECT id FROM paper_accounts ORDER BY id").all()]
+            _print({"accounts": [account_metrics(conn, i) for i in ids], "proposals": pending_summary(conn)})
+    elif cmd == "paper-propose" and len(argv) >= 2:
+        from app.paper.proposals import create_proposal
+        _print(create_proposal(eng, int(argv[1]), research_only="--research" in argv))
+    elif cmd in ("paper-approve", "paper-reject") and len(argv) >= 2:
+        from app.paper.proposals import decide
+        r = decide(eng, argv[1], cmd == "paper-approve", by="cli")
+        _print(r)
+        return 0 if r.get("ok") else 1
+    elif cmd == "paper-notify":
+        from app.paper.proposals import notify_pending
+        _print({"sent": notify_pending(eng)})
+    elif cmd == "tiingo-backfill":
+        from app.securitymaster.tiingo_backfill import run as tiingo_run
+        _print(tiingo_run(eng))
+    elif cmd == "provider-coverage":
+        from app.securitymaster.tiingo_backfill import coverage_report
+        _print(coverage_report(eng))
     else:
         print(__doc__)
         return 2

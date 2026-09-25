@@ -136,12 +136,18 @@ def build_message(engine: Engine, ev: dict) -> tuple[str, bytes | None]:
         if ev.get("ticker") and ev["event_type"] not in NO_CHART:  # also loads/stores the prices used below
             chart = price_chart(conn, ev["ticker"], ev["public_date"], f"{ev['ticker']} — son 6 ay fiyat (turuncu çizgi: olay günü)")
         price_ctx = _price_context(conn, ev.get("ticker"), ev["public_date"])
+        person_line = None
+        if ev["event_type"] == "INSIDER_OPEN_MARKET_BUY":
+            from app.signals.insider_profile import person_id, profile_at, telegram_line
+            pid = person_id(p.get("owner_cik"), p.get("owner"))
+            if pid and p.get("owner_attribution") != "joint":  # as of the event day: no later outcome leaks in
+                person_line = telegram_line(profile_at(conn, pid, ev["public_date"]))
     mcap, bucket = (uni[0], uni[1]) if uni else (p.get("market_cap"), p.get("bucket") or p.get("mcap_bucket"))
     if ev["event_type"] == "EARLY_DISCOVERY":
         srcs = ["SEC resmi belgeleri"] + (["Form 4 (yönetici alımları)"] if p.get("why") and any("insider" in w for w in p["why"]) else [])
         return format_discovery(ev, risks, srcs + [ev.get("source_url") or ""], rate=rate), chart
     return format_alert(ev, rate=rate, risks=risks, related=related, thesis=thesis, market_cap=mcap, bucket=bucket,
-                        price_ctx=price_ctx), chart
+                        price_ctx=price_ctx, person_line=person_line), chart
 
 
 def _price_context(conn, ticker: str | None, day) -> dict | None:

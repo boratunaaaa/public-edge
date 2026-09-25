@@ -54,6 +54,10 @@ STUDIES: dict[str, tuple[str, list[Candidate]]] = {
     "news_materiality": ("MATERIAL_NEWS", [
         Candidate("HIGH+CRITICAL", "TRUE", {}),
         Candidate("CRITICAL", "e.payload->>'materiality' = 'CRITICAL'", {})]),
+    "tenk_change": ("TENK_CHANGE", [
+        Candidate("all", "TRUE", {}),
+        Candidate("positive", "e.payload->>'direction' = 'POSITIVE'", {}),
+        Candidate("high", "(e.payload->>'high')::int >= 1", {})]),
     "contract_ratio": ("GOV_CONTRACT", [
         Candidate(">=0.5%", "TRUE", {}),
         Candidate(">=2%", "(e.payload->>'value_to_mcap')::float >= 0.02", {}),
