@@ -50,6 +50,11 @@ def returns_loop(engine) -> None:
             if r["batch"]:
                 log.info("returns identity revalidation %s", r)
                 continue
+            from app.backtest.jobs import fill_sector_benchmark
+            r = fill_sector_benchmark(engine)
+            if r["batch"]:
+                log.info("sector benchmark fill %s", r)
+                continue
             r = compute_pending(engine, limit=3000, time_budget_s=1800, backfill=True)
             with engine.begin() as conn:
                 save_job_state(conn, "backfill_returns", r, status="running")
@@ -86,6 +91,8 @@ def run_once(engine) -> None:
     step(engine, "house", lambda: HousePtrSource().run_backfill(engine, years).items)
     step(engine, "usaspending", lambda: UsaSpendingSource().run_backfill(engine, years).items)
     step(engine, "sc13d", lambda: backfill_13d(engine, years))
+    from app.signals.crowding import backfill_crowding
+    step(engine, "activist_crowding", lambda: backfill_crowding(engine))
     # official 8-K history for the news backtest: point-in-time listed universe (not today's list)
     from app.news.backfill import backfill_news_8k
     step(engine, "news_8k", lambda: backfill_news_8k(engine, days=settings.news_backfill_days))

@@ -46,9 +46,10 @@ FAMILY = {
     "INSIDER_OPEN_MARKET_BUY": "INSIDER_BUY", "CLUSTER_INSIDER_BUY": "INSIDER_CLUSTER", "ACTIVIST_13D": "ACTIVIST",
     "GOV_CONTRACT": "GOVERNMENT_CONTRACT", "CONGRESS_BUY": "CONGRESS", "CONGRESS_CLUSTER_BUY": "CONGRESS",
     "MATERIAL_NEWS": "NEWS", "EARLY_DISCOVERY": "DISCOVERY", "MULTI_SIGNAL_EVENT": "MULTI_SIGNAL",
+    "ACTIVIST_CROWDING": "ACTIVIST_CROWDING",
 }
 DEFAULT_EPISODE_WINDOWS = {"INSIDER_BUY": 90, "INSIDER_CLUSTER": 90, "ACTIVIST": 90, "GOVERNMENT_CONTRACT": 90,
-                           "CONGRESS": 90, "NEWS": 30, "DISCOVERY": 180, "MULTI_SIGNAL": 90}
+                           "CONGRESS": 90, "NEWS": 30, "DISCOVERY": 180, "MULTI_SIGNAL": 90, "ACTIVIST_CROWDING": 90}
 
 
 def episode_windows() -> dict[str, int]:
@@ -78,6 +79,7 @@ class Row:
     excess: float | None = None
     ret: float | None = None
     mae: float | None = None
+    sector_excess: float | None = None
 
 
 @dataclass
@@ -110,6 +112,8 @@ class QualityStats:
     median_excess: float | None = None
     median_return: float | None = None
     median_mae: float | None = None
+    sector_benchmark_rate: float | None = None  # company-equal share beating the SECTOR ETF (resolved + sector known)
+    sector_coverage: float | None = None  # share of resolved episodes with a sector benchmark
     status: str = "BLOCKED"
     reasons: list = field(default_factory=list)
 
@@ -141,7 +145,7 @@ def load_rows(conn: Connection, event_type: str, cond: str, params: dict, horizo
     as_of = as_of or date.today()
     q = text(f"""
         SELECT e.id, COALESCE(e.issuer_cik, 'T:' || e.ticker, 'E:' || e.id::text) issuer, sm.sector,
-               e.public_date, r.excess_ret, r.ret, r.mae, (r.event_id IS NOT NULL) has_ret, e.missing_reason,
+               e.public_date, r.excess_ret, r.ret, r.mae, r.sector_excess, (r.event_id IS NOT NULL) has_ret, e.missing_reason,
                sm.delisting_reason, sm.delisting_date,
                (e.price_symbol_basis IN ('current_ticker_same_cik','historical_symbol_verified')) verified
         FROM events e
@@ -158,7 +162,7 @@ def load_rows(conn: Connection, event_type: str, cond: str, params: dict, horizo
         oc, why = outcome_for(r["excess_ret"], r["has_ret"], r["missing_reason"], r["delisting_reason"], r["delisting_date"],
                               r["public_date"], horizon)
         out.append(Row(r["id"], r["issuer"], r["sector"], r["public_date"], oc, why, bool(r["verified"]),
-                       r["excess_ret"], r["ret"], r["mae"]))
+                       r["excess_ret"], r["ret"], r["mae"], r["sector_excess"]))
     return out
 
 
@@ -229,6 +233,13 @@ def summarize(rows: list[Row], horizon: int, window_days: int) -> QualityStats:
         st.median_excess = statistics.median(ex) if ex else None
         st.median_return = statistics.median(rt) if rt else None
         st.median_mae = statistics.median(mae) if mae else None
+        with_sector = [e for e in resolved if e.first.sector_excess is not None]
+        st.sector_coverage = len(with_sector) / len(resolved)
+        if with_sector:
+            per: dict[str, list[float]] = defaultdict(list)
+            for e in with_sector:
+                per[e.issuer].append(1.0 if e.first.sector_excess > 0 else 0.0)
+            st.sector_benchmark_rate = sum(sum(v) / len(v) for v in per.values()) / len(per)
     st.status, st.reasons = grade(st)
     return st
 

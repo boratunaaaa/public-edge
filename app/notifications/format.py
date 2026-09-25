@@ -168,6 +168,9 @@ def history_block(rate) -> list[str]:
            f"grup: {e(rate.group)})."]
     if getattr(rate, "ci_low", None) is not None:
         out.append(f"Olası aralık: %{rate.ci_low * 100:.0f}–%{rate.ci_high * 100:.0f}")
+    if getattr(rate, "sector_benchmark_rate", None) is not None:
+        out.append(f"Kendi sektör endeksine göre geçme oranı: %{rate.sector_benchmark_rate * 100:.0f} "
+                   "(sektörün genel yükselişi ayıklanınca)")
     if rate.median_excess is not None:
         out.append(f"Tipik fark: borsa ortalamasına göre {pct(rate.median_excess)}")
     if rate.typical_drawdown is not None and rate.typical_drawdown < 0:
@@ -245,6 +248,14 @@ def what_happened(ev: dict) -> tuple[str, list[str], list[str]]:
         if cls not in (None, "PASSIVE_OR_UNCLEAR", "MANAGEMENT_DISCUSSION"):
             why.append(f"Yatırımcının açıkladığı amaç: <b>{e(ITEM4_TR.get(cls, cls))}</b>. Bu tür talepler hisseyi hareketlendirebilir.")
         return "🟠 BÜYÜK BİR YATIRIMCI ŞİRKETTE PAY TOPLADI", what, why
+    if t == "ACTIVIST_CROWDING":
+        what = [f"{p.get('n_investors')} birbirinden bağımsız aktivist yatırımcı {p.get('window_days')} gün içinde bu şirkette "
+                "%5'in üzerinde pay topladığını bildirdi (13D):"]
+        what += [f"• {e(m.get('investor'))}: {pct((m.get('percent') or 0) / 100, 1, sign=False)} ({tarih(m.get('filed'))})"
+                 for m in (p.get("investors") or [])[:5]]
+        why = ["Birden fazla aktivistin aynı şirkete kısa sürede girmesi (\"kurt sürüsü\") yönetim üzerinde tek bir yatırımcıdan "
+               "çok daha güçlü baskı kurabilir; akademik çalışmalar bu durumu ayrıca inceler."]
+        return "🟠🟠 BİRDEN FAZLA AKTİVİST AYNI ŞİRKETTE PAY TOPLADI", what, why
     if t == "GOV_CONTRACT":
         what = [f"{e(p.get('recipient'))} şirketi {e(p.get('agency'))} kurumundan <b>{money(p.get('amount'))}</b> değerinde sözleşme aldı."]
         why = [f"Sözleşmenin şirketin toplam değerine oranı: <b>{pct(p.get('value_to_mcap'), 1, sign=False)}</b>. "

@@ -96,6 +96,23 @@ def score_window(conn: Connection, event_type: str, cand: Candidate, lo: date, h
             "episodes": st.resolved_episodes, "unresolved_share": round(st.unresolved_share, 4), "status": st.status}
 
 
+ALPHA = 0.05
+
+
+def beats_baseline(chosen: dict, baseline: dict, n_trials: int, alpha: float = ALPHA) -> tuple[bool, float | None, float]:
+    """Multiple-testing guard (Bonferroni over the candidates tried, cf. the Deflated Sharpe idea in
+    bagoldbe/form4lab): the validation improvement must be significant after correcting for the number
+    of thresholds searched; otherwise the plain baseline is kept. One-sided z-test on company-equal rates."""
+    from statistics import NormalDist
+    trials = max(1, n_trials - 1)
+    required = NormalDist().inv_cdf(1 - alpha / trials)
+    pc, pb, n = chosen.get("rate"), baseline.get("rate"), chosen.get("companies") or 0
+    if pc is None or pb is None or n <= 0 or pb <= 0 or pb >= 1:
+        return False, None, required
+    z = (pc - pb) / ((pb * (1 - pb) / n) ** 0.5)
+    return z > required, round(z, 3), round(required, 3)
+
+
 def usable(s: dict) -> bool:
     return s["rate"] is not None and s["companies"] >= Q.MIN_COMPANIES and s["unresolved_share"] <= Q.PARTIAL_MAX_UNRESOLVED
 
@@ -113,13 +130,19 @@ def run_study(conn: Connection, study: str, horizon: int = 90, first: date | Non
         val_c = score_window(conn, event_type, next(c for c in cands if c.label == chosen), f.train_end, f.validation_end, horizon) \
             if chosen else None
         val_b = score_window(conn, event_type, baseline, f.train_end, f.validation_end, horizon)
-        if chosen and (not val_c or not usable(val_c) or (usable(val_b) and val_c["rate"] < val_b["rate"])):
+        z = req = None
+        if chosen and chosen != baseline.label and val_c and usable(val_c) and usable(val_b):
+            ok, z, req = beats_baseline(val_c, val_b, len(cands))
+            if not ok:
+                chosen = baseline.label  # improvement not significant after correcting for the thresholds tried
+        elif chosen and (not val_c or not usable(val_c)):
             chosen = baseline.label  # validation did not confirm the train-window choice
         test_c = score_window(conn, event_type, next(c for c in cands if c.label == chosen), f.validation_end, f.test_end, horizon) \
             if chosen else None
         test_b = score_window(conn, event_type, baseline, f.validation_end, f.test_end, horizon)
         results.append({"fold": f.n, "train": [str(f.train_start), str(f.train_end)], "validation_end": str(f.validation_end),
-                        "test_end": str(f.test_end), "chosen": chosen, "train_scores": train, "validation": val_c,
+                        "test_end": str(f.test_end), "chosen": chosen, "trials": len(cands), "validation_z": z,
+                        "required_z": req, "train_scores": train, "validation": val_c,
                         "validation_baseline": val_b, "test": test_c, "test_baseline": test_b,
                         "status": "OK" if (test_c and usable(test_c)) else "INSUFFICIENT_OUT_OF_SAMPLE_DATA"})
     return results

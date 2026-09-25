@@ -58,6 +58,7 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
     done = nodata = retry = 0
     cache: dict[str, list] = {}
     failed: dict[str, str] = {}
+    sectors = SectorBench()
     for eid, ticker, cik, pdate, pat in rows:
         if time.time() - t0 > time_budget_s:
             break
@@ -106,6 +107,7 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
             for r in res:
                 vals = dict(entry_date=r.entry_date, entry_price=r.entry_price, exit_date=r.exit_date, exit_price=r.exit_price,
                             ret=r.ret, spy_ret=r.spy_ret, excess_ret=r.excess_ret, mae=r.mae, mfe=r.mfe, exit_basis=r.exit_basis)
+                vals |= sectors.values(conn, cik, r.entry_date, r.exit_date, r.exit_basis, r.horizon_days, r.ret)
                 conn.execute(pg_insert(event_returns).values(event_id=eid, horizon_days=r.horizon_days, **vals)
                              .on_conflict_do_update(index_elements=["event_id", "horizon_days"], set_=vals))
             status = "complete" if len(res) == len(HORIZONS) else "partial"
@@ -114,6 +116,61 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                 price_symbol_basis=basis_used, missing_reason=None))
             done += 1
     return {"processed": done, "no_data": nodata, "retry": retry, "candidates": len(rows)}
+
+
+class SectorBench:
+    """Per-run cache: issuer sector -> SPDR sector ETF bars (fetched once per run)."""
+
+    def __init__(self) -> None:
+        self.sector: dict[str, str | None] = {}
+        self.bars: dict[str, tuple[dict, list]] = {}
+
+    def etf(self, conn: Connection, cik: str | None) -> str | None:
+        from app.backtest.sector import etf_for_sector
+        from app.db.models import security_master
+        if not cik:
+            return None
+        if cik not in self.sector:
+            self.sector[cik] = conn.execute(select(security_master.c.sector).where(security_master.c.cik == cik)).scalar()
+        return etf_for_sector(self.sector[cik])
+
+    def values(self, conn: Connection, cik: str | None, entry: date, exit_: date, basis: str, horizon: int, ret: float) -> dict:
+        from app.backtest.sector import benchmark_return
+        etf = self.etf(conn, cik)
+        if not etf:
+            return {"sector_etf": None, "sector_ret": None, "sector_excess": None}
+        if etf not in self.bars:
+            try:
+                bars = ensure_prices(conn, etf, PRICE_HISTORY_START, date.today())
+            except PriceFetchError:
+                bars = []
+            self.bars[etf] = ({b.date: b for b in bars}, bars)
+        by_date, ordered = self.bars[etf]
+        sret = benchmark_return(by_date, ordered, entry, exit_, basis, horizon)
+        return {"sector_etf": etf, "sector_ret": sret, "sector_excess": (ret - sret) if sret is not None else None}
+
+
+def fill_sector_benchmark(engine: Engine, batch: int = 20000) -> dict:
+    """Sector-ETF benchmark for returns computed before the column existed (no stock refetch)."""
+    from app.db.models import event_returns as er
+    filled = skipped = 0
+    with engine.connect() as conn:
+        rows = conn.execute(select(er.c.event_id, er.c.horizon_days, er.c.entry_date, er.c.exit_date, er.c.exit_basis, er.c.ret,
+                                   events.c.issuer_cik).join(events, events.c.id == er.c.event_id)
+                            .where(er.c.sector_etf.is_(None)).order_by(events.c.issuer_cik).limit(batch)).all()
+    if not rows:
+        return {"filled": 0, "batch": 0}
+    bench = SectorBench()
+    with engine.begin() as conn:
+        for eid, h, entry, exit_, basis, ret, cik in rows:
+            v = bench.values(conn, cik, entry, exit_, basis, h, ret)
+            if v["sector_etf"] is None:
+                v["sector_etf"] = "-"  # sector unknown / no matching ETF: recorded, never retried in a loop
+                skipped += 1
+            else:
+                filled += 1
+            conn.execute(er.update().where(and_(er.c.event_id == eid, er.c.horizon_days == h)).values(**v))
+    return {"filled": filled, "no_sector": skipped, "batch": len(rows)}
 
 
 def _missing(reason: str | None, dl, pdate: date) -> str:

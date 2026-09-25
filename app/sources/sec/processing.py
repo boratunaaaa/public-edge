@@ -193,6 +193,11 @@ def process_13d(conn: Connection, sub: Submission, cik_for_url: str, *, is_backf
         )
         if eid:
             created.append(eid)
+        if not amend:
+            from app.signals.crowding import crowding_check
+            cid = crowding_check(conn, issuer_cik, filed, ticker=ticker, issuer_name=issuer_name, is_backfill=is_backfill)
+            if cid:
+                created.append(cid)
     for pname, pcik in names.get("FILED BY", []) + [(p.name, p.cik) for p in d.persons]:
         person = trump_person_for(pcik, pname)
         if person:

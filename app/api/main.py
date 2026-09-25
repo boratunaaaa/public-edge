@@ -20,7 +20,7 @@ TABS = [
     ("latest", "Son Olaylar", None),
     ("insider", "Yönetici Alımları", "INSIDER_OPEN_MARKET_BUY"),
     ("cluster", "Toplu Yönetici Alımı", "CLUSTER_INSIDER_BUY"),
-    ("13d", "Aktivist Yatırımcılar (13D)", "ACTIVIST_13D"),
+    ("13d", "Aktivist Yatırımcılar (13D)", "ACTIVIST_13D,ACTIVIST_CROWDING"),
     ("contracts", "Devlet Sözleşmeleri", "GOV_CONTRACT"),
     ("congress", "Temsilciler Meclisi Alımları — Senato Verisi Yok", "CONGRESS_BUY,CONGRESS_CLUSTER_BUY"),
     ("trump", "Trump Ailesi", "TRUMP_FAMILY_SEC_EVENT"),
@@ -106,7 +106,7 @@ def api_sources():
                       "registered": [{"name": s.name, "enabled": s.enabled, "reason": s.disabled_reason} for s in SOURCES]})
 
 
-STAT_TYPES = ["INSIDER_OPEN_MARKET_BUY", "CLUSTER_INSIDER_BUY", "ACTIVIST_13D", "GOV_CONTRACT", "CONGRESS_BUY",
+STAT_TYPES = ["INSIDER_OPEN_MARKET_BUY", "CLUSTER_INSIDER_BUY", "ACTIVIST_13D", "ACTIVIST_CROWDING", "GOV_CONTRACT", "CONGRESS_BUY",
               "CONGRESS_CLUSTER_BUY", "MATERIAL_NEWS", "MULTI_SIGNAL_EVENT", "EARLY_DISCOVERY"]
 
 
@@ -128,8 +128,37 @@ def gated_stats(horizons=(30, 90, 180)) -> list[dict]:
                             "event_level_rate": st["event_level_rate"] if trusted else None,
                             "sector_equal_rate": st["sector_equal_rate"] if trusted else None,
                             "median_excess": st["median_excess"] if trusted else None,
+                            "sector_benchmark_rate": st.get("sector_benchmark_rate") if trusted else None,
+                            "sector_coverage": st.get("sector_coverage"),
                             "bounds": [st["worst_case"], st["best_case"]] if st["status"] == "PARTIAL" else None})
     return out
+
+
+DELAY_BUCKETS = {"INSIDER_OPEN_MARKET_BUY": [(0, 2), (3, 7), (8, 10000)],
+                 "CONGRESS_BUY": [(0, 15), (16, 30), (31, 45), (46, 10000)]}
+
+
+def delay_decay(horizon: int = 90) -> list[dict]:
+    """Does the edge fade with disclosure delay (trade date -> public date)? Idea: FilingsLab's alpha-decay
+    study. Each bucket passes the same data-quality gate; only TRUSTED buckets show a rate."""
+    from app.backtest import quality as Q
+    out = []
+    with get_engine().begin() as conn:
+        for et, buckets in DELAY_BUCKETS.items():
+            for lo, hi in buckets:
+                label = f"delay {lo}-{hi if hi < 10000 else '+'}d"
+                cond = "e.transaction_date IS NOT NULL AND (e.public_date - e.transaction_date) BETWEEN :lo AND :hi"
+                st = Q.compute(conn, et, label, cond, {"lo": lo, "hi": hi}, horizon, persist=True)
+                out.append({"event_type": et, "bucket": label, "status": st["status"], "episodes": st["unique_episodes"],
+                            "companies": st["company_n"], "unresolved_share": st["unresolved_share"],
+                            "company_equal_rate": st["company_equal_rate"] if st["status"] == "TRUSTED" else None,
+                            "reason": None if st["status"] == "TRUSTED" else Q.reason_text_tr(st)})
+    return out
+
+
+@app.get("/api/stats/delay")
+def api_delay_decay():
+    return _jsonable(delay_decay())
 
 
 @app.get("/api/stats")
@@ -238,7 +267,8 @@ def stats_page():
     def cell(r):
         if r["status"] == "TRUSTED":
             return (f"<b>{_rate(r['company_equal_rate'])}</b> <span class=muted>(olay bazlı {_rate(r['event_level_rate'])}, "
-                    f"sektör eşit {_rate(r['sector_equal_rate'])}, medyan fark {_fmt_pct(r['median_excess'])})</span>")
+                    f"sektör eşit {_rate(r['sector_equal_rate'])}, medyan fark {_fmt_pct(r['median_excess'])}; "
+                    f"sektör ETF'ine göre {_rate(r['sector_benchmark_rate'])})</span>")
         if r["status"] == "PARTIAL" and r["bounds"] and r["bounds"][0] is not None:
             return f"gösterilmiyor — kısmi veri; olası aralık {_rate(r['bounds'][0])}–{_rate(r['bounds'][1])}"
         return "gösterilmiyor — " + html.escape(r["reason"] or "")
@@ -250,6 +280,14 @@ def stats_page():
             "örnekler sessizce atılmaz, çözülemeyen örnek oranı yüksekse metrik kapalı kalır.</p>"
             f"<table><tr><th>Tür</th><th>Vade</th><th>Durum</th><th>Olay</th><th>Bağımsız dönem</th><th>Şirket</th><th>Çeyrek</th>"
             f"<th>Çözülemeyen</th><th>Geçmiş başarı oranı</th></tr>{trs}</table>")
+    dd = delay_decay()
+    drs = "".join(f"<tr><td>{r['event_type']}</td><td>{r['bucket']}</td><td class={cls[r['status']]}>{r['status']}</td>"
+                  f"<td>{r['episodes']}</td><td>{r['companies']}</td>"
+                  f"<td>{_rate(r['company_equal_rate']) if r['company_equal_rate'] is not None else 'gösterilmiyor — ' + html.escape(r['reason'] or '')}</td></tr>"
+                  for r in dd)
+    body += ("<h3>Açıklama gecikmesi ve sinyal gücü</h3><p class=muted>İşlem tarihi ile kamuya açıklanma arasındaki gün sayısına göre "
+             "(3 ay, S&amp;P 500'e göre). Yalnız TRUSTED kovalar oran gösterir.</p>"
+             f"<table><tr><th>Tür</th><th>Gecikme</th><th>Durum</th><th>Dönem</th><th>Şirket</th><th>Oran</th></tr>{drs}</table>")
     return _page("backtest", "stats", body)
 
 

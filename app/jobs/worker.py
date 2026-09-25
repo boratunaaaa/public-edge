@@ -76,6 +76,7 @@ def _source_loop(engine, sources) -> None:
     next_run = {s.name: 0.0 for s in sources}
     last_backtest = 0.0
     last_registry = time.time()
+    last_canary = 0.0
     while not _stop:
         for s in sources:
             if _stop or time.time() < next_run[s.name]:
@@ -92,6 +93,15 @@ def _source_loop(engine, sources) -> None:
             except Exception:
                 log.exception("backtest incremental failed")
             last_backtest = time.time()
+        if not _stop and time.time() - last_canary > 3600:
+            try:
+                from app.integrity.canary import run as run_canaries
+                bad = [c for c in run_canaries(engine) if c["status"] != "OK"]
+                if bad:
+                    log.warning("canaries not OK: %s", bad)
+            except Exception:
+                log.exception("canaries failed")
+            last_canary = time.time()
         if not _stop and time.time() - last_registry > 86400:
             try:
                 with engine.begin() as conn:

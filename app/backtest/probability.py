@@ -46,6 +46,7 @@ class SuccessRate:
     sector_equal_rate: float | None = None
     worst_case: float | None = None
     best_case: float | None = None
+    sector_benchmark_rate: float | None = None  # shown only when TRUSTED and sector coverage >= 90%
 
     @property
     def available(self) -> bool:
@@ -138,4 +139,5 @@ def success_rate(conn: Connection, event_type: str, payload: dict, horizon: int 
         status=st["status"], episodes=st["unique_episodes"], unique_periods=st["unique_periods"],
         event_level_rate=st["event_level_rate"] if trusted else None,
         sector_equal_rate=st["sector_equal_rate"] if trusted else None,
-        worst_case=st["worst_case"], best_case=st["best_case"])
+        worst_case=st["worst_case"], best_case=st["best_case"],
+        sector_benchmark_rate=st.get("sector_benchmark_rate") if (trusted and (st.get("sector_coverage") or 0) >= 0.9) else None)

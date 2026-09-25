@@ -322,6 +322,10 @@ event_returns = Table(
     Column("mae", Float),
     Column("mfe", Float),
     Column("exit_basis", String(20), nullable=False, server_default="horizon"),  # horizon | delisting_terminal
+    # sector-matched benchmark (SPDR sector ETF of the issuer's SIC sector) over the same holding period
+    Column("sector_etf", String(8)),
+    Column("sector_ret", Float),
+    Column("sector_excess", Float),
     _created(),
 )
 
