@@ -158,7 +158,20 @@ def sentence_hash(s: str) -> str:
 
 def signals_in(sentence: str) -> list[str]:
     s = sentence.lower()
-    return [label for label, (rx, _stage) in SIGNALS.items() if re.search(rx, s)]
+    labels = [label for label, (rx, _stage) in SIGNALS.items() if re.search(rx, s)]
+    # "We depend on a sole supplier" describes concentration risk, not that the issuer IS a
+    # scarce supplier.  Directionless keyword matching previously promoted risk-factor prose.
+    dependency = re.search(
+        r"\b(we|our|the company) (rely|relies|depend|depends|source|sources|purchase|purchases|obtain|obtains)\b"
+        r"|\b(supplied by|our suppliers?|third[- ]party suppliers?|vendors?|raw materials?|components?)\b",
+        s,
+    )
+    if dependency:
+        labels = [x for x in labels if x not in {"SOLE_SUPPLIER", "LIMITED_SUPPLY_BASE"}]
+    # A "limited supplier base" is inherently about upstream dependency unless the sentence
+    # separately proves the issuer's role.  It is not positive discovery evidence by itself.
+    labels = [x for x in labels if x != "LIMITED_SUPPLY_BASE"]
+    return labels
 
 
 # ------------------------------------------------------------------ themes

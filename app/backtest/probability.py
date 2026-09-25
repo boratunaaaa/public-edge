@@ -10,6 +10,7 @@ backtest. To stay honest:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -30,14 +31,34 @@ class SuccessRate:
     median_return: float | None
     typical_drawdown: float | None  # median worst dip (MAE) inside the window
     best_horizon: int | None  # horizon with the highest median excess among 30/90/180
+    company_n: int = 0  # independent-ish issuer clusters (events from one issuer share one weight)
+    ci_low: float | None = None
+    ci_high: float | None = None
+    affected_samples: int = 0  # mature events omitted because price/benchmark data is unavailable
+    blocked_reason: str | None = None
 
     @property
     def available(self) -> bool:
         return self.probability is not None
 
 
-def shrink(wins: int, n: int, prior: float = PRIOR) -> float:
+def shrink(wins: float, n: int, prior: float = PRIOR) -> float:
     return (wins + prior) / (n + 2 * prior)
+
+
+def wilson_interval(wins: float, n: int, z: float = 1.96) -> tuple[float | None, float | None]:
+    """Approximate 95% interval using issuer clusters as the effective sample size.
+
+    ``wins`` may be fractional because every issuer contributes its mean outcome, rather than
+    letting a prolific filer contribute dozens of nominally independent observations.
+    """
+    if n <= 0:
+        return None, None
+    p = wins / n
+    den = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / den
+    half = z * math.sqrt((p * (1 - p) + z * z / (4 * n)) / n) / den
+    return max(0.0, centre - half), min(1.0, centre + half)
 
 
 # peer groups from most specific to broadest: (label, SQL condition, needs)
@@ -79,30 +100,76 @@ def peer_groups(event_type: str, payload: dict) -> list[tuple[str, str, dict]]:
 
 def _query(conn: Connection, cond: str, params: dict, horizon: int) -> dict:
     row = conn.execute(text(f"""
-        SELECT count(*) n, count(*) FILTER (WHERE r.excess_ret > 0) wins,
+        WITH sample AS (
+          SELECT r.*, COALESCE(e.issuer_cik, e.ticker, 'EVENT:' || e.id::text) issuer_key
+          FROM event_returns r JOIN events e ON e.id = r.event_id
+          WHERE e.event_type = :et AND r.horizon_days = :h AND r.excess_ret IS NOT NULL
+            AND e.date_quality <> 'estimated'
+            AND COALESCE(e.payload->>'universe_quality', '') <> 'current_universe_survivorship_biased'
+            AND {cond}
+        ), issuer_results AS (
+          SELECT issuer_key, avg((excess_ret > 0)::int)::float8 issuer_hit
+          FROM sample GROUP BY issuer_key
+        )
+        SELECT (SELECT count(*) FROM sample) n,
+               (SELECT count(*) FROM issuer_results) company_n,
+               (SELECT coalesce(sum(issuer_hit), 0) FROM issuer_results) weighted_wins,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY r.excess_ret) med_ex,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY r.ret) med_ret,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY r.mae) med_mae
-        FROM event_returns r JOIN events e ON e.id = r.event_id
-        WHERE e.event_type = :et AND r.horizon_days = :h AND r.excess_ret IS NOT NULL
-          AND e.date_quality <> 'estimated' AND {cond}"""), {**params, "h": horizon}).mappings().first()
+        FROM sample r"""), {**params, "h": horizon}).mappings().first()
     return dict(row)
+
+
+def _affected(conn: Connection, cond: str, params: dict, horizon: int) -> int:
+    """Mature comparable events silently absent from the SPY-relative sample.
+
+    Any such omission can be survivorship/data-availability bias.  The displayed hit rate is
+    therefore disabled instead of assuming the missing securities were neutral.
+    """
+    row = conn.execute(text(f"""
+        SELECT count(*)
+        FROM events e
+        LEFT JOIN event_returns r ON r.event_id=e.id AND r.horizon_days=:h
+        WHERE e.event_type=:et AND e.date_quality <> 'estimated'
+          AND COALESCE(e.payload->>'universe_quality', '') <> 'current_universe_survivorship_biased' AND {cond}
+          AND e.public_date <= CURRENT_DATE - (:h * INTERVAL '1 day')
+          AND (e.returns_status = 'no_data' OR (r.event_id IS NOT NULL AND r.excess_ret IS NULL))
+    """), {**params, "h": horizon}).scalar()
+    return int(row or 0)
 
 
 def success_rate(conn: Connection, event_type: str, payload: dict, horizon: int = DEFAULT_HORIZON,
                  exclude_event_id: int | None = None) -> SuccessRate:
     for label, cond, params in peer_groups(event_type, payload):
+        if event_type == "ACTIVIST_13D":
+            # Historical low-information amendments were emitted as fresh events.  Do not let
+            # them multiply the apparent evidence until the stored history can be rebuilt.
+            cond = (f"({cond}) AND (COALESCE((e.payload->>'is_amendment')::boolean, false) = false "
+                    "OR abs(COALESCE((e.payload->>'change')::float, 0)) >= 1)")
         if exclude_event_id is not None:
             cond = f"({cond}) AND e.id <> :xid"
             params = {**params, "xid": exclude_event_id}
         r = _query(conn, cond, params, horizon)
-        if r["n"] >= MIN_SAMPLE:
+        affected = _affected(conn, cond, params, horizon)
+        # MIN_SAMPLE applies to issuer clusters, not correlated event rows.
+        if r["company_n"] >= MIN_SAMPLE and affected == 0:
             best, best_val = None, None
             for h in (30, 90, 180):
                 x = _query(conn, cond, params, h)
                 if x["n"] >= MIN_SAMPLE and x["med_ex"] is not None and (best_val is None or x["med_ex"] > best_val):
                     best, best_val = h, x["med_ex"]
-            return SuccessRate(shrink(r["wins"], r["n"]), r["wins"] / r["n"], r["n"], horizon, label,
-                               r["med_ex"], r["med_ret"], r["med_mae"], best)
+            lo, hi = wilson_interval(r["weighted_wins"], r["company_n"])
+            return SuccessRate(shrink(r["weighted_wins"], r["company_n"]),
+                               r["weighted_wins"] / r["company_n"], r["n"], horizon, label,
+                               r["med_ex"], r["med_ret"], r["med_mae"], best,
+                               company_n=r["company_n"], ci_low=lo, ci_high=hi)
+        if r["company_n"] >= MIN_SAMPLE and affected:
+            return SuccessRate(None, None, r["n"], horizon, label, r["med_ex"], r["med_ret"],
+                               r["med_mae"], None, company_n=r["company_n"], affected_samples=affected,
+                               blocked_reason="missing_price_or_benchmark_data")
     total = _query(conn, "TRUE", {"et": event_type}, horizon)
-    return SuccessRate(None, None, int(total["n"] or 0), horizon, "yetersiz veri", None, None, None, None)
+    affected = _affected(conn, "TRUE", {"et": event_type}, horizon)
+    return SuccessRate(None, None, int(total["n"] or 0), horizon, "yetersiz veri", None, None, None, None,
+                       company_n=int(total["company_n"] or 0), affected_samples=affected,
+                       blocked_reason="missing_price_or_benchmark_data" if affected else None)

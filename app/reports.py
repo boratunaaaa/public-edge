@@ -53,7 +53,7 @@ def daily_report(engine: Engine, now: datetime | None = None) -> str:
         _section("📰 Önemli şirket haberleri", ol(news)) + \
         _section("🟢 Birden fazla yöneticinin hisse aldığı şirketler", ol(clusters)) + \
         _section("🏛 Devlet sözleşmeleri", ol(gov) + ol(gov_news)) + \
-        _section("🏛 Kongre üyelerinin alımları", ol(cong)) + \
+        _section("🏛 Temsilciler Meclisi alımları (Senato verisi yok)", ol(cong)) + \
         _section("🧭 Takip ettiğimiz şirketlerde görüş değişikliği",
                  [f"{t}: {TEZ.get(c, c)} — {x[:90]}" for t, c, x in tch]) + \
         _section("👀 Takip listesindeki şirketlerde yeni gelişmeler", ol(wl_dev))

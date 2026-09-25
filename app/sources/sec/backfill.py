@@ -110,7 +110,9 @@ def load_form345_quarter(engine: Engine, q: str) -> dict:
         price = to_float(t.get("TRANS_PRICEPERSHARE"))
         issuer = (s.get("ISSUERCIK") or "").zfill(10)
         sym = normalize_symbol(s.get("ISSUERTRADINGSYMBOL"))
-        ticker = resolver.ticker_for_cik(issuer) or sym
+        # Historical filing symbol is the point-in-time identity.  Preferring today's SEC
+        # registry silently maps renamed/acquired issuers onto a ticker that may not have existed.
+        ticker = sym or resolver.ticker_for_cik(issuer)
         cik_url = issuer.lstrip("0") or "0"
         rows.append({
             "accession": a, "line_key": f"DS{t['NONDERIV_TRANS_SK']}", "issuer_cik": issuer, "ticker": ticker,

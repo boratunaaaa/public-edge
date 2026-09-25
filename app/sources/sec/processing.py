@@ -72,7 +72,7 @@ def process_form4(conn: Connection, sub: Submission, cik_for_url: str, *, is_bac
         mark_filing(conn, fid, "error", f"parse: {e}")
         return []
     ticker = doc.ticker or resolver.ticker_for_cik(doc.issuer_cik)
-    if doc.ticker and resolver.ticker_for_cik(doc.issuer_cik) and doc.ticker not in resolver.ticker_to_cik:
+    if (not is_backfill) and doc.ticker and resolver.ticker_for_cik(doc.issuer_cik) and doc.ticker not in resolver.ticker_to_cik:
         ticker = resolver.ticker_for_cik(doc.issuer_cik)  # stale/odd symbol on the form -> official mapping
     owner = doc.primary_owner if doc.owners else None
     filed = sub.filed_date or (sub.accepted_at.date() if sub.accepted_at else None)
@@ -143,11 +143,14 @@ def process_13d(conn: Connection, sub: Submission, cik_for_url: str, *, is_backf
         remember_cusip(conn, ticker, d.cusip)
     pct = d.max_percent
     prev = None
+    prev_class = None
     if issuer_cik and investor_cik:
-        prev = conn.execute(select(activist_filings.c.percent).where(
+        prev_row = conn.execute(select(activist_filings.c.percent, activist_filings.c.item4_class).where(
             activist_filings.c.issuer_cik == issuer_cik, activist_filings.c.investor_cik == investor_cik,
             activist_filings.c.accession != sub.accession, activist_filings.c.filed_date <= (sub.filed_date or activist_filings.c.filed_date))
-            .order_by(desc(activist_filings.c.filed_date)).limit(1)).scalar()
+            .order_by(desc(activist_filings.c.filed_date)).limit(1)).first()
+        if prev_row:
+            prev, prev_class = prev_row
     change = (pct - prev) if (pct is not None and prev is not None) else None
     cls, labels = classify_item4(d.item4_text)
     filed = sub.filed_date or (sub.accepted_at.date() if sub.accepted_at else None)
@@ -163,7 +166,11 @@ def process_13d(conn: Connection, sub: Submission, cik_for_url: str, *, is_backf
     }], ["accession"])
     mark_filing(conn, fid, "ok")
     created: list[int] = []
-    if thirteen_d and filed:
+    # Amendments are not independent events.  Create a new signal only for a material ownership
+    # move (>=1 percentage point) or a changed Item 4 purpose; all amendments remain stored/auditable.
+    material_amendment = (not amend) or (prev is None and prev_class is None) or \
+        (change is not None and abs(change) >= 1.0) or (prev_class is not None and cls != prev_class)
+    if thirteen_d and filed and material_amendment:
         prio = P.activist_priority(item4_class=cls, is_amendment=amend, percent=pct, percent_change=change)
         pct_s = f"{pct:.1f}%" if pct is not None else "n/a"
         eid = create_event(
@@ -172,6 +179,7 @@ def process_13d(conn: Connection, sub: Submission, cik_for_url: str, *, is_backf
             title=f"{'13D/A' if amend else '13D'} {investor_name or '?'} {pct_s} of {('$' + ticker) if ticker else issuer_name} - {cls}",
             payload={"investor": investor_name, "investor_cik": investor_cik, "percent": pct, "shares": d.max_shares,
                      "previous_percent": prev, "change": change, "item4_class": cls, "item4_labels": labels,
+                     "previous_item4_class": prev_class,
                      "item4_excerpt": (d.item4_text or "")[:600], "is_amendment": amend, "form_type": sub.form_type,
                      "cusip": d.cusip, "accession": sub.accession, "event_date": d.event_date},
             source_url=url, is_backfill=is_backfill,

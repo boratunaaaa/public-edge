@@ -40,9 +40,16 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def annual_revenue(conn: Connection, cik: str | None) -> float | None:
-    """Trailing-4-quarter revenue from stored XBRL frames (None if fewer than 4 quarters)."""
+def annual_revenue(conn: Connection, cik: str | None, as_of: datetime | None = None) -> float | None:
+    """Trailing revenue for live classification only.
+
+    The frames table does not retain the filing/acceptance timestamp for every fact.  Using its
+    current contents for a historical story would leak later filings into the backtest.  Until
+    filing-time facts are stored, historical revenue materiality fails closed to ``None``.
+    """
     if not cik:
+        return None
+    if as_of is not None and as_of.date() < _now().date():
         return None
     rows = conn.execute(select(fundamentals_quarterly.c.val).where(and_(
         fundamentals_quarterly.c.cik == cik, fundamentals_quarterly.c.concept == "Revenue"))
@@ -147,7 +154,7 @@ def refresh_cluster(conn: Connection, cid: int, is_backfill: bool = False) -> li
     agr = C.agreement_type(text)
     # a dollar figure is only a "contract value" when the story is about a contract
     value = contract_value(text) if set(classes) & {"NEW_CONTRACT", "GOVERNMENT_CONTRACT", "MAJOR_CUSTOMER", "DESIGN_WIN"} else None
-    rev = annual_revenue(conn, cl["cik"])
+    rev = annual_revenue(conn, cl["cik"], pub_at)
     mcap = market_cap_at(conn, cl["cik"], pub_at)
     tier = primary["source_tier"]
     m = C.materiality(classes, agreement=agr, contract_value=value, market_cap=mcap, annual_revenue=rev, tier=tier)
@@ -165,7 +172,8 @@ def refresh_cluster(conn: Connection, cid: int, is_backfill: bool = False) -> li
                    "value_to_mcap": vals["value_to_mcap"], "mcap_bucket": vals["mcap_bucket"], "materiality": m.level,
                    "materiality_reasons": m.reasons, "n_items": len(items), "sources": vals["sources"],
                    "primary_source": primary["source"], "source_tier": tier, "headline": primary["headline"],
-                   "snippet": (primary["snippet"] or "")[:400]}
+                   "snippet": (primary["snippet"] or "")[:400],
+                   "universe_quality": "current_universe_survivorship_biased" if is_backfill else "live"}
         # focus is discovery-size companies: scaled/unknown-size names alert only when CRITICAL
         small = vals["mcap_bucket"] in ("MICRO", "EARLY_SMALL", "SMALL", "GROWTH")
         if vals["mcap_bucket"] == "BELOW_UNIVERSE":

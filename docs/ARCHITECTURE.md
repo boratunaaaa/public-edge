@@ -89,13 +89,15 @@ binding vs MOU), commercialization stage, inflection flags that need two confirm
 microcap risk filter, research-priority score (no price-momentum feature), watchlist with reasons
 and manual override (`python -m app.cli watchlist TICKER CATEGORY "reason"`), evidence-linked thesis.
 
-**Insiders**: routine vs opportunistic (Cohen, Malloy & Pomorski 2012) and holdings increase.
+**Insiders**: CMP-inspired, point-in-time routine/opportunistic calendar heuristic (not a full
+replication of Cohen, Malloy & Pomorski 2012) and holdings increase.
 
 ## Telegram messages (Turkish, for non-experts)
 
-Every alert: company + size + price context, "Ne oldu?", "Neden önemli?", "Geçmişte ne oldu?",
-"Alım puanı", overall verdict, "Dikkat" (plain-language risks), source link, and a 6-month price
-chart. **Alım puanı** = share of comparable past events (most specific peer group with >= 30
-samples) whose stock beat the S&P 500 over 3 months in this system's no-look-ahead backtest,
-shrunk toward 50% (Beta(5,5)); below 30 samples no percentage is shown. The weekly report carries an
+Every alert: company + size + price context, "Ne oldu?", "Neden önemli?", "Geçmiş başarı oranı",
+risk note, "Dikkat" (plain-language risks), source link, and a 6-month price chart.
+**Historical hit rate** = issuer-equal-weighted share of comparable past events whose stock beat
+the S&P 500 over 3 months. It includes a 95% interval and is never presented as an investment score.
+At least 30 distinct issuers are required; any mature sample omitted for missing price/benchmark
+data disables the percentage (survivorship-bias fail-closed). The weekly report carries an
 alert scorecard (how the alerts actually sent 1–4 months ago performed).

@@ -1,10 +1,12 @@
-"""Routine vs opportunistic insiders (Cohen, Malloy & Pomorski, "Decoding Inside Information",
-Journal of Finance 2012).
+"""Point-in-time heuristic inspired by Cohen, Malloy & Pomorski, "Decoding Inside Information".
+
+This is not a replication of the paper's portfolio construction or full empirical method.  It
+borrows the recurring-calendar idea for transaction-level alert triage and is labelled that way.
 
 An insider with open-market trades in each of the 3 calendar years before the current trade is
   * ROUTINE if those 3 years all contain a trade in the SAME calendar month as the current trade
-    (predictable, e.g. annual bonus-driven trading - found to carry no information);
-  * OPPORTUNISTIC otherwise (found to earn significant abnormal returns).
+    (predictable calendar pattern);
+  * OPPORTUNISTIC otherwise.
 Insiders without 3 prior years of history stay UNCLASSIFIED (never guessed).
 """
 from __future__ import annotations
@@ -64,6 +66,7 @@ def annotate_existing(engine: Engine, batch: int = 5000) -> int:
                 t = classify(hist.get(p.get("owner_cik") or "", set()), dates[0]) if dates else "unclassified"
                 inc = holdings_increase(p.get("shares"), p.get("shares_after"))
                 conn.execute(text("UPDATE events SET payload = payload || CAST(:extra AS jsonb) WHERE id = :id"),
-                             {"id": eid, "extra": json.dumps({"insider_type": t, "holdings_increase": inc})})
+                             {"id": eid, "extra": json.dumps({"insider_type": t, "holdings_increase": inc,
+                               "insider_type_method": "cmp_inspired_point_in_time_heuristic"})})
                 n += 1
     return n

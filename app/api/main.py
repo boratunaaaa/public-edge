@@ -22,7 +22,7 @@ TABS = [
     ("cluster", "Toplu Yönetici Alımı", "CLUSTER_INSIDER_BUY"),
     ("13d", "Aktivist Yatırımcılar (13D)", "ACTIVIST_13D"),
     ("contracts", "Devlet Sözleşmeleri", "GOV_CONTRACT"),
-    ("congress", "Kongre Alımları", "CONGRESS_BUY,CONGRESS_CLUSTER_BUY"),
+    ("congress", "Temsilciler Meclisi Alımları — Senato Verisi Yok", "CONGRESS_BUY,CONGRESS_CLUSTER_BUY"),
     ("trump", "Trump Ailesi", "TRUMP_FAMILY_SEC_EVENT"),
     ("multi", "Çoklu Sinyal", "MULTI_SIGNAL_EVENT"),
     ("f144", "Satış Niyeti (Form 144)", "FORM144_MAJOR_SALE"),

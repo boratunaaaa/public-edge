@@ -70,7 +70,7 @@ def insider_buy_events(conn: Connection, accession: str, is_backfill: bool = Fal
         tdates0 = sorted(t["trans_date"] for t in txs if t["trans_date"])
         itype = insider_classify(owner_history(conn, r0["owner_cik"], tdates0[0]), tdates0[0]) \
             if (r0["owner_cik"] and tdates0) else "unclassified"
-        prio += {"opportunistic": 1, "routine": -1}.get(itype, 0)  # Cohen-Malloy-Pomorski (2012)
+        prio += {"opportunistic": 1, "routine": -1}.get(itype, 0)  # CMP-inspired heuristic
         inc = holdings_increase(shares, float(txs[-1]["shares_after"]) if txs[-1]["shares_after"] is not None else None)
         role = role_label(r0["is_ceo"], r0["is_cfo"], r0["is_director"], r0["is_ten_pct"], r0["officer_title"])
         tdates = tdates0
@@ -81,6 +81,7 @@ def insider_buy_events(conn: Connection, accession: str, is_backfill: bool = Fal
             "shares_after": float(txs[-1]["shares_after"]) if txs[-1]["shares_after"] is not None else None,
             "n_transactions": len(txs), "transaction_dates": [str(d) for d in tdates], "is_10b5_1": is_plan,
             "insider_type": itype, "holdings_increase": inc,
+            "insider_type_method": "cmp_inspired_point_in_time_heuristic",
             "flags": [f for f, ok in (("CEO_BUY", r0["is_ceo"]), ("CFO_BUY", r0["is_cfo"]),
                                       ("DIRECTOR_BUY", r0["is_director"]), ("GT_100K", value > 100_000),
                                       ("GT_500K", value > 500_000), ("GT_1M", value > 1_000_000)) if ok],
@@ -248,10 +249,25 @@ def multi_signal_check(conn: Connection, ticker: str | None, public_date: date, 
     families = sorted(fam)
     comp = [r for f in families for r in fam[f]]
     first = min(r["public_date"] for r in comp)
+    groups = sorted({FAMILY_GROUP[f] for f in families})
+    # One rolling episode per independent source-group combination.  Family growth inside the
+    # same evidence episode (CEO + CFO + cluster) must not emit repeated multi-signal alerts.
+    prior = conn.execute(select(events.c.id, events.c.payload).where(and_(
+        events.c.ticker == ticker, events.c.event_type == "MULTI_SIGNAL_EVENT",
+        events.c.public_date >= lo, events.c.public_date <= public_date,
+    )).order_by(events.c.public_date.desc())).mappings().all()
+    if any(sorted((r["payload"] or {}).get("source_groups") or []) == groups for r in prior):
+        return None
+    # Retain one representative component per source group.  Raw event count is still recorded,
+    # but payload size and apparent evidence count cannot be inflated by repeated insider rows.
+    reps = []
+    for group in groups:
+        candidates = [r for f in families if FAMILY_GROUP[f] == group for r in fam[f]]
+        reps.append(max(candidates, key=lambda r: (r["priority"], r["public_date"], r["id"])))
     features = {
-        "families": families, "n_families": len(families), "source_groups": sorted({FAMILY_GROUP[f] for f in families}),
+        "families": families, "n_families": len(families), "source_groups": groups,
         "n_component_events": len(comp),
-        "component_event_ids": [r["id"] for r in comp], "span_days": (public_date - first).days,
+        "component_event_ids": [r["id"] for r in reps], "span_days": (public_date - first).days,
         "component_priorities": {f: max(r["priority"] for r in fam[f]) for f in families},
     }
     prio = min(10, max(r["priority"] for r in comp) + 2 * (len(features["source_groups"]) - 1))

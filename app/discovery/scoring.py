@@ -14,7 +14,7 @@ FLAG_TR = {"REVENUE_ACCELERATION": "satış büyümesi art arda hızlanıyor", "
 STAGE_TR_SHORT = {"RESEARCH": "araştırma", "PRE-COMMERCIAL": "satış öncesi", "PILOT": "deneme üretimi",
                   "CUSTOMER_QUALIFICATION": "müşteri testi", "EARLY_COMMERCIAL": "ilk satışlar", "PRODUCTION_RAMP": "üretim artışı",
                   "MASS_PRODUCTION": "seri üretim", "SCALED": "büyük ölçek"}
-BOTTLENECK_TR = {"SOLE_SUPPLIER": "tek/az sayıdaki tedarikçiden biri", "LIMITED_SUPPLY_BASE": "sınırlı tedarikçi",
+BOTTLENECK_TR = {"SOLE_SUPPLIER": "tek/az sayıdaki tedarikçiden biri",
                  "CAPACITY_CONSTRAINED": "talep kapasitesini aşıyor", "LONG_TERM_SUPPLY": "uzun vadeli tedarik anlaşması",
                  "FIRST_OF_KIND": "ilk/benzersiz teknoloji"}
 RISK_PENALTY = {("GOING_CONCERN", "HIGH"): 3.0, ("DILUTION", "HIGH"): 2.0, ("DILUTION", "MEDIUM"): 1.0,
@@ -42,7 +42,7 @@ def features(*, market_cap: float | None, metrics: dict, stage: str | None, stag
         "major_customers": sorted({f"{r['counterparty']} ({r['category']})" for r in strong_customers}),
         "major_customer_count": len({r["counterparty"] for r in strong_customers}),
         "weak_mentions": len([r for r in relations if r["strength"] < 0.6]),
-        "bottleneck_signals": sorted(set(signal_labels) & {"SOLE_SUPPLIER", "LIMITED_SUPPLY_BASE", "CAPACITY_CONSTRAINED",
+        "bottleneck_signals": sorted(set(signal_labels) & {"SOLE_SUPPLIER", "CAPACITY_CONSTRAINED",
                                                           "LONG_TERM_SUPPLY", "FIRST_OF_KIND"}),
         "government_backed": "GOVERNMENT_BACKED" in signal_labels,
         "gov_contract_to_mcap": gov_contract_ratio,
@@ -121,8 +121,11 @@ def score(f: dict) -> tuple[float, str, list[str]]:
     # validated customer or a bottleneck position) - revenue growth alone (shipping, miners...) is not enough
     if level == "HIGH" and not has_business_evidence(f):
         level = "MEDIUM"
-    if level == "HIGH" and (f.get("market_cap") or 0) >= 10e9:
-        level = "MEDIUM"  # already scaled: monitored, not "early discovery"
+    if level == "HIGH" and ((f.get("market_cap") or 0) >= 10e9 or f.get("stage") == "SCALED"):
+        level = "MEDIUM"  # already scaled operating businesses are not early discoveries
+    high_risks = {rk.split(":", 1)[0] for rk in (f.get("risks") or []) if rk.endswith(":HIGH")}
+    if level == "HIGH" and (len(high_risks) >= 2 or "GOING_CONCERN" in high_risks):
+        level = "MEDIUM"  # severe financing/distress risk cannot carry a HIGH-interest label
     return round(s, 2), level, why
 
 

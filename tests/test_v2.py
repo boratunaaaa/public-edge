@@ -164,6 +164,11 @@ def test_bottleneck_signals():
     assert set(L.signals_in(s)) >= {"SOLE_SUPPLIER", "CAPACITY_CONSTRAINED"}
 
 
+def test_supplier_dependency_is_not_positive_bottleneck_evidence():
+    assert "SOLE_SUPPLIER" not in L.signals_in("We depend on a sole supplier for critical battery components.")
+    assert "LIMITED_SUPPLY_BASE" not in L.signals_in("Our raw materials come from a limited supplier base.")
+
+
 @pytest.mark.parametrize("labels,rev,yoy,stage", [
     (["CLINICAL"], 0, None, "RESEARCH"),
     (["PILOT_PRODUCTION"], 0, None, "PILOT"),
@@ -318,9 +323,11 @@ def test_turkish_alert_has_no_disclaimer_and_explains_terms():
     rate = SuccessRate(0.62, 0.63, 420, 90, "ceo+fırsatçı", 0.034, 0.05, -0.12, 90)
     msg = format_alert(ev, rate=rate, risks=[{"risk": "LOW_LIQUIDITY", "severity": "HIGH"}], market_cap=420e6, bucket="EARLY_SMALL")
     assert "yatırım tavsiyesi" not in msg.lower() and "investment advice" not in msg.lower()
-    for must in ("Ne oldu?", "Neden önemli?", "Geçmişte ne oldu?", "Alım puanı: %62", "şirketin en üst yöneticisi",
+    for must in ("Ne oldu?", "Neden önemli?", "GEÇMİŞ BAŞARI ORANI", "Historical hit rate: %62", "şirketin en üst yöneticisi",
                  "740 bin $", "%40", "alışılmışın dışında", "geçme oranı: <b>%62</b>", "Hisse az işlem görüyor", "420,00 milyon $", "küçük şirket"):
         assert must in msg, must
+    assert "Alım puanı" not in msg and "Sistem değerlendirmesi" not in msg
+    assert "tam replikasyonu değildir" in msg
 
 
 def test_alert_without_enough_history_shows_no_percentage():
@@ -328,8 +335,48 @@ def test_alert_without_enough_history_shows_no_percentage():
     from app.notifications.format import format_alert
     msg = format_alert(_ev("GOV_CONTRACT", {"recipient": "ABC", "agency": "DoD", "amount": 5e7, "value_to_mcap": 0.12}),
                        rate=SuccessRate(None, None, 7, 90, "yetersiz veri", None, None, None, None))
-    assert "Alım puanı:</b> hesaplanamıyor" in msg and "BELİRSİZ" in msg and "%12" in msg
+    assert "Historical hit rate:</b> gösterilmiyor" in msg and "ARAŞTIRMA SİNYALİ" in msg and "%12" in msg
     assert "'i kadar" not in msg and "&#x27;" not in msg  # no broken Turkish suffixes / escaped apostrophes
+
+
+def test_history_is_blocked_when_missing_price_samples_exist():
+    from app.backtest.probability import SuccessRate
+    from app.notifications.format import history_block
+    rate = SuccessRate(None, None, 80, 90, "tüm benzer olaylar", None, None, None, None,
+                       company_n=55, affected_samples=4, blocked_reason="missing_price_or_benchmark_data")
+    text = "\n".join(history_block(rate))
+    assert "Gösterilmiyor" in text and "4 adet" in text and "yapay" in text
+
+
+def test_wilson_interval_is_wide_at_minimum_company_sample():
+    from app.backtest.probability import wilson_interval
+    lo, hi = wilson_interval(20, 30)
+    assert lo < 0.5 < hi
+    assert hi - lo > 0.25
+
+
+def test_13d_peer_group_excludes_immaterial_amendments():
+    from app.backtest.probability import success_rate
+
+    class StopAfterSQL:
+        def execute(self, statement, _params):
+            sql = str(statement)
+            assert "is_amendment" in sql and "change" in sql
+            raise RuntimeError("predicate checked")
+
+    with pytest.raises(RuntimeError, match="predicate checked"):
+        success_rate(StopAfterSQL(), "ACTIVIST_13D", {"item4_class": "BOARD_CHANGE"})
+
+
+def test_historical_news_revenue_fails_closed_without_filing_timestamps():
+    from datetime import datetime, timedelta, timezone
+    from app.news.pipeline import annual_revenue
+
+    class MustNotQuery:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("current XBRL frames must not be read for a historical story")
+
+    assert annual_revenue(MustNotQuery(), "0000000001", datetime.now(timezone.utc) - timedelta(days=30)) is None
 
 
 def test_multiple_serious_risks_make_verdict_risky():
@@ -401,3 +448,14 @@ def test_already_scaled_is_never_high_interest():
                    "strength": 1.0, "hedged": False, "relation": "customer"}], signal_labels=["SOLE_SUPPLIER"], insider={},
                    activist_13d=False, gov_contract_ratio=None, risks=[], themes=["AI_INFRASTRUCTURE"])
     assert S.score(f)[1] == "MEDIUM"
+
+
+def test_scaled_stage_and_multiple_high_risks_cap_discovery_interest():
+    base = S.features(market_cap=2e9, metrics={"yoy_latest": 2.0, "yoy_prev": 1.0,
+                      "flags": ["REVENUE_ACCELERATION", "MARGIN_INFLECTION"]}, stage="SCALED",
+                      stage_prev=None, relations=[], signal_labels=["SOLE_SUPPLIER", "GOVERNMENT_BACKED"],
+                      insider={"buyers": 3, "buy_value": 2e6}, activist_13d=False, gov_contract_ratio=0.2,
+                      risks=[], themes=["BATTERIES"])
+    assert S.score(base)[1] == "MEDIUM"
+    risky = dict(base, stage="PRODUCTION_RAMP", risks=["GOING_CONCERN:HIGH", "FREQUENT_CAPITAL_RAISES:HIGH"])
+    assert S.score(risky)[1] == "MEDIUM"
