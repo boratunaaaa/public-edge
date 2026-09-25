@@ -602,3 +602,22 @@ def test_sector_mapping():
     from app.securitymaster.sic import sector_for_sic
     assert sector_for_sic("2834") == "PHARMA_BIOTECH" and sector_for_sic("3674") == "TECHNOLOGY"
     assert sector_for_sic("6770") == "SHELL_SPAC" and sector_for_sic(None) is None and sector_for_sic("1311") == "ENERGY_MINING"
+
+
+def test_oge_index_retries_the_transient_domino_rendering_error(monkeypatch):
+    from app import http
+    from app.sources.trump import oge
+    calls = []
+
+    class R:
+        def json(self):
+            return {"data": [{"name": "Trump, Donald J"}]}
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        if len(calls) == 1:
+            raise http.HttpError(url, 400, '{"message":"Error while rendering service"}')
+        return R()
+
+    monkeypatch.setattr(oge.http, "get", fake_get)
+    assert oge.fetch_index(pause_s=0) == [{"name": "Trump, Donald J"}] and len(calls) == 2

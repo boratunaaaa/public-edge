@@ -128,6 +128,20 @@ def parse_transactions(text: str) -> list[dict]:
     return out
 
 
+def fetch_index(attempts: int = 3, pause_s: float = 20.0) -> list[dict]:
+    """The Domino REST service intermittently answers 400 'Error while rendering service' (verified
+    2026-09-25: the next request succeeds). Treat that specific error as transient."""
+    import time
+    for i in range(attempts):
+        try:
+            return http.get(INDEX_URL, retries=2).json().get("data") or []
+        except http.HttpError as e:
+            if e.status != 400 or "rendering" not in str(e).lower() or i == attempts - 1:
+                raise
+            time.sleep(pause_s)
+    return []
+
+
 def pdf_text(pdf: bytes) -> tuple[str, int]:
     import pdfplumber
     with pdfplumber.open(io.BytesIO(pdf)) as doc:
@@ -142,7 +156,7 @@ class TrumpOgeSource(Source):
 
     def run_live(self, engine: Engine) -> RunResult:
         res = RunResult()
-        docs = parse_index(http.get(INDEX_URL, retries=2).json().get("data") or [])
+        docs = parse_index(fetch_index())
         with engine.connect() as conn:
             resolver.load(conn)
             known = {u for (u,) in conn.execute(select(oge_documents.c.doc_url)).all()}
