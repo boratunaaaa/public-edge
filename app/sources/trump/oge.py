@@ -143,7 +143,7 @@ def fetch_index(attempts: int = 3, pause_s: float = 20.0) -> list[dict]:
 
 
 MAX_PDF_PAGES = 200
-PDF_MEMORY_BYTES = 450 * 1024**2
+PDF_MEMORY_BYTES = 250 * 1024**2  # + 300 MB interpreter/library address space = 550 MB cap
 PDF_TIMEOUT_S = 600
 
 
