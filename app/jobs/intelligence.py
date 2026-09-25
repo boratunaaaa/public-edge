@@ -84,6 +84,12 @@ def _alpha_tasks(engine, now: datetime, last_scan: list[float]) -> None:
         try:
             res = fn()
             log.info("%s done: %s", name, res)
+            if isinstance(res, dict) and res.get("index_failed"):
+                # SEC index days failed: they stay in the persistent retry list; the task is re-run on the
+                # next loop instead of being marked done for today, and the failure is visible in health
+                with engine.begin() as conn:
+                    health_failure(conn, f"alpha:{name}", f"daily index unavailable: {res['index_failed']}")
+                continue
             with engine.begin() as conn:
                 st = job_state(conn, "alpha_daily")
                 save_job_state(conn, "alpha_daily", {**st, name: today, f"{name}_result": res}, status="idle")

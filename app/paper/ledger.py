@@ -271,7 +271,7 @@ def check_exits(conn: Connection, today: date) -> dict:
         if not series or not g.ok:
             out["deferred"] = out.get("deferred", 0) + 1  # keep the last trusted valuation; decide on a later run
             continue
-        bars = [b for b in series if b.date > p["entry_date"]]
+        bars = [b for b in series if b.date >= p["entry_date"]]  # the entry day's close counts for the stop
         if bars:
             last = bars[-1]
             conn.execute(paper_positions.update().where(paper_positions.c.id == p["id"]).values(

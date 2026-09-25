@@ -177,11 +177,14 @@ def compare(old: dict, new: dict, new_texts: dict[str, str] | None = None) -> li
     """Semantic changes between two 10-K fingerprints (old = previous annual report)."""
     new_texts = new_texts or {}
     out: list[Change] = []
+    # Only sections extracted in BOTH reports are compared: a section the parser could not find in the
+    # new report is "unknown", not "removed" (otherwise a missing MD&A reads as REMOVED_GOING_CONCERN).
+    common = {k for k in old if k in new and not k.startswith("_")}
 
     def tagged_set(prof: dict, sec: str | None, topic: str, negative: bool | None = None, sufficient: bool | None = None) -> set[str]:
         res = set()
         for s, p in prof.items():
-            if sec and s != sec:
+            if s not in common or (sec and s != sec):
                 continue
             for h, (tp, neg, suf, *_) in p.get("tagged", {}).items():
                 if topic in tp and (negative is None or neg == negative) and (sufficient is None or suf == sufficient):

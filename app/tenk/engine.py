@@ -277,11 +277,13 @@ def process_cik(engine: Engine, cik: str, ticker: str | None, name: str | None, 
 
 
 def daily_10k_ciks(d: date) -> set[str]:
+    """10-K filers of one business day. 404 = no index for that day (federal holiday) -> empty;
+    anything else (403 throttling, 5xx, timeouts) raises so the day is kept for a retry."""
     url = DAILY_INDEX_URL.format(y=d.year, q=(d.month - 1) // 3 + 1, d=d.strftime("%Y%m%d"))
     try:
         txt = http.get(url, retries=2).text
     except http.HttpError as e:
-        if e.status in (403, 404):
+        if e.status == 404:
             return set()
         raise
     out = set()
@@ -302,30 +304,55 @@ LIVE_QUEUE = "tenk_live_queue"
 LIVE_MAX_ATTEMPTS = 20
 
 
-def run_live(engine: Engine, days: int = 4, max_docs: int = 60) -> dict:
+INDEX_MAX_AGE_DAYS = 60
+
+
+def run_live(engine: Engine, days: int = 4, max_docs: int = 60, today: date | None = None) -> dict:
     """New 10-Ks of listed companies. Every company seen in the last `days` daily indexes is written to a
     persistent queue BEFORE any processing; it leaves the queue only when all its reports were stored
     (no fetch error, no archive error, nothing left by the document budget). So a failure or a full
     budget never loses a filing once the 4-day index window has moved on."""
-    today = date.today()
+    today = today or date.today()
     with engine.connect() as conn:
         uni = _universe(conn)
+        st = job_state(conn, LIVE_QUEUE)
+    q = dict(st.get("queue") or {})
+    gave_up = dict(st.get("gave_up") or {})
+    # index days that failed earlier are retried here even after they left the window
+    pending_idx = set(st.get("index_pending") or [])
+    days_to_read = {(today - timedelta(days=i)).isoformat() for i in range(days)} | pending_idx
     ciks: set[str] = set()
-    for i in range(days):
-        ciks |= daily_10k_ciks(today - timedelta(days=i)) & set(uni)
+    index_failed = []
+    for ds in sorted(days_to_read):
+        d = date.fromisoformat(ds)
+        if d.weekday() >= 5:
+            pending_idx.discard(ds)
+            continue
+        try:
+            found = daily_10k_ciks(d) & set(uni)
+        except Exception as e:
+            if (today - d).days > INDEX_MAX_AGE_DAYS:
+                pending_idx.discard(ds)
+                gave_up[f"index:{ds}"] = {"last_error": str(e)[:200]}
+            else:
+                pending_idx.add(ds)
+                index_failed.append(ds)
+            continue
+        pending_idx.discard(ds)
+        ciks |= found
+        for c in found:  # first_seen = the index day, so the filing is inside the processing window
+            cur = q.setdefault(c, {"first_seen": ds, "attempts": 0})
+            cur["first_seen"] = min(cur["first_seen"], ds)
     with engine.begin() as conn:
-        q = dict(job_state(conn, LIVE_QUEUE).get("queue") or {})
-        gave_up = dict(job_state(conn, LIVE_QUEUE).get("gave_up") or {})
-        for c in ciks:
-            q.setdefault(c, {"first_seen": today.isoformat(), "attempts": 0})
-        save_job_state(conn, LIVE_QUEUE, {"queue": q, "gave_up": gave_up}, status="idle")
-    out = {"ciks": len(ciks), "queued": len(q), "docs": 0, "events": 0, "failed": 0, "errors": 0, "budget_left_in_queue": 0}
+        save_job_state(conn, LIVE_QUEUE, {"queue": q, "gave_up": gave_up, "index_pending": sorted(pending_idx)}, status="idle")
+    out = {"ciks": len(ciks), "queued": len(q), "docs": 0, "events": 0, "failed": 0, "errors": 0, "budget_left_in_queue": 0,
+           "index_failed": index_failed, "index_pending": len(pending_idx)}
     for cik in sorted(q, key=lambda c: q[c]["first_seen"]):
         if out["docs"] >= max_docs:
             out["budget_left_in_queue"] += 1
             continue
         u = uni.get(cik) or {}
-        start = date.fromisoformat(q[cik]["first_seen"]) - timedelta(days=days + 2)
+        start = date.fromisoformat(q[cik]["first_seen"]) - timedelta(days=2)
         r = process_cik(engine, cik, u.get("ticker"), u.get("name"), history_from=start, live_from=start,
                         max_docs=max(1, min(4, max_docs - out["docs"])))
         out["docs"] += r.get("docs", 0)
@@ -340,7 +367,7 @@ def run_live(engine: Engine, days: int = 4, max_docs: int = 60) -> dict:
         else:
             q.pop(cik)
     with engine.begin() as conn:
-        save_job_state(conn, LIVE_QUEUE, {"queue": q, "gave_up": gave_up}, status="idle")
+        save_job_state(conn, LIVE_QUEUE, {"queue": q, "gave_up": gave_up, "index_pending": sorted(pending_idx)}, status="idle")
     out["queue_after"] = len(q)
     out["gave_up"] = len(gave_up)
     out["retry_queue"] = retry_failed(engine, uni)

@@ -849,3 +849,101 @@ def test_unlisted_in_a_recent_quarter_is_still_processed_where_it_was_listed(eng
         st = job_state(c, "tenk_backfill")
     assert out["not_listed"] == 1 and calls == ["0000000777"]  # history processed via the listed 2021 quarter
     assert "0000000777" in st["done_ciks"] and set(st["done_quarters"]) == {"2025Q1", "2021Q1"}
+
+
+# ------------------------------------------------------------------ review fixes, round 4
+
+def test_missing_section_in_the_new_report_is_not_a_removal():
+    from app.tenk.diff import build_profile, compare, extract_items
+    gc = ["There is substantial doubt about our ability to continue as a going concern within one year after issuance. ",
+          "Our independent registered public accounting firm has expressed substantial doubt about our ability to "
+          "continue as a going concern. "]
+    old = build_profile(extract_items(_doc([_risk(i) for i in range(20)], BASE_MDNA + gc)))
+    new_items = extract_items(_doc([_risk(i) for i in range(20)], BASE_MDNA))
+    new_items.pop("MD&A")  # the parser could not find MD&A this year
+    assert "MD&A" in old and not any(c.change_type == "REMOVED_GOING_CONCERN" for c in compare(old, build_profile(new_items)))
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_missing_section_creates_no_positive_event_or_proposal(engine, monkeypatch):
+    from app.db.models import events, proposed_trades
+    from app.paper.proposals import scan_new_events
+    from app.tenk import engine as te
+    gc = ["There is substantial doubt about our ability to continue as a going concern within one year after issuance. ",
+          "Our independent registered public accounting firm has expressed substantial doubt about our ability to "
+          "continue as a going concern. "]
+    old_doc = _doc([_risk(i) for i in range(20)], BASE_MDNA + gc)
+    new_doc = old_doc.split("Item 7. Management's Discussion and Analysis\n")[0] + \
+        "Item 7. Management's Discussion\n(incorporated by reference)\nItem 8. Financial Statements\n" + FILLER * 3
+    docs = {"m1": old_doc, "m2": new_doc}
+    monkeypatch.setattr(te, "fetch_text", lambda cik, f: docs[f["accession"]])
+    today = date.today()
+    f1 = {"accession": "m1", "form": "10-K", "filing_date": today - timedelta(days=366), "accepted_at": None, "primary_doc": "k.htm",
+          "period": None}
+    f2 = {**f1, "accession": "m2", "filing_date": today - timedelta(days=1)}
+    te.process_filing(engine, "0001953926", "ZBIO", "Z", f1, is_backfill=True)
+    r = te.process_filing(engine, "0001953926", "ZBIO", "Z", f2, is_backfill=False)
+    assert r["status"] in ("no_material_change", "first") or r.get("direction") != "POSITIVE"
+    monkeypatch.setenv("PAPER_RESEARCH_MODE", "1")
+    with engine.begin() as c:
+        _universe(c)
+    scan_new_events(engine, days=5)
+    with engine.connect() as c:
+        pos = c.execute(select(events.c.id).where(events.c.payload["direction"].astext == "POSITIVE")).all()
+        props = c.execute(select(proposed_trades.c.id)).all()
+    assert pos == [] and props == []
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_stop_breach_on_the_entry_day_sells_at_the_next_open(engine, monkeypatch):
+    from app.paper import ledger
+    from app.paper.proposals import create_proposal, decide
+    with engine.begin() as c:
+        _universe(c)
+        zb = _bars(c, "ZBIO", date(2024, 1, 2), 120, 100.0, 0.0)
+        spy = _bars(c, "SPY", date(2024, 1, 2), 120, 400.0, 0.5)
+        eid = _event(c)
+    # entry day 2024-03-04: opens at 100, closes at 80 (below the 15% stop), recovers to 100 afterwards
+    zb = [Bar(b.date, b.open, b.high, b.low, 80.0, 80.0, b.volume) if b.date == date(2024, 3, 4) else b for b in zb]
+    _serve(monkeypatch, ZBIO=zb, SPY=spy)
+    p = create_proposal(engine, eid, research_only=True, now=datetime(2024, 3, 1, 15, tzinfo=timezone.utc))
+    decide(engine, p["code"], True, by="t", now=datetime(2024, 3, 1, 16, tzinfo=timezone.utc))
+    with engine.begin() as c:
+        ledger.fill_orders(c, date(2024, 3, 4))
+        ledger.check_exits(c, date(2024, 3, 8))
+        o = c.execute(text("SELECT o.not_before, o.note FROM paper_orders o JOIN paper_accounts a ON a.id = o.account_id "
+                           "WHERE o.side = 'SELL' AND a.strategy = 'E_STOP_TIME'")).mappings().one()
+    assert o["note"] == "STOP" and o["not_before"] == date(2024, 3, 5)
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_failed_daily_index_is_retried_after_the_window(engine, monkeypatch):
+    from app.db.models import tenk_filings
+    from app.db.store import job_state
+    from app.tenk import engine as te
+    day = date(2026, 9, 23)  # Wednesday
+    monkeypatch.setattr(te, "_universe", lambda conn: {"0001953926": {"ticker": "ZBIO"}})
+    sec = {"down": True}
+
+    def idx(d):
+        if sec["down"]:
+            raise RuntimeError("HTTP 403")
+        return {"0001953926"} if d == day else set()
+    monkeypatch.setattr(te, "daily_10k_ciks", idx)
+    monkeypatch.setattr(te, "fetch_submissions", lambda cik: _sub([("w1", day.isoformat())]))
+    monkeypatch.setattr(te, "fetch_text", lambda cik, f: _doc([_risk(i) for i in range(20)], BASE_MDNA))
+    monkeypatch.setattr(te, "retry_failed", lambda engine_, uni=None: {})
+    out = te.run_live(engine, today=date(2026, 9, 24))
+    assert day.isoformat() in out["index_failed"]
+    out = te.run_live(engine, today=date(2026, 10, 5))  # outage outlasted the 4-day window
+    with engine.connect() as c:
+        assert day.isoformat() in job_state(c, "tenk_live_queue")["index_pending"]
+    sec["down"] = False  # restart after the outage
+    out = te.run_live(engine, today=date(2026, 10, 6))
+    with engine.connect() as c:
+        st = job_state(c, "tenk_live_queue")
+        got = c.execute(select(tenk_filings.c.accession)).scalars().all()
+    assert got == ["w1"] and st["index_pending"] == [] and out["index_failed"] == []
