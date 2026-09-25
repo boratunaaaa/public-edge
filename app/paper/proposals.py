@@ -224,12 +224,32 @@ def scan_new_events(engine: Engine, days: int = 2) -> dict:
     return out
 
 
+def source_valid(conn: Connection, event_id: int | None) -> bool:
+    """The signal a proposal was built on still stands (not superseded by a reclassification or a
+    late-arriving predecessor report)."""
+    if event_id is None:
+        return True
+    r = conn.execute(select(events.c.superseded).where(events.c.id == event_id)).first()
+    return bool(r) and not r[0]
+
+
 def expire(engine: Engine, now: datetime | None = None) -> int:
+    """Time-outs, plus proposals / unfilled paper BUY orders whose source event was superseded."""
+    from app.db.models import paper_orders
     now = now or datetime.now(timezone.utc)
     with engine.begin() as conn:
-        return conn.execute(proposed_trades.update().where(and_(
+        n = conn.execute(proposed_trades.update().where(and_(
             proposed_trades.c.approval_status == "PENDING", proposed_trades.c.expires_at <= now))
             .values(approval_status="EXPIRED", decided_at=now, decided_by="system:expiry")).rowcount
+        dead = select(events.c.id).where(events.c.superseded.is_(True))
+        n += conn.execute(proposed_trades.update().where(and_(
+            proposed_trades.c.approval_status == "PENDING", proposed_trades.c.event_id.in_(dead)))
+            .values(approval_status="EXPIRED", decided_at=now, decided_by="system:source_superseded")).rowcount
+        conn.execute(paper_orders.update().where(and_(
+            paper_orders.c.status == "PENDING", paper_orders.c.side == "BUY",
+            paper_orders.c.proposal_id.in_(select(proposed_trades.c.id).where(proposed_trades.c.event_id.in_(dead)))))
+            .values(status="CANCELLED", note="source event superseded"))
+        return n
 
 
 def decide(engine: Engine, code: str, approve: bool, by: str, now: datetime | None = None) -> dict:
@@ -248,6 +268,14 @@ def decide(engine: Engine, code: str, approve: bool, by: str, now: datetime | No
             conn.execute(proposed_trades.update().where(proposed_trades.c.id == p["id"]).values(
                 approval_status="EXPIRED", decided_at=now, decided_by="system:expiry"))
             return {"ok": False, "error": "EXPIRED"}
+        if approve:
+            # re-validate the source signal inside the same transaction (row lock on the event)
+            ok = conn.execute(select(events.c.superseded).where(events.c.id == p["event_id"]).with_for_update()).first() \
+                if p["event_id"] else (False,)
+            if ok is None or ok[0]:
+                conn.execute(proposed_trades.update().where(proposed_trades.c.id == p["id"]).values(
+                    approval_status="EXPIRED", decided_at=now, decided_by="system:source_superseded"))
+                return {"ok": False, "error": "SOURCE_SUPERSEDED"}
         status = "APPROVED" if approve else "REJECTED"
         conn.execute(proposed_trades.update().where(proposed_trades.c.id == p["id"]).values(
             approval_status=status, decided_at=now, decided_by=by[:40]))

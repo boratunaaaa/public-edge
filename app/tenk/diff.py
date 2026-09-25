@@ -48,7 +48,7 @@ def extract_items(text: str) -> dict[str, str]:
     for name, pat in ITEM_PATTERNS.items():
         best = ""
         for m in re.finditer(pat, text):
-            nxt = next((b for b in bounds if b > m.end() + 20), len(text))
+            nxt = next((b for b in bounds if b >= m.end()), len(text))  # a short section still ends at the next heading
             span = text[m.end():nxt]
             if len(span) > len(best):
                 best = span
@@ -210,8 +210,18 @@ def compare(old: dict, new: dict, new_texts: dict[str, str] | None = None) -> li
     def th(sec: str) -> tuple[str | None, str | None]:
         return (old.get(sec) or {}).get("text_hash"), (new.get(sec) or {}).get("text_hash")
 
+    def tagged_anywhere(prof: dict, topic: str) -> set[str]:
+        """Every readable section of one report (not only the common ones): a warning that MOVED to a
+        section the other report's parser could not read is still present, not added / removed."""
+        return {h for s_, p in prof.items() if not s_.startswith("_")
+                for h, (tp, *_) in p.get("tagged", {}).items() if topic in tp}
+
     # going concern: presence flips are always material
     gc_old, gc_new = tagged_set(old, None, "GOING_CONCERN"), tagged_set(new, None, "GOING_CONCERN")
+    if tagged_anywhere(new, "GOING_CONCERN"):
+        gc_old = gc_old if gc_new else set()  # still warned somewhere in the new report -> never "removed"
+    if tagged_anywhere(old, "GOING_CONCERN"):
+        gc_new = gc_new if gc_old else set()  # already warned somewhere in the old report -> never "new"
     if len(gc_new) >= MIN_TOPIC_SENTENCES and not gc_old:
         out.append(Change("GOING_CONCERN", "NEW_GOING_CONCERN", "HIGH", len(gc_new), 0, None, None, examples(gc_new)))
     elif len(gc_old) >= MIN_TOPIC_SENTENCES and not gc_new:

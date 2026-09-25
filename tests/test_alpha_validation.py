@@ -984,3 +984,105 @@ def test_unpublished_today_and_holidays_are_not_index_failures(engine, monkeypat
         raise RuntimeError("HTTP 503")
     out = te.run_live(engine, today=date(2026, 9, 10), days=2, listing_fn=down)
     assert "2026-09-09" in out["index_failed"]  # a listing failure is a real, visible failure
+
+
+# ------------------------------------------------------------------ review fixes, round 5
+
+GC_SENTENCES = ["There is substantial doubt about our ability to continue as a going concern within one year after issuance. ",
+                "Our independent registered public accounting firm has expressed substantial doubt about our ability to "
+                "continue as a going concern. "]
+
+
+def _moved_warning_docs():
+    """Old report: warning in MD&A. New report: MD&A unreadable, the same warning now in Item 1A."""
+    old = _doc([_risk(i) for i in range(20)], BASE_MDNA + GC_SENTENCES)
+    new = _doc([_risk(i) for i in range(20)] + GC_SENTENCES, BASE_MDNA)
+    new = new.split("Item 7. Management's Discussion and Analysis\n")[0] + \
+        "Item 7. Management's Discussion\n(see exhibit)\nItem 8. Financial Statements\n" + FILLER * 3
+    return old, new
+
+
+def test_going_concern_moved_to_another_section_is_not_removed():
+    from app.tenk.diff import build_profile, compare, extract_items
+    old_doc, new_doc = _moved_warning_docs()
+    new_items = extract_items(new_doc)
+    assert "MD&A" not in new_items and "RISK_FACTORS" in new_items
+    types = {c.change_type for c in compare(build_profile(extract_items(old_doc)), build_profile(new_items), new_items)}
+    assert "REMOVED_GOING_CONCERN" not in types and "NEW_GOING_CONCERN" not in types
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_moved_warning_creates_no_positive_event_or_proposal(engine, monkeypatch):
+    from app.db.models import events, proposed_trades
+    from app.paper.proposals import scan_new_events
+    from app.tenk import engine as te
+    old_doc, new_doc = _moved_warning_docs()
+    docs = {"v1": old_doc, "v2": new_doc}
+    monkeypatch.setattr(te, "fetch_text", lambda cik, f: docs[f["accession"]])
+    f1 = {"accession": "v1", "form": "10-K", "filing_date": date.today() - timedelta(days=366), "accepted_at": None,
+          "primary_doc": "k.htm", "period": None}
+    te.process_filing(engine, "0001953926", "ZBIO", "Z", f1, is_backfill=True)
+    te.process_filing(engine, "0001953926", "ZBIO", "Z", {**f1, "accession": "v2", "filing_date": date.today() - timedelta(days=1)},
+                      is_backfill=False)
+    monkeypatch.setenv("PAPER_RESEARCH_MODE", "1")
+    with engine.begin() as c:
+        _universe(c)
+    scan_new_events(engine, days=5)
+    with engine.connect() as c:
+        assert c.execute(select(events.c.id).where(events.c.payload["direction"].astext == "POSITIVE")).all() == []
+        assert c.execute(select(proposed_trades.c.id)).all() == []
+
+
+def _approved_setup(engine, monkeypatch, approve=True):
+    from app.paper.proposals import create_proposal, decide
+    with engine.begin() as c:
+        _universe(c)
+        zb = _bars(c, "ZBIO", date(2024, 1, 2), 120, 10.0, 0.01)
+        spy = _bars(c, "SPY", date(2024, 1, 2), 120, 400.0, 0.5)
+        eid = _event(c)
+    _serve(monkeypatch, ZBIO=zb, SPY=spy)
+    p = create_proposal(engine, eid, research_only=True, now=datetime(2024, 3, 1, 15, tzinfo=timezone.utc))
+    r = decide(engine, p["code"], True, by="t", now=datetime(2024, 3, 1, 16, tzinfo=timezone.utc)) if approve else None
+    return eid, p, r
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_superseded_source_blocks_approval(engine, monkeypatch):
+    from app.db.models import paper_orders, proposed_trades
+    from app.paper.proposals import decide
+    eid, p, _ = _approved_setup(engine, monkeypatch, approve=False)
+    with engine.begin() as c:
+        c.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": eid})
+    r = decide(engine, p["code"], True, by="t", now=datetime(2024, 3, 1, 16, tzinfo=timezone.utc))
+    assert r == {"ok": False, "error": "SOURCE_SUPERSEDED"}
+    with engine.connect() as c:
+        assert c.execute(select(paper_orders.c.id)).all() == []
+        st = c.execute(select(proposed_trades.c.approval_status, proposed_trades.c.decided_by)).one()
+    assert st == ("EXPIRED", "system:source_superseded")
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_superseded_source_cancels_unfilled_buys(engine, monkeypatch):
+    from app.db.models import paper_orders, paper_positions
+    from app.paper import ledger
+    from app.paper.proposals import create_proposal, expire
+    eid, p, r = _approved_setup(engine, monkeypatch)
+    assert r["ok"] and len(r["orders"]) == 5
+    with engine.begin() as c:
+        c.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": eid})
+        assert ledger.fill_orders(c, date(2024, 3, 10))["cancelled"] == 5  # guard at fill time
+        assert c.execute(select(paper_positions.c.id)).all() == []
+        assert {n for (n,) in c.execute(select(paper_orders.c.note)).all()} == {"source event superseded"}
+    # and the periodic sweep catches a PENDING proposal of a superseded event before anyone approves it
+    with engine.begin() as c:
+        e2 = _event(c, ticker="OPRA", cik="0001737450", key="e-opra")
+        _universe(c, cik="0001737450", ticker="OPRA")
+        _bars(c, "OPRA", date.today() - timedelta(days=90), 80)
+    p2 = create_proposal(engine, e2, research_only=True)
+    assert p2["created"]
+    with engine.begin() as c:
+        c.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": e2})
+    assert expire(engine) == 1

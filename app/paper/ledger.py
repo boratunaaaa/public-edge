@@ -190,6 +190,14 @@ def fill_orders(conn: Connection, today: date) -> dict:
         bps = slippage_bps(g.get("market_cap"), g.get("bucket"))
         comm = float(acct["commission_per_trade"])
         if o["side"] == "BUY":
+            from app.paper.proposals import source_valid
+            ev_id = conn.execute(select(proposed_trades.c.event_id).where(proposed_trades.c.id == o["proposal_id"])).scalar() \
+                if o["proposal_id"] else None
+            if not source_valid(conn, ev_id):  # checked in the same transaction as the fill
+                conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
+                    status="CANCELLED", note="source event superseded"))
+                out["cancelled"] += 1
+                continue
             px = b.open * (1 + bps / 1e4)
             nav = nav_of(conn, o["account_id"], b.date - timedelta(days=1))
             notional = min(o["target_pct"] * nav, cash_of(conn, o["account_id"]) - comm)
