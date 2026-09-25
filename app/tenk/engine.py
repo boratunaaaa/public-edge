@@ -110,8 +110,50 @@ def fetch_text(cik: str, f: dict) -> str | None:
         raise FetchError(str(e)) from e
     except Exception as e:  # timeouts / connection resets
         raise FetchError(f"{type(e).__name__}: {e}") from e
-    raw = r.content[:MAX_DOC_BYTES].decode("utf-8", "ignore")
-    return html_to_text(raw) if "<" in raw[:5000] else raw
+    return extract_isolated(r.content[:MAX_DOC_BYTES])
+
+
+class Extracted(str):
+    """Document text whose sections and fingerprint profile were computed in a memory-capped child process."""
+    items: dict
+    profile: dict
+
+
+EXTRACT_MEMORY_BYTES = 700 * 1024**2  # multi-MB 10-K HTML + regex copies OOM-killed the 1 GB backfill container
+EXTRACT_TIMEOUT_S = 300
+
+
+def _extract_inproc(raw: bytes) -> tuple[str, dict, dict]:
+    txt = raw.decode("utf-8", "ignore")
+    txt = html_to_text(txt) if "<" in txt[:5000] else txt
+    items = extract_items(txt)
+    return txt[:200], items, build_profile(items)
+
+
+def extract_isolated(raw: bytes) -> Extracted:
+    """HTML -> text -> sections -> profile in a child process with an address-space cap (same pattern as the OGE
+    PDF extraction): a pathological filing fails alone as FetchError-free 'no_sections' instead of killing the
+    backfill process. Only the sections (bounded) and the profile come back to the parent."""
+    import json as _json
+    import resource
+    import subprocess
+    import sys
+
+    def _limit():
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (EXTRACT_MEMORY_BYTES + 300 * 1024**2,) * 2)
+        except (ValueError, OSError):
+            pass
+    code = ("import sys, json; from app.tenk.engine import _extract_inproc; "
+            "h, i, p = _extract_inproc(sys.stdin.buffer.read()); sys.stdout.write(json.dumps([h, i, p]))")
+    try:
+        r = subprocess.run([sys.executable, "-c", code], input=raw, capture_output=True, timeout=EXTRACT_TIMEOUT_S, preexec_fn=_limit)
+        head, items, prof = _json.loads(r.stdout) if r.returncode == 0 else ("", {}, {})
+    except (subprocess.TimeoutExpired, ValueError):
+        head, items, prof = "", {}, {}
+    out = Extracted(head or " ")
+    out.items, out.profile = items, prof
+    return out
 
 
 def _doc_url(cik: str, f: dict) -> str:
@@ -142,8 +184,11 @@ def process_filing(engine: Engine, cik: str, ticker: str | None, name: str | Non
                                                             status="fetch_failed", **vals)
                              .on_conflict_do_nothing(index_elements=["accession"]))
         return {"status": "fetch_failed", "retryable": True, "error": str(e)[:200]}
-    items = extract_items(txt) if txt else {}
-    prof = build_profile(items)
+    if isinstance(txt, Extracted):  # production path: extracted in the memory-capped child
+        items, prof = txt.items, (txt.profile or build_profile(txt.items))
+    else:
+        items = extract_items(txt) if txt else {}
+        prof = build_profile(items)
     status = "ok" if len(items) >= 2 else ("no_sections" if txt else "not_found")
     with engine.begin() as conn:
         if existing:

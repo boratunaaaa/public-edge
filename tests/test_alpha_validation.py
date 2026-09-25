@@ -1168,3 +1168,14 @@ def test_reclassify_twice_does_not_collide(engine):
     with engine.connect() as c:
         keys = c.execute(select(events.c.dedupe_key).where(events.c.superseded.is_(True))).scalars().all()
     assert len(keys) == 2 and len(set(keys)) == 2
+
+
+def test_tenk_extraction_runs_isolated_and_matches_inprocess():
+    from app.tenk import engine as te
+    doc = _doc([_risk(i) for i in range(20)], BASE_MDNA).encode()
+    out = te.extract_isolated(doc)
+    assert isinstance(out, te.Extracted) and set(out.items) >= {"RISK_FACTORS", "MD&A"}
+    _, items, prof = te._extract_inproc(doc)
+    assert out.items == items and out.profile["RISK_FACTORS"]["hashes"] == prof["RISK_FACTORS"]["hashes"]
+    bad = te.extract_isolated(b"\x00" * 10)
+    assert bad.items == {}  # a broken document yields no sections, never an exception into the backfill
