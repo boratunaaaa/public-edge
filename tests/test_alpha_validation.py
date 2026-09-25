@@ -435,3 +435,24 @@ def test_old_classifier_rows_are_superseded_not_deleted(engine):
         n_audit = len(c.execute(select(data_cleanup_audit)).all())
     assert f["status"] == "superseded" and f["accession"].endswith("#v1")
     assert e["superseded"] and e["dedupe_key"].endswith("#old") and n_audit == 2
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_award_amount_basis_fits_the_backfill_label(engine):
+    """Regression: 'current_total_at_backfill' (25 chars) overflowed varchar(24) and every historical
+    USAspending insert failed silently in the backfill."""
+    from app.db.models import government_awards
+    cols = {c.name: c for c in government_awards.columns}
+    assert cols["amount_basis"].type.length >= len("current_total_at_backfill")
+
+
+def test_oge_pdf_extraction_runs_isolated_with_a_memory_cap():
+    from pathlib import Path
+
+    from app.sources.trump import oge
+    pdf = (Path(__file__).parent / "fixtures" / "house_ptr_20034188.pdf").read_bytes()
+    txt, n = oge.pdf_text(pdf)
+    assert n >= 1 and len(txt) > 50
+    with pytest.raises(RuntimeError):
+        oge.pdf_text(b"not a pdf at all")  # a failure is an exception for this document, never a crash of the caller

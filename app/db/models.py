@@ -183,7 +183,7 @@ government_awards = Table(
     Column("mcap_level", String(8)),
     Column("first_seen_date", Date),  # date this system first observed the record (documented)
     Column("public_date_basis", String(16)),  # first_seen | estimated
-    Column("amount_basis", String(24)),  # amount_at_first_seen | current_total_at_backfill
+    Column("amount_basis", String(32)),  # amount_at_first_seen | current_total_at_backfill (25 chars)
     Column("recipient_cik", String(10)),
     # VERIFIED | HIGH_CONFIDENCE | MEDIUM | LOW - how the recipient was mapped to a listed parent
     Column("mapping_confidence", String(16)),

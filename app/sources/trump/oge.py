@@ -142,10 +142,49 @@ def fetch_index(attempts: int = 3, pause_s: float = 20.0) -> list[dict]:
     return []
 
 
-def pdf_text(pdf: bytes) -> tuple[str, int]:
+MAX_PDF_PAGES = 200
+PDF_MEMORY_BYTES = 450 * 1024**2
+PDF_TIMEOUT_S = 600
+
+
+def _pdf_text_inproc(pdf: bytes, max_pages: int = MAX_PDF_PAGES) -> tuple[str, int]:
     import pdfplumber
+    out = []
     with pdfplumber.open(io.BytesIO(pdf)) as doc:
-        return "\n".join((p.extract_text() or "") for p in doc.pages), len(doc.pages)
+        n = len(doc.pages)
+        for p in doc.pages[:max_pages]:
+            out.append(p.extract_text() or "")
+            p.close()  # drop the page's parsed layout objects (pdfplumber otherwise keeps them all)
+    return "\n".join(out), n
+
+
+def pdf_text(pdf: bytes) -> tuple[str, int]:
+    """Extract in a child process with a hard memory cap: a pathological PDF (2026-09-25: one OGE
+    report pushed pdfplumber past 650 MB) fails on its own instead of OOM-killing the live worker,
+    and the document is then stored as a parse error instead of being retried forever."""
+    import json
+    import resource
+    import subprocess
+    import sys
+
+    def _limit():
+        try:  # enforced on Linux (production); macOS does not support RLIMIT_AS
+            resource.setrlimit(resource.RLIMIT_AS, (PDF_MEMORY_BYTES + 300 * 1024**2,) * 2)
+        except (ValueError, OSError):
+            pass
+
+    code = ("import sys, json; from app.sources.trump.oge import _pdf_text_inproc; "
+            "t, n = _pdf_text_inproc(sys.stdin.buffer.read()); sys.stdout.write(json.dumps([t, n]))")
+    try:
+        r = subprocess.run([sys.executable, "-c", code], input=pdf, capture_output=True, timeout=PDF_TIMEOUT_S,
+                           preexec_fn=_limit)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"PDF extraction exceeded {PDF_TIMEOUT_S}s") from e
+    if r.returncode != 0:
+        tail = r.stderr.decode("utf-8", "ignore").strip().splitlines()[-1:] or ["killed"]
+        raise RuntimeError(f"PDF extraction failed within the memory budget: {tail[0][:200]}")
+    t, n = json.loads(r.stdout)
+    return t, n
 
 
 class TrumpOgeSource(Source):
