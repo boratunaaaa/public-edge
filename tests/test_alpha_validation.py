@@ -771,3 +771,81 @@ def test_live_retry_queue_recovers_a_failed_filing_after_the_index_window(engine
     assert out["retry_queue"]["recovered"] == 1 and out["retry_queue"]["remaining"] == 0
     with engine.connect() as c:
         assert c.execute(select(tenk_filings.c.status).where(tenk_filings.c.accession == "f1")).scalar() == "ok"
+
+
+# ------------------------------------------------------------------ review fixes, round 3
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_live_queue_survives_submissions_error_and_budget_after_the_window(engine, monkeypatch):
+    from app.db.models import tenk_filings
+    from app.db.store import job_state
+    from app.tenk import engine as te
+    recent = (date.today() - timedelta(days=1)).isoformat()
+    monkeypatch.setattr(te, "_universe", lambda conn: {"0001953926": {"ticker": "ZBIO"}, "0001737450": {"ticker": "OPRA"}})
+    window = {"on": True}
+    monkeypatch.setattr(te, "daily_10k_ciks", lambda d: {"0001953926", "0001737450"} if window["on"] else set())
+    sec_down = {"on": True}
+
+    def subs(cik):
+        if sec_down["on"] and cik == "0001953926":
+            raise RuntimeError("HTTP 503 submissions")
+        return _sub([(f"{cik}-k", recent)])
+    monkeypatch.setattr(te, "fetch_submissions", subs)
+    monkeypatch.setattr(te, "fetch_text", lambda cik, f: _doc([_risk(i) for i in range(20)], BASE_MDNA))
+    monkeypatch.setattr(te, "retry_failed", lambda engine_, uni=None: {})
+    out = te.run_live(engine, max_docs=10)  # ZBIO: submissions error; OPRA: stored
+    assert out["errors"] == 1 and out["queue_after"] == 1
+    window["on"] = False  # the 4-day index window moved on, process restarted
+    out = te.run_live(engine, max_docs=10)
+    assert out["queue_after"] == 1  # still failing -> still queued, never dropped
+    sec_down["on"] = False
+    out = te.run_live(engine, max_docs=10)
+    with engine.connect() as c:
+        accs = {a for (a,) in c.execute(select(tenk_filings.c.accession)).all()}
+        st = job_state(c, "tenk_live_queue")
+    assert accs == {"0001953926-k", "0001737450-k"} and st["queue"] == {} and out["queue_after"] == 0
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_live_queue_keeps_companies_beyond_the_document_budget(engine, monkeypatch):
+    from app.tenk import engine as te
+    recent = (date.today() - timedelta(days=1)).isoformat()
+    ciks = {f"{i:010d}" for i in range(1, 4)}
+    monkeypatch.setattr(te, "_universe", lambda conn: {c: {"ticker": None} for c in ciks})
+    seen = {"on": True}
+    monkeypatch.setattr(te, "daily_10k_ciks", lambda d: set(ciks) if seen["on"] else set())
+    monkeypatch.setattr(te, "fetch_submissions", lambda cik: _sub([(f"{cik}-k", recent)]))
+    monkeypatch.setattr(te, "fetch_text", lambda cik, f: _doc([_risk(i) for i in range(20)], BASE_MDNA))
+    monkeypatch.setattr(te, "retry_failed", lambda engine_, uni=None: {})
+    out = te.run_live(engine, max_docs=1)
+    assert out["docs"] == 1 and out["queue_after"] == 2 and out["budget_left_in_queue"] == 2
+    seen["on"] = False
+    te.run_live(engine, max_docs=1)
+    out = te.run_live(engine, max_docs=1)
+    assert out["queue_after"] == 0
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_unlisted_in_a_recent_quarter_is_still_processed_where_it_was_listed(engine, monkeypatch):
+    import app.securitymaster.provider as smp
+    from app.db.store import job_state
+    from app.tenk import engine as te
+
+    class SM:  # delisted in 2023, kept filing 10-Ks
+        def resolve_ticker_at_date(self, cik, d):
+            return "OLDC" if d < date(2023, 1, 1) else None
+    monkeypatch.setattr(smp, "get_security_master", lambda conn: SM())
+    monkeypatch.setattr(te, "_quarters", lambda y: ["2025Q1", "2021Q1"])
+    monkeypatch.setattr(te, "quarter_10k_ciks",
+                        lambda y, q: [("0000000777", date(2025, 3, 1) if y == 2025 else date(2021, 3, 1))])
+    calls = []
+    monkeypatch.setattr(te, "process_cik", lambda engine_, cik, *a, **k: calls.append(cik) or {"docs": 3, "events": 0, "failed": 0,
+                                                                                               "remaining": 0})
+    out = te.run_backfill(engine)
+    with engine.connect() as c:
+        st = job_state(c, "tenk_backfill")
+    assert out["not_listed"] == 1 and calls == ["0000000777"]  # history processed via the listed 2021 quarter
+    assert "0000000777" in st["done_ciks"] and set(st["done_quarters"]) == {"2025Q1", "2021Q1"}

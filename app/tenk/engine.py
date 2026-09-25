@@ -298,25 +298,51 @@ def _universe(conn) -> dict[str, dict]:
     return universe_ciks(conn, 0, 1e13)
 
 
+LIVE_QUEUE = "tenk_live_queue"
+LIVE_MAX_ATTEMPTS = 20
+
+
 def run_live(engine: Engine, days: int = 4, max_docs: int = 60) -> dict:
-    """New 10-Ks of listed companies from the last `days` daily indexes."""
+    """New 10-Ks of listed companies. Every company seen in the last `days` daily indexes is written to a
+    persistent queue BEFORE any processing; it leaves the queue only when all its reports were stored
+    (no fetch error, no archive error, nothing left by the document budget). So a failure or a full
+    budget never loses a filing once the 4-day index window has moved on."""
     today = date.today()
     with engine.connect() as conn:
         uni = _universe(conn)
     ciks: set[str] = set()
     for i in range(days):
         ciks |= daily_10k_ciks(today - timedelta(days=i)) & set(uni)
-    out = {"ciks": len(ciks), "docs": 0, "events": 0, "failed": 0, "errors": 0}
-    for cik in sorted(ciks):
+    with engine.begin() as conn:
+        q = dict(job_state(conn, LIVE_QUEUE).get("queue") or {})
+        gave_up = dict(job_state(conn, LIVE_QUEUE).get("gave_up") or {})
+        for c in ciks:
+            q.setdefault(c, {"first_seen": today.isoformat(), "attempts": 0})
+        save_job_state(conn, LIVE_QUEUE, {"queue": q, "gave_up": gave_up}, status="idle")
+    out = {"ciks": len(ciks), "queued": len(q), "docs": 0, "events": 0, "failed": 0, "errors": 0, "budget_left_in_queue": 0}
+    for cik in sorted(q, key=lambda c: q[c]["first_seen"]):
         if out["docs"] >= max_docs:
-            break
+            out["budget_left_in_queue"] += 1
+            continue
         u = uni.get(cik) or {}
-        r = process_cik(engine, cik, u.get("ticker"), u.get("name"), history_from=today - timedelta(days=days + 2),
-                        live_from=today - timedelta(days=days + 2), max_docs=2)
+        start = date.fromisoformat(q[cik]["first_seen"]) - timedelta(days=days + 2)
+        r = process_cik(engine, cik, u.get("ticker"), u.get("name"), history_from=start, live_from=start,
+                        max_docs=max(1, min(4, max_docs - out["docs"])))
         out["docs"] += r.get("docs", 0)
         out["events"] += r.get("events", 0)
         out["failed"] += r.get("failed", 0)
         out["errors"] += "error" in r
+        if "error" in r or r.get("failed") or r.get("remaining"):
+            q[cik]["attempts"] += 1
+            q[cik]["last_error"] = (r.get("error") or ("fetch_failed" if r.get("failed") else "remaining"))[:200]
+            if q[cik]["attempts"] >= LIVE_MAX_ATTEMPTS:
+                gave_up[cik] = q.pop(cik)  # visible in job_state, never silent
+        else:
+            q.pop(cik)
+    with engine.begin() as conn:
+        save_job_state(conn, LIVE_QUEUE, {"queue": q, "gave_up": gave_up}, status="idle")
+    out["queue_after"] = len(q)
+    out["gave_up"] = len(gave_up)
     out["retry_queue"] = retry_failed(engine, uni)
     return out
 
@@ -411,8 +437,9 @@ def run_backfill(engine: Engine, max_docs: int = 120, time_budget_s: float = 900
             with engine.connect() as conn:
                 tk = get_security_master(conn).resolve_ticker_at_date(cik, fdate)
             if not tk:
+                # not exchange-listed AT THIS filing date. The decision is scoped to this quarter only: the
+                # same company may have been listed in an older quarter (delisted later, still filing).
                 out["not_listed"] += 1
-                done.add(cik)  # not exchange-listed at that date (funds, ABS trusts, private debt issuers)
                 continue
             r = process_cik(engine, cik, None, None, history_from=history_from, live_from=live_from, max_docs=years + 2)
             if "error" in r or r.get("failed"):
