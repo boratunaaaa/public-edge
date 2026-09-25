@@ -118,13 +118,13 @@ TOPICS: dict[str, re.Pattern] = {
 }
 NEGATIVE = re.compile(r"not (be )?sufficient|insufficient|may not be able|unable to|substantial doubt|default|breach|deficit|"
                       r"going concern|material weakness|delist", re.I)
-SUFFICIENT = re.compile(r"(sufficient|adequate) to (fund|meet|satisfy).{0,120}(at least|next) (the )?(next )?(<n>|twelve|12) months", re.I)
+SUFFICIENT = re.compile(r"\b(sufficient|adequate) to (fund|meet|satisfy).{0,120}(at least|next) (the )?(next )?(<n>|twelve|12) months", re.I)
 
 
 # "Management evaluates whether conditions raise substantial doubt...", "could raise substantial doubt"
 # are accounting-policy / hypothetical boilerplate, not a going-concern conclusion.
 GC_HEDGE = re.compile(r"\b(whether|could|may|might|if|evaluat\w*|no substantial doubt|alleviated|would)\b", re.I)
-CLASSIFIER_VERSION = 2
+CLASSIFIER_VERSION = 3  # v3: negated / partial-word 'sufficient' is no longer an improvement
 
 
 def topics_of(sentence: str) -> list[str]:
@@ -148,7 +148,11 @@ def build_profile(items: dict[str, str]) -> dict:
             hashes.append(h)
             tp = topics_of(s)
             if tp:
-                tagged[str(h)] = [tp, bool(NEGATIVE.search(s)), bool(SUFFICIENT.search(normalize(s))), signature(s)]
+                neg = bool(NEGATIVE.search(s))
+                # "sufficient" only as a whole word and never in a negated sentence ("insufficient",
+                # "will not be sufficient" are deteriorations, not improvements)
+                suf = bool(SUFFICIENT.search(normalize(s))) and not neg
+                tagged[str(h)] = [tp, neg, suf, signature(s)]
         prof[sec] = {"n": len(sents), "hashes": sorted(set(hashes)),
                      "tagged": tagged, "text_hash": hashlib.sha1(normalize(txt).encode()).hexdigest()}
     prof["_meta"] = {"v": CLASSIFIER_VERSION}

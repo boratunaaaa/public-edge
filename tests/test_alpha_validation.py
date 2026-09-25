@@ -1086,3 +1086,67 @@ def test_superseded_source_cancels_unfilled_buys(engine, monkeypatch):
     with engine.begin() as c:
         c.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": e2})
     assert expire(engine) == 1
+
+
+# ------------------------------------------------------------------ review fixes, round 6
+
+NEG_LIQUIDITY = ["Our liquidity is insufficient to fund our operations for the next twelve months. ",
+                 "Our liquidity is not sufficient to fund our operations for the next twelve months. "]
+
+
+@pytest.mark.parametrize("sentence", NEG_LIQUIDITY)
+def test_negated_sufficiency_is_never_a_liquidity_improvement(sentence):
+    from app.tenk.diff import build_profile, compare, extract_items
+    base = [BASE_MDNA[0], BASE_MDNA[2]]  # no "sufficient" sentence in the old report
+    old = build_profile(extract_items(_doc([_risk(i) for i in range(20)], base)))
+    items = extract_items(_doc([_risk(i) for i in range(20)], base + [sentence]))
+    assert "LIQUIDITY_IMPROVEMENT" not in {c.change_type for c in compare(old, build_profile(items), items)}
+
+
+@db
+@pytest.mark.parametrize("sentence", NEG_LIQUIDITY)
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_negated_sufficiency_creates_no_positive_event_or_proposal(engine, monkeypatch, sentence):
+    from app.db.models import events, proposed_trades
+    from app.paper.proposals import scan_new_events
+    from app.tenk import engine as te
+    base = [BASE_MDNA[0], BASE_MDNA[2]]
+    docs = {"n1": _doc([_risk(i) for i in range(20)], base), "n2": _doc([_risk(i) for i in range(20)], base + [sentence])}
+    monkeypatch.setattr(te, "fetch_text", lambda cik, f: docs[f["accession"]])
+    f1 = {"accession": "n1", "form": "10-K", "filing_date": date.today() - timedelta(days=366), "accepted_at": None,
+          "primary_doc": "k.htm", "period": None}
+    te.process_filing(engine, "0001953926", "ZBIO", "Z", f1, is_backfill=True)
+    te.process_filing(engine, "0001953926", "ZBIO", "Z", {**f1, "accession": "n2", "filing_date": date.today() - timedelta(days=1)},
+                      is_backfill=False)
+    monkeypatch.setenv("PAPER_RESEARCH_MODE", "1")
+    with engine.begin() as c:
+        _universe(c)
+    scan_new_events(engine, days=5)
+    with engine.connect() as c:
+        assert c.execute(select(events.c.id).where(events.c.payload["direction"].astext == "POSITIVE")).all() == []
+        assert c.execute(select(proposed_trades.c.id)).all() == []
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_fill_locks_the_source_event_against_concurrent_supersession(engine, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    from app.paper import ledger
+    eid, p, r = _approved_setup(engine, monkeypatch)
+    conn_a = engine.connect()
+    tx = conn_a.begin()
+    try:
+        assert ledger.fill_orders(conn_a, date(2024, 3, 10))["filled"] == 5  # fill in progress, not committed
+        with engine.connect() as conn_b:  # a concurrent reclassification tries to supersede the source event
+            conn_b.execute(text("SET lock_timeout = '300ms'"))
+            with pytest.raises(OperationalError):
+                conn_b.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": eid})
+            conn_b.rollback()
+    finally:
+        tx.commit()
+        conn_a.close()
+    with engine.begin() as conn_b:  # after the fill committed the supersession proceeds (and later fills see it)
+        conn_b.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": eid})
+    with engine.connect() as c:
+        assert c.execute(text("SELECT superseded FROM events WHERE id = :i"), {"i": eid}).scalar() is True

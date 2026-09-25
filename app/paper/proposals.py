@@ -224,12 +224,15 @@ def scan_new_events(engine: Engine, days: int = 2) -> dict:
     return out
 
 
-def source_valid(conn: Connection, event_id: int | None) -> bool:
+def source_valid(conn: Connection, event_id: int | None, lock: bool = False) -> bool:
     """The signal a proposal was built on still stands (not superseded by a reclassification or a
-    late-arriving predecessor report)."""
+    late-arriving predecessor report). lock=True keeps the event row locked (FOR SHARE) until the
+    caller's transaction ends, so a concurrent supersession waits for the fill (and is then visible to
+    every later fill) instead of racing it."""
     if event_id is None:
         return True
-    r = conn.execute(select(events.c.superseded).where(events.c.id == event_id)).first()
+    q = select(events.c.superseded).where(events.c.id == event_id)
+    r = conn.execute(q.with_for_update(read=True) if lock else q).first()
     return bool(r) and not r[0]
 
 

@@ -193,7 +193,7 @@ def fill_orders(conn: Connection, today: date) -> dict:
             from app.paper.proposals import source_valid
             ev_id = conn.execute(select(proposed_trades.c.event_id).where(proposed_trades.c.id == o["proposal_id"])).scalar() \
                 if o["proposal_id"] else None
-            if not source_valid(conn, ev_id):  # checked in the same transaction as the fill
+            if not source_valid(conn, ev_id, lock=True):  # row stays locked until the fill commits
                 conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
                     status="CANCELLED", note="source event superseded"))
                 out["cancelled"] += 1
