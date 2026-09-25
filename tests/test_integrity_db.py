@@ -219,6 +219,23 @@ def test_multi_signal_cleanup_keeps_one_per_episode(engine):
     assert sorted(live) == [ids[0], ids[3]]
 
 
+def test_multi_signal_loses_independence_when_its_13d_component_is_superseded(engine):
+    from app.integrity.cleanup import run_cleanup
+    with engine.begin() as c:
+        orig = _13d(c, "b1", date(2024, 1, 2), 6.0, "BOARD_SEAT", False)
+        boiler = _13d(c, "b2", date(2024, 2, 2), 6.2, "BOARD_SEAT", True)  # boilerplate amendment
+        cl = create_event(c, event_type="CLUSTER_INSIDER_BUY", dedupe_key="CL1", public_date=date(2024, 2, 5), ticker="OPRA",
+                          issuer_cik="0001737450", title="t", payload={"number_of_buyers": 2}, source_url="u")
+        m = create_event(c, event_type="MULTI_SIGNAL_EVENT", dedupe_key="MS1", public_date=date(2024, 2, 5), ticker="OPRA", title="t",
+                         payload={"source_groups": ["ACTIVIST", "INSIDER"], "component_event_ids": [boiler, cl]}, source_url="u")
+    dry = run_cleanup(engine, dry_run=True, steps=("13d", "multi"))
+    assert dry["multi"]["component_superseded"] == 1 and count(engine, events, events.c.superseded.is_(True)) == 0
+    run_cleanup(engine, dry_run=False, steps=("13d", "multi"))
+    with engine.connect() as c:
+        st = dict(c.execute(select(events.c.id, events.c.superseded_reason)).all())
+    assert st[boiler] == "13D_IMMATERIAL_AMENDMENT" and st[m] == "MULTI_SIGNAL_COMPONENT_SUPERSEDED" and st[orig] is None
+
+
 def test_multi_owner_cleanup_reattributes_legacy_primary_owner_event(engine):
     from app.integrity.cleanup import run_cleanup
     process(engine, form4_submission())  # stored with the single-owner fixture

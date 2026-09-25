@@ -29,6 +29,7 @@ from app.signals.owners import beneficial_roots, owner_key
 
 log = logging.getLogger(__name__)
 MATERIAL_PP = 1.0
+NON_ACTIVIST = {"PASSIVE_OR_UNCLEAR", "MANAGEMENT_DISCUSSION"}
 
 
 def _audit(conn: Connection, run_id: str, action: str, row_id: int | None, before: dict | None, after: dict | None,
@@ -54,11 +55,13 @@ def _supersede(conn: Connection, run_id: str, ev: dict, canonical_id: int | None
 # ------------------------------------------------------------------ 1. 13D amendments
 
 def is_material_amendment(change: float | None, cls: str | None, prev_cls: str | None, has_prev: bool) -> bool:
+    """>= 1pp ownership move, or a NEW activist purpose. A drop back to 'passive/unclear' (often an
+    amendment whose Item 4 only says 'no change') is not a new activist episode."""
     if not has_prev:
         return True  # first filing of the pair inside our data: it opens the episode
     if change is not None and abs(change) >= MATERIAL_PP:
         return True
-    return prev_cls is not None and cls is not None and cls != prev_cls
+    return cls is not None and cls not in NON_ACTIVIST and cls != prev_cls
 
 
 def cleanup_13d(conn: Connection, run_id: str, dry_run: bool) -> dict:
@@ -109,34 +112,67 @@ def groups_of(payload: dict) -> tuple[str, ...]:
 
 
 def canonical_multi(evs: list[dict], window_days: int = MULTI_WINDOW_DAYS) -> list[tuple[dict, int | None]]:
-    """[(event, canonical_id_or_None)] for one ticker. Same rule as the live detector: an event is
-    canonical when no canonical event with the same source groups exists in the preceding window."""
+    """[(event, canonical_id_or_None)] for one ticker. Rolling episode (same rule as the live
+    detector): an event continues the episode of its source-group combination while it is within
+    `window_days` of the episode's PREVIOUS event; the episode's first event is its canonical."""
     out = []
-    last: dict[tuple, dict] = {}
+    last_seen: dict[tuple, date] = {}
+    canon: dict[tuple, int] = {}
     for ev in sorted(evs, key=lambda e: (e["public_date"], e["id"])):
         g = groups_of(ev["payload"] or {})
-        prev = last.get(g)
-        if prev is not None and (ev["public_date"] - prev["public_date"]).days <= window_days:
-            out.append((ev, prev["id"]))
+        prev = last_seen.get(g)
+        if prev is not None and (ev["public_date"] - prev).days <= window_days:
+            out.append((ev, canon[g]))
         else:
-            last[g] = ev
+            canon[g] = ev["id"]
             out.append((ev, None))
+        last_seen[g] = ev["public_date"]
     return out
 
 
 def cleanup_multi_signal(conn: Connection, run_id: str, dry_run: bool) -> dict:
-    rows = [dict(r) for r in conn.execute(select(events).where(and_(
-        events.c.event_type == "MULTI_SIGNAL_EVENT", events.c.superseded.is_(False)))).mappings().all()]
+    # all rows (superseded ones too) define the rolling episodes; only live canonical rows can change
+    rows = [dict(r) for r in conn.execute(select(events).where(events.c.event_type == "MULTI_SIGNAL_EVENT")).mappings().all()]
     by_t: dict[str, list] = defaultdict(list)
     for r in rows:
         by_t[r["ticker"]].append(r)
-    n = 0
+    n = lost = 0
+    done: set[int] = set()
     for _t, evs in by_t.items():
         for ev, canon in canonical_multi(evs):
-            if canon is not None:
+            if canon is not None and not ev["superseded"]:
                 _supersede(conn, run_id, ev, canon, "MULTI_SIGNAL_SAME_EPISODE", dry_run)
+                done.add(ev["id"])
                 n += 1
-    return {"superseded": n, "total": len(rows)}
+    # a multi-signal whose only evidence for one source group was a (now) superseded component - e.g.
+    # a boilerplate 13D amendment - no longer has two independent sources
+    for ev in rows:
+        if ev["superseded"] or ev["id"] in done:
+            continue
+        if len(live_groups(conn, ev["payload"] or {}, dry_run, run_id)) < 2:
+            _supersede(conn, run_id, ev, None, "MULTI_SIGNAL_COMPONENT_SUPERSEDED", dry_run)
+            lost += 1
+    return {"superseded": n + lost, "same_episode": n, "component_superseded": lost, "total": len(rows)}
+
+
+def live_groups(conn: Connection, payload: dict, dry_run: bool, run_id: str) -> set[str]:
+    ids = [int(i) for i in (payload.get("component_event_ids") or [])]
+    if not ids:
+        return set(groups_of(payload))  # no component list stored: cannot judge, keep as is
+    from app.signals.detect import signal_family
+    comps = conn.execute(select(events.c.id, events.c.event_type, events.c.payload, events.c.superseded)
+                         .where(events.c.id.in_(ids))).mappings().all()
+    # in a dry run the 13D step did not write its result: treat its audited decisions as applied
+    pending = {r for (r,) in conn.execute(select(data_cleanup_audit.c.row_id).where(and_(
+        data_cleanup_audit.c.run_id == run_id, data_cleanup_audit.c.action == "SUPERSEDE")))} if dry_run else set()
+    out = set()
+    for c in comps:
+        if c["superseded"] or c["id"] in pending:
+            continue
+        f = signal_family(c["event_type"], c["payload"] or {})
+        if f in FAMILY_GROUP:
+            out.add(FAMILY_GROUP[f])
+    return out
 
 
 # ------------------------------------------------------------------ 3. multi-owner Form 4

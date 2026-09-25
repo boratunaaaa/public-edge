@@ -311,7 +311,8 @@ def test_13d_amendment_materiality():
     assert not is_material_amendment(0.3, "BOARD_SEAT", "BOARD_SEAT", True)  # boilerplate update
     assert is_material_amendment(1.4, "BOARD_SEAT", "BOARD_SEAT", True)  # >= 1pp ownership move
     assert is_material_amendment(-2.0, None, None, True)
-    assert is_material_amendment(0.0, "PROXY_FIGHT", "PASSIVE_OR_UNCLEAR", True)  # purpose changed
+    assert is_material_amendment(0.0, "PROXY_FIGHT", "PASSIVE_OR_UNCLEAR", True)  # new activist purpose
+    assert not is_material_amendment(0.0, "PASSIVE_OR_UNCLEAR", "MERGER", True)  # "no change" text is not a new episode
     assert is_material_amendment(None, None, None, False)  # nothing before it in our data: opens the episode
 
 
@@ -323,6 +324,14 @@ def test_multi_signal_one_canonical_per_group_combination_and_episode():
            mk(5, date(2025, 4, 1), ["ACTIVIST", "INSIDER"])]
     res = {e["id"]: c for e, c in canonical_multi(evs)}
     assert res == {1: None, 2: 1, 3: 1, 4: None, 5: None}
+
+
+def test_multi_signal_rolling_episode_chains_continuous_activity():
+    from app.integrity.cleanup import canonical_multi
+    mk = lambda i, d: {"id": i, "public_date": d, "payload": {"source_groups": ["ACTIVIST", "INSIDER"]}}
+    evs = [mk(1, date(2021, 6, 25)), mk(2, date(2021, 7, 13)), mk(3, date(2021, 7, 30)), mk(4, date(2021, 8, 23)),
+           mk(5, date(2021, 11, 12))]  # 18, 17, 24 days apart, then an 81-day gap
+    assert {e["id"]: c for e, c in canonical_multi(evs)} == {1: None, 2: 1, 3: 1, 4: 1, 5: None}
 
 
 def test_multi_signal_legacy_rows_without_groups_use_families():

@@ -280,14 +280,15 @@ def multi_signal_check(conn: Connection, ticker: str | None, public_date: date, 
     comp = [r for f in families for r in fam[f]]
     first = min(r["public_date"] for r in comp)
     groups = sorted({FAMILY_GROUP[f] for f in families})
-    # One rolling episode per independent source-group combination.  Family growth inside the
-    # same evidence episode (CEO + CFO + cluster) must not emit repeated multi-signal alerts.
-    prior = conn.execute(select(events.c.id, events.c.payload).where(and_(
-        events.c.ticker == ticker, events.c.event_type == "MULTI_SIGNAL_EVENT", events.c.superseded.is_(False),
+    # One rolling episode per independent source-group combination: while occurrences keep coming
+    # within MULTI_WINDOW_DAYS of the previous one, they belong to the episode's canonical event.
+    # A continuation is stored (superseded -> canonical) so the chain is auditable, but never alerted.
+    prior = conn.execute(select(events.c.id, events.c.payload, events.c.canonical_id, events.c.superseded).where(and_(
+        events.c.ticker == ticker, events.c.event_type == "MULTI_SIGNAL_EVENT",
         events.c.public_date >= lo, events.c.public_date <= public_date,
-    )).order_by(events.c.public_date.desc())).mappings().all()
-    if any(sorted((r["payload"] or {}).get("source_groups") or []) == groups for r in prior):
-        return None
+    )).order_by(events.c.public_date.desc(), events.c.id.desc())).mappings().all()
+    same = [r for r in prior if sorted((r["payload"] or {}).get("source_groups") or []) == groups]
+    episode_canonical = (same[0]["canonical_id"] or same[0]["id"]) if same else None
     # Retain one representative component per source group.  Raw event count is still recorded,
     # but payload size and apparent evidence count cannot be inflated by repeated insider rows.
     reps = []
@@ -302,9 +303,14 @@ def multi_signal_check(conn: Connection, ticker: str | None, public_date: date, 
     }
     prio = min(10, max(r["priority"] for r in comp) + 2 * (len(features["source_groups"]) - 1))
     name = next((r["company_name"] for r in comp if r["company_name"]), None)
-    return create_event(
+    eid = create_event(
         conn, event_type="MULTI_SIGNAL_EVENT", dedupe_key=f"MULTI:{ticker}:{'+'.join(families)}:{first}",
         public_date=public_date, ticker=ticker, company_name=name, issuer_cik=comp[0]["issuer_cik"], priority=prio,
         title=f"${ticker}: {' + '.join(families)} within {MULTI_WINDOW_DAYS}d", payload=features, features=features,
         source_url=comp[-1]["source_url"], is_backfill=is_backfill,
     )
+    if eid and episode_canonical:
+        conn.execute(events.update().where(events.c.id == eid).values(
+            superseded=True, canonical_id=episode_canonical, superseded_reason="MULTI_SIGNAL_SAME_EPISODE"))
+        return None  # continuation of an open episode: stored for the audit trail, never a new alert
+    return eid
