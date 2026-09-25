@@ -88,15 +88,16 @@ def parse_prices(body: bytes) -> list[Bar]:
 
 def fetch_symbol(engine: Engine, cik: str, symbol: str) -> dict:
     s = symbol.lower()
-    with engine.begin() as conn:
-        ok, why = quota.can_request(conn, "tiingo", symbol, n=2)
+    with engine.begin() as conn:  # both requests of this symbol are reserved atomically before any call
+        ok, why, ids = quota.reserve(conn, "tiingo", symbol, "symbol", n=2)
         if not ok:
             return {"skipped": why}
     st_meta, meta_body = _get(META_URL.format(s=s))
     with engine.begin() as conn:
-        quota.record(conn, "tiingo", "meta", st_meta, symbol)
+        quota.settle(conn, ids[0], st_meta)
     if st_meta != 200 or not meta_body:
         with engine.begin() as conn:
+            quota.settle(conn, ids[1], 0)  # the prices request is not sent: release its reservation
             save_source(conn, cik=cik, symbol=symbol, provider="tiingo", bars=[], identity="name",
                         source_ref=META_URL.format(s=s), raw=meta_body)
         return {"status": "NOT_FOUND", "http": st_meta}
@@ -104,7 +105,7 @@ def fetch_symbol(engine: Engine, cik: str, symbol: str) -> dict:
     st_px, px_body = _get(PRICES_URL.format(s=s), params={"startDate": HISTORY_START.isoformat(),
                                                            "endDate": date.today().isoformat()})
     with engine.begin() as conn:
-        quota.record(conn, "tiingo", "prices", st_px, symbol)
+        quota.settle(conn, ids[1], st_px)
     bars = parse_prices(px_body) if st_px == 200 else []
     raw = json.dumps({"meta": meta, "prices": json.loads(px_body) if (st_px == 200 and px_body) else None}).encode()
     with engine.begin() as conn:
@@ -141,11 +142,11 @@ def connection_test(engine: Engine) -> dict:
     if not configured():
         return {"configured": False}
     with engine.begin() as conn:
-        ok, why = quota.can_request(conn, "tiingo", "SPY")
+        ok, why, ids = quota.reserve(conn, "tiingo", "SPY", "test")
         if not ok:
             return {"configured": True, "skipped": why}
     st, body = _get(META_URL.format(s="spy"))
     with engine.begin() as conn:
-        quota.record(conn, "tiingo", "test", st, "SPY")
+        quota.settle(conn, ids[0], st)
         q = quota.summary(conn, "tiingo")
     return {"configured": True, "http_status": st, "ok": st == 200, "quota": q}

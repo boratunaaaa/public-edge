@@ -378,3 +378,31 @@ def test_otc_tail_after_delisting_is_truncated_and_downgraded(engine):
     assert out["truncated"] == 1 and row["validation_status"] == "VALIDATED_FALLBACK"
     assert row["last_date"] <= date(2023, 3, 17) and kept[-1].date <= date(2023, 3, 17)
     assert "TRUNCATED_AT_SEC_DELISTING" in row["reasons"]
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_quota_reservation_is_atomic_across_connections(engine):
+    """Two processes racing for the last slot: exactly one gets it (advisory lock + reserve)."""
+    from app.pricesources import quota
+    now = datetime.now(timezone.utc)
+    with engine.begin() as c:
+        for _ in range(45):
+            quota.record(c, "tiingo", "prices", 200, None, now=now)
+    c1, c2 = engine.connect(), engine.connect()
+    t1 = c1.begin()
+    ok1, _, _ = quota.reserve(c1, "tiingo", "AAA", "symbol", n=2)  # takes the lock and slots 46-47
+    import threading
+    res = {}
+
+    def other():
+        t2 = c2.begin()
+        res["ok2"], res["why2"], _ = quota.reserve(c2, "tiingo", "BBB", "symbol", n=2)  # waits for the lock
+        t2.commit()
+    th = threading.Thread(target=other)
+    th.start()
+    t1.commit()
+    th.join(10)
+    c1.close()
+    c2.close()
+    assert ok1 is True and res["ok2"] is False and res["why2"] == "PER_HOUR_LIMIT"

@@ -25,7 +25,8 @@ def usage(conn: Connection, provider: str, now: datetime | None = None) -> dict:
         provider_usage.c.provider == provider, provider_usage.c.month == month_key(now)))).scalar_one()
     def since(td):
         return conn.execute(select(func.count()).select_from(provider_requests).where(and_(
-            provider_requests.c.provider == provider, provider_requests.c.at > now - td))).scalar_one()
+            provider_requests.c.provider == provider, provider_requests.c.at > now - td,
+            func.coalesce(provider_requests.c.status, -1) != 0))).scalar_one()  # 0 = reserved but never sent
     return {"symbols_month": sym, "per_hour": since(timedelta(hours=1)), "per_day": since(timedelta(days=1))}
 
 
@@ -43,6 +44,27 @@ def can_request(conn: Connection, provider: str, symbol: str | None = None, n: i
         if not used and u["symbols_month"] + 1 > int(lim["symbols_month"] * s):
             return False, "MONTHLY_SYMBOL_LIMIT"
     return True, "OK"
+
+
+def reserve(conn: Connection, provider: str, symbol: str | None, kind: str, n: int = 1) -> tuple[bool, str, list[int]]:
+    """Atomic check-and-reserve across processes (transaction-scoped advisory lock): two processes can no
+    longer both pass the check and exceed the free tier together. Reserved rows get their HTTP status later."""
+    from sqlalchemy import text
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"quota:{provider}"})
+    ok, why = can_request(conn, provider, symbol, n=n)
+    if not ok:
+        return False, why, []
+    now = datetime.now(timezone.utc)
+    ids = [conn.execute(provider_requests.insert().values(provider=provider, at=now, kind=kind, status=None)
+                        .returning(provider_requests.c.id)).scalar_one() for _ in range(n)]
+    if symbol:
+        conn.execute(pg_insert(provider_usage).values(provider=provider, month=month_key(now), symbol=symbol, first_used_at=now)
+                     .on_conflict_do_nothing(index_elements=["provider", "month", "symbol"]))
+    return True, "OK", ids
+
+
+def settle(conn: Connection, request_id: int, status: int | None) -> None:
+    conn.execute(provider_requests.update().where(provider_requests.c.id == request_id).values(status=status))
 
 
 def record(conn: Connection, provider: str, kind: str, status: int | None, symbol: str | None = None,

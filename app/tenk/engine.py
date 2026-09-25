@@ -35,6 +35,7 @@ ANNUAL_FORMS = {"10-K", "10-K405", "10-KT"}
 CONSECUTIVE_MAX_DAYS = 550  # a "previous" 10-K older than ~18 months is not consecutive
 HISTORY_YEARS = 5
 MAX_CIK_FAILS = 5
+HISTORY_DOC_PAUSE_S = 2.0  # multi-MB 10-K documents: SEC answered 503 to live requests while history ran unthrottled
 MIN_FREE_BYTES = 10 * 1024**3  # the 10-K history stops well before the disk gets tight
 EVENT_PRIORITY = 2  # below ALERT_MIN_PRIORITY: an unvalidated signal is recorded, not alerted
 POSITIVE = {"RISK_DECREASE", "LIQUIDITY_IMPROVEMENT", "REMOVED_GOING_CONCERN", "NEW_CAPACITY_EXPANSION",
@@ -244,7 +245,7 @@ def fetch_submissions(cik: str) -> dict:
 
 
 def process_cik(engine: Engine, cik: str, ticker: str | None, name: str | None, *, history_from: date,
-                live_from: date, max_docs: int) -> dict:
+                live_from: date, max_docs: int, pause_s: float = 0.0) -> dict:
     """All not-yet-stored 10-Ks of one CIK filed on/after history_from (plus the one before it, so the
     first of them has a predecessor). Filings before live_from are stored as backfill."""
     cik = cik.zfill(10)
@@ -272,6 +273,8 @@ def process_cik(engine: Engine, cik: str, ticker: str | None, name: str | None, 
         r = process_filing(engine, cik, tk, name or sub.get("name"), f, is_backfill=f["filing_date"] < live_from)
         res["docs"] += 1
         res["failed"] += bool(r.get("retryable"))
+        if pause_s:
+            time.sleep(pause_s)  # history is LOW priority: leave SEC capacity to live ingestion
         res["events"] += r.get("status") == "event"
     return res
 
@@ -489,7 +492,8 @@ def run_backfill(engine: Engine, max_docs: int = 120, time_budget_s: float = 900
                 # same company may have been listed in an older quarter (delisted later, still filing).
                 out["not_listed"] += 1
                 continue
-            r = process_cik(engine, cik, None, None, history_from=history_from, live_from=live_from, max_docs=years + 2)
+            r = process_cik(engine, cik, None, None, history_from=history_from, live_from=live_from, max_docs=years + 2,
+                            pause_s=HISTORY_DOC_PAUSE_S)
             if "error" in r or r.get("failed"):
                 # keep the quarter open so this company is retried on the next run; after MAX_CIK_FAILS
                 # attempts it is recorded as given up (visible in job_state), not silently dropped
