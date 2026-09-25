@@ -305,14 +305,24 @@ LIVE_MAX_ATTEMPTS = 20
 
 
 INDEX_MAX_AGE_DAYS = 60
+INDEX_LISTING_URL = "https://www.sec.gov/Archives/edgar/daily-index/{y}/QTR{q}/index.json"
 
 
-def run_live(engine: Engine, days: int = 4, max_docs: int = 60, today: date | None = None) -> dict:
+def quarter_index_listing(y: int, q: int) -> set[str]:
+    """File names published in a daily-index quarter directory. SEC answers 403 (not 404) for a file
+    that does not exist - both for a federal holiday and for today's not-yet-published index - so the
+    directory listing is what tells "absent" from "failed"."""
+    d = http.get(INDEX_LISTING_URL.format(y=y, q=q), retries=2).json()
+    return {i["name"] for i in (d.get("directory") or {}).get("item") or []}
+
+
+def run_live(engine: Engine, days: int = 4, max_docs: int = 60, today: date | None = None, listing_fn=None) -> dict:
     """New 10-Ks of listed companies. Every company seen in the last `days` daily indexes is written to a
     persistent queue BEFORE any processing; it leaves the queue only when all its reports were stored
     (no fetch error, no archive error, nothing left by the document budget). So a failure or a full
     budget never loses a filing once the 4-day index window has moved on."""
     today = today or date.today()
+    listing_fn = listing_fn or quarter_index_listing
     with engine.connect() as conn:
         uni = _universe(conn)
         st = job_state(conn, LIVE_QUEUE)
@@ -322,13 +332,24 @@ def run_live(engine: Engine, days: int = 4, max_docs: int = 60, today: date | No
     pending_idx = set(st.get("index_pending") or [])
     days_to_read = {(today - timedelta(days=i)).isoformat() for i in range(days)} | pending_idx
     ciks: set[str] = set()
-    index_failed = []
+    index_failed, not_published = [], []
+    listings: dict[tuple[int, int], set[str]] = {}
     for ds in sorted(days_to_read):
         d = date.fromisoformat(ds)
         if d.weekday() >= 5:
             pending_idx.discard(ds)
             continue
         try:
+            key = (d.year, (d.month - 1) // 3 + 1)
+            if key not in listings:
+                listings[key] = listing_fn(*key)
+            if f"form.{d:%Y%m%d}.idx" not in listings[key]:
+                if d >= today - timedelta(days=1):  # not published yet: wait, this is not a failure
+                    pending_idx.add(ds)
+                    not_published.append(ds)
+                else:  # an older business day without an index = SEC closed (federal holiday)
+                    pending_idx.discard(ds)
+                continue
             found = daily_10k_ciks(d) & set(uni)
         except Exception as e:
             if (today - d).days > INDEX_MAX_AGE_DAYS:
@@ -346,7 +367,7 @@ def run_live(engine: Engine, days: int = 4, max_docs: int = 60, today: date | No
     with engine.begin() as conn:
         save_job_state(conn, LIVE_QUEUE, {"queue": q, "gave_up": gave_up, "index_pending": sorted(pending_idx)}, status="idle")
     out = {"ciks": len(ciks), "queued": len(q), "docs": 0, "events": 0, "failed": 0, "errors": 0, "budget_left_in_queue": 0,
-           "index_failed": index_failed, "index_pending": len(pending_idx)}
+           "index_failed": index_failed, "index_not_published_yet": not_published, "index_pending": len(pending_idx)}
     for cik in sorted(q, key=lambda c: q[c]["first_seen"]):
         if out["docs"] >= max_docs:
             out["budget_left_in_queue"] += 1

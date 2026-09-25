@@ -706,6 +706,14 @@ def test_superseded_risk_event_does_not_trigger_a_thesis_exit(engine, monkeypatc
     assert n_sell == 0
 
 
+def _all_days(y, q):
+    d, out = date(y, 3 * q - 2, 1), set()
+    while d.month in range(3 * q - 2, 3 * q + 1) and d.year == y:
+        out.add(f"form.{d:%Y%m%d}.idx")
+        d += timedelta(days=1)
+    return out
+
+
 def _sub(filings: list[tuple[str, str]]) -> dict:
     return {"name": "Z", "filings": {"recent": {
         "form": ["10-K"] * len(filings), "accessionNumber": [a for a, _ in filings], "filingDate": [d for _, d in filings],
@@ -761,6 +769,7 @@ def test_live_retry_queue_recovers_a_failed_filing_after_the_index_window(engine
     monkeypatch.setattr(te, "fetch_text", fetch)
     monkeypatch.setattr(te, "_universe", lambda conn: {})
     monkeypatch.setattr(te, "daily_10k_ciks", lambda d: set())  # the filing is long out of the 4-day window
+    monkeypatch.setattr(te, "quarter_index_listing", _all_days)
     r = te.process_cik(engine, "0001953926", "ZBIO", "Z", history_from=date.today() - timedelta(days=400),
                        live_from=date.today(), max_docs=5)
     assert r["failed"] == 1
@@ -794,6 +803,7 @@ def test_live_queue_survives_submissions_error_and_budget_after_the_window(engin
     monkeypatch.setattr(te, "fetch_submissions", subs)
     monkeypatch.setattr(te, "fetch_text", lambda cik, f: _doc([_risk(i) for i in range(20)], BASE_MDNA))
     monkeypatch.setattr(te, "retry_failed", lambda engine_, uni=None: {})
+    monkeypatch.setattr(te, "quarter_index_listing", _all_days)
     out = te.run_live(engine, max_docs=10)  # ZBIO: submissions error; OPRA: stored
     assert out["errors"] == 1 and out["queue_after"] == 1
     window["on"] = False  # the 4-day index window moved on, process restarted
@@ -819,6 +829,7 @@ def test_live_queue_keeps_companies_beyond_the_document_budget(engine, monkeypat
     monkeypatch.setattr(te, "fetch_submissions", lambda cik: _sub([(f"{cik}-k", recent)]))
     monkeypatch.setattr(te, "fetch_text", lambda cik, f: _doc([_risk(i) for i in range(20)], BASE_MDNA))
     monkeypatch.setattr(te, "retry_failed", lambda engine_, uni=None: {})
+    monkeypatch.setattr(te, "quarter_index_listing", _all_days)
     out = te.run_live(engine, max_docs=1)
     assert out["docs"] == 1 and out["queue_after"] == 2 and out["budget_left_in_queue"] == 2
     seen["on"] = False
@@ -936,6 +947,7 @@ def test_failed_daily_index_is_retried_after_the_window(engine, monkeypatch):
     monkeypatch.setattr(te, "fetch_submissions", lambda cik: _sub([("w1", day.isoformat())]))
     monkeypatch.setattr(te, "fetch_text", lambda cik, f: _doc([_risk(i) for i in range(20)], BASE_MDNA))
     monkeypatch.setattr(te, "retry_failed", lambda engine_, uni=None: {})
+    monkeypatch.setattr(te, "quarter_index_listing", _all_days)
     out = te.run_live(engine, today=date(2026, 9, 24))
     assert day.isoformat() in out["index_failed"]
     out = te.run_live(engine, today=date(2026, 10, 5))  # outage outlasted the 4-day window
@@ -947,3 +959,28 @@ def test_failed_daily_index_is_retried_after_the_window(engine, monkeypatch):
         st = job_state(c, "tenk_live_queue")
         got = c.execute(select(tenk_filings.c.accession)).scalars().all()
     assert got == ["w1"] and st["index_pending"] == [] and out["index_failed"] == []
+
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_unpublished_today_and_holidays_are_not_index_failures(engine, monkeypatch):
+    from app.db.store import job_state
+    from app.tenk import engine as te
+    monkeypatch.setattr(te, "_universe", lambda conn: {})
+    monkeypatch.setattr(te, "retry_failed", lambda engine_, uni=None: {})
+    called = []
+    monkeypatch.setattr(te, "daily_10k_ciks", lambda d: called.append(d) or set())
+    # 07 Sep = Labor Day (no index ever); 09 Sep = today (not published yet); the server clock is UTC,
+    # so "yesterday" may still be the US business day in progress and also waits one run
+    published = {"form.20260902.idx", "form.20260903.idx", "form.20260904.idx", "form.20260908.idx"}
+    out = te.run_live(engine, today=date(2026, 9, 9), days=8, listing_fn=lambda y, q: published)
+    assert out["index_failed"] == [] and out["index_not_published_yet"] == ["2026-09-09"]
+    with engine.connect() as c:
+        assert job_state(c, "tenk_live_queue")["index_pending"] == ["2026-09-09"]  # the holiday is not retried
+    assert date(2026, 9, 7) not in called and date(2026, 9, 8) in called
+
+    def down(y, q):
+        raise RuntimeError("HTTP 503")
+    out = te.run_live(engine, today=date(2026, 9, 10), days=2, listing_fn=down)
+    assert "2026-09-09" in out["index_failed"]  # a listing failure is a real, visible failure
