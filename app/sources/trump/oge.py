@@ -36,6 +36,7 @@ from app.sources.base import RunResult, Source
 
 log = logging.getLogger(__name__)
 INDEX_URL = "https://extapps2.oge.gov/201/Presiden.nsf/API.xsp/v2/rest"
+MAX_DOCS_PER_RUN = 3
 ALERT_MAX_AGE_DAYS = 14  # an older document found later (first load, interrupted load) is history, never an alert
 FILER_RE = re.compile(r"^\s*trump\s*,", re.I)
 HREF_RE = re.compile(r"href='([^']+)'>([^<]+)<", re.I)
@@ -135,7 +136,7 @@ def pdf_text(pdf: bytes) -> tuple[str, int]:
 
 class TrumpOgeSource(Source):
     name = "trump_oge"
-    interval_seconds = 6 * 3600
+    interval_seconds = 3600
     slow = True
     critical = False
 
@@ -146,9 +147,11 @@ class TrumpOgeSource(Source):
             resolver.load(conn)
             known = {u for (u,) in conn.execute(select(oge_documents.c.doc_url)).all()}
             first_run = not known
-        for d in docs:
-            if d["doc_url"] in known:
-                continue
+        # newest first (a fresh filing is never stuck behind the historical backlog); scanned PDFs take
+        # minutes to extract, so each run handles a few and the backlog drains over later runs
+        todo = sorted((d for d in docs if d["doc_url"] not in known),
+                      key=lambda d: d["doc_date"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        for d in todo[:MAX_DOCS_PER_RUN]:
             old = d["doc_date"] is not None and d["doc_date"] < datetime.now(timezone.utc) - timedelta(days=ALERT_MAX_AGE_DAYS)
             try:
                 res.events += self._ingest(engine, d, is_backfill=first_run or old)

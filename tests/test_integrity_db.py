@@ -308,6 +308,7 @@ def test_oge_first_run_is_history_and_new_documents_alert(engine, monkeypatch):
 
     monkeypatch.setattr(oge.http, "get", lambda url, **kw: R({"data": docs}) if url == oge.INDEX_URL else R(content=url.encode()))
     monkeypatch.setattr(oge, "pdf_text", lambda b: ("1 APPLE INC (ZBIO) COMMON lourchaso 7/7/2026 Yes $1 000 001 -$5 000 000", 1))
+    monkeypatch.setattr(oge, "MAX_DOCS_PER_RUN", 10)
     first = oge.TrumpOgeSource().run_live(engine)
     docs.append({"type": "<a href='https://x/2.pdf'>278 Transaction</a>", "name": "Trump, Donald J", "docDate": recent})
     docs.append({"type": "<a href='https://x/3.pdf'>278 Transaction</a>", "name": "Trump, Donald J", "docDate": "2025-01-10T04:21:08"})
@@ -320,6 +321,26 @@ def test_oge_first_run_is_history_and_new_documents_alert(engine, monkeypatch):
     assert evs[0]["is_backfill"] and not evs[1]["is_backfill"] and evs[1]["priority"] >= 5
     assert evs[2]["is_backfill"] and evs[2]["priority"] == 0  # an old document found late is history, not an alert
     assert evs[1]["payload"]["sales"] == 1 and tick == "ZBIO"  # explicit "(TICKER)" only
+
+
+def test_oge_run_is_bounded_and_newest_first(engine, monkeypatch):
+    from app.sources.trump import oge
+    docs = [{"type": f"<a href='https://x/{i}.pdf'>278 Transaction</a>", "name": "Trump, Donald J",
+             "docDate": f"2026-0{i}-01T00:00:00"} for i in range(1, 6)]
+
+    class R:
+        def __init__(self, payload=None, content=b""):
+            self._p, self.content = payload, content
+
+        def json(self):
+            return self._p
+
+    monkeypatch.setattr(oge.http, "get", lambda url, **kw: R({"data": docs}) if url == oge.INDEX_URL else R(content=url.encode()))
+    monkeypatch.setattr(oge, "pdf_text", lambda b: ("", 1))
+    assert oge.TrumpOgeSource().run_live(engine).items == oge.MAX_DOCS_PER_RUN
+    with engine.connect() as c:
+        got = sorted(c.execute(text("SELECT doc_url FROM oge_documents")).scalars().all())
+    assert got == ["https://x/3.pdf", "https://x/4.pdf", "https://x/5.pdf"]
 
 
 def test_stored_news_rows_get_timestamp_confidence_and_story_fields(engine):
