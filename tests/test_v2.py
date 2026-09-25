@@ -466,7 +466,7 @@ def test_already_scaled_is_never_high_interest():
                    stage="PRODUCTION_RAMP", stage_prev=None, relations=[{"counterparty": "NVIDIA", "category": "TOP_SEMICONDUCTOR",
                    "strength": 1.0, "hedged": False, "relation": "customer"}], signal_labels=["SOLE_SUPPLIER"], insider={},
                    activist_13d=False, gov_contract_ratio=None, risks=[], themes=["AI_INFRASTRUCTURE"])
-    assert S.score(f)[1] == "MEDIUM"
+    assert S.score(f)[1] == "LOW"  # $18B is outside an early-discovery engine (validation dv-2026-09-25)
 
 
 def test_scaled_stage_and_multiple_high_risks_cap_discovery_interest():
@@ -475,6 +475,6 @@ def test_scaled_stage_and_multiple_high_risks_cap_discovery_interest():
                       stage_prev=None, relations=[], signal_labels=["SOLE_SUPPLIER", "GOVERNMENT_BACKED"],
                       insider={"buyers": 3, "buy_value": 2e6}, activist_13d=False, gov_contract_ratio=0.2,
                       risks=[], themes=["BATTERIES"])
-    assert S.score(base)[1] == "MEDIUM"
+    assert S.score(base)[1] == "LOW"  # SCALED stage: not an early discovery
     risky = dict(base, stage="PRODUCTION_RAMP", risks=["GOING_CONCERN:HIGH", "FREQUENT_CAPITAL_RAISES:HIGH"])
     assert S.score(risky)[1] == "MEDIUM"

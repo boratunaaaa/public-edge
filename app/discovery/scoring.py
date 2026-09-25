@@ -167,13 +167,19 @@ def score(f: dict) -> tuple[float, str, list[str]]:
         s -= 1.0
         why.append("tanıtım dili yoğun, somut kanıt az")
     level = "HIGH" if s >= 6 else "MEDIUM" if s >= 3.5 else "LOW"
+    if f.get("scope_excluded"):
+        return round(s, 2), "LOW", ["kapsam dışı (banka / fon / REIT / SPAC): " + str(f["scope_excluded"])]
+    rev = f.get("ttm_revenue") or 0
+    if (f.get("market_cap") or 0) >= 10e9 or rev >= 1e9 or f.get("stage") == "SCALED":
+        # large established businesses are outside an EARLY-discovery engine - not even "monitor"
+        return round(s, 2), "LOW", why + ["büyük / oturmuş şirket - erken keşif kapsamı dışında"]
     # HIGH interest needs business evidence of the kind this engine looks for AND at least one piece of
     # real-world evidence (revenue, binding contract, qualification, ramp, award, major customer,
     # shipment, strong insider buying) - wording, themes or TAM claims alone can never make HIGH
     if level == "HIGH" and (not has_business_evidence(f) or not f.get("strong_evidence")):
         level = "MEDIUM"
-    if level == "HIGH" and ((f.get("market_cap") or 0) >= 10e9 or f.get("stage") == "SCALED"):
-        level = "MEDIUM"  # already scaled operating businesses are not early discoveries
+    if level == "HIGH" and rev >= 250e6:
+        level = "MEDIUM"  # an established revenue base is not an early discovery (validation: 9 of 13 HIGH false positives)
     # HIGH_FINANCING_RISK summarizes the other financing rows - not counted twice
     high_risks = {rk.split(":", 1)[0] for rk in (f.get("risks") or []) if rk.endswith(":HIGH")} - {"HIGH_FINANCING_RISK"}
     if level == "HIGH" and (len(high_risks) >= 2 or "GOING_CONCERN" in high_risks):

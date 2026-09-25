@@ -475,6 +475,49 @@ def test_promotional_tam_language_is_counted_not_rewarded():
                        "Revenue was $4.1 million"]) == 2
 
 
+@pytest.mark.parametrize("label,sentence", [
+    ("SOLE_SUPPLIER", "Because we do not intend to pay any cash dividends, capital appreciation, if any, would be your sole source of gain."),
+    ("QUALIFICATION", "All forward-looking statements attributable to us are expressly qualified by these cautionary statements."),
+    ("GOVERNMENT_BACKED", "Purchaser is not a foreign person as such term is defined in Section 721 of the Defense Production Act of 1950."),
+    ("GOVERNMENT_BACKED", "The Company's critical mineral recycling factory is in McCarran, Nevada."),
+    ("LONG_TERM_SUPPLY", "Section 7.17 Take-or-Pay or other Prepayments."),
+    ("FIRST_COMMERCIAL_PRODUCTION", "The license terminates fifteen years after the first commercial sale of a product, with royalties on net sales."),
+    ("RESEARCH_STAGE", "Research and development, or R&D, expense includes personnel costs, mask costs and prototype costs."),
+])
+def test_boilerplate_never_counts_as_discovery_evidence(label, sentence):
+    from app.discovery import language as L
+    assert not L.signal_ok(label, sentence)
+    assert label not in L.signals_in(sentence)
+
+
+def test_real_signals_survive_the_boilerplate_filter():
+    from app.discovery import language as L
+    assert "LONG_TERM_SUPPLY" in L.signals_in("On July 26, 2026, we entered into a six-year capacity reservation agreement with a customer.")
+    assert "GOVERNMENT_BACKED" in L.signals_in("The DOE Loan Programs Office issued a conditional commitment for a $1.6 billion loan guarantee.")
+    assert "FIRST_COMMERCIAL_PRODUCTION" in L.signals_in("We commenced commercial production of enriched isotopes in the first half of 2025.")
+
+
+@pytest.mark.parametrize("sentence", [
+    "JJDC, the investment arm of Johnson & Johnson and owner of Janssen, owns more than 5% of our outstanding shares.",
+    "The Termination Agreement also terminated that certain Supply Agreement with Janssen.",
+    "New users are drawn to our products by rankings circulated by Amazon, Apple and Google app stores.",
+])
+def test_investor_terminated_and_channel_mentions_are_not_customers(sentence):
+    from app.discovery import language as L
+    assert all(r.strength == 0.0 for r in L.relations_in(sentence))
+
+
+def test_scope_and_scale_rules():
+    from app.discovery.scoring import score
+    f = _feats(ttm_revenue=40e6, strong_evidence=["COMMERCIAL_REVENUE", "BINDING_CONTRACT"])
+    assert score(f)[1] == "HIGH"
+    assert score(dict(f, ttm_revenue=400e6))[1] == "MEDIUM"  # established revenue base is not an early discovery
+    assert score(dict(f, ttm_revenue=2e9))[1] == "LOW"
+    assert score(dict(f, market_cap=40e9))[1] == "LOW"
+    lvl, why = score(dict(f, scope_excluded="sector FINANCIALS (SIC 6022)"))[1:]
+    assert lvl == "LOW" and "kapsam dışı" in why[0]
+
+
 def test_financing_risk_flags_and_high_label():
     from app.discovery.financing import financing_score, is_high
     flags = ["ATM_PROGRAM", "PIPE_3_02", "SHARE_GROWTH_50PCT", "WARRANTS"]

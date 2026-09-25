@@ -1,5 +1,5 @@
 """Data-integrity integration tests against PostgreSQL (TEST_DATABASE_URL)."""
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select, text
@@ -296,6 +296,7 @@ def test_government_subsidiary_mapping_is_research_only(engine, monkeypatch):
 
 def test_oge_first_run_is_history_and_new_documents_alert(engine, monkeypatch):
     from app.sources.trump import oge
+    recent = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S")
     docs = [{"type": "<a href='https://x/1.pdf'>278 Transaction</a>", "name": "Trump, Donald J", "docDate": "2026-08-22T04:21:08"}]
 
     class R:
@@ -308,14 +309,16 @@ def test_oge_first_run_is_history_and_new_documents_alert(engine, monkeypatch):
     monkeypatch.setattr(oge.http, "get", lambda url, **kw: R({"data": docs}) if url == oge.INDEX_URL else R(content=url.encode()))
     monkeypatch.setattr(oge, "pdf_text", lambda b: ("1 APPLE INC (ZBIO) COMMON lourchaso 7/7/2026 Yes $1 000 001 -$5 000 000", 1))
     first = oge.TrumpOgeSource().run_live(engine)
-    docs.append({"type": "<a href='https://x/2.pdf'>278 Transaction</a>", "name": "Trump, Donald J", "docDate": "2026-09-22T04:21:08"})
+    docs.append({"type": "<a href='https://x/2.pdf'>278 Transaction</a>", "name": "Trump, Donald J", "docDate": recent})
+    docs.append({"type": "<a href='https://x/3.pdf'>278 Transaction</a>", "name": "Trump, Donald J", "docDate": "2025-01-10T04:21:08"})
     monkeypatch.setattr(oge, "pdf_text", lambda b: ("2 SOMETHING ELSE sale 8/1/2026 No $15 001 -$50 000", 1))
     second = oge.TrumpOgeSource().run_live(engine)
     with engine.connect() as c:
         evs = c.execute(select(events.c.is_backfill, events.c.priority, events.c.payload).order_by(events.c.id)).mappings().all()
         tick = c.execute(text("SELECT ticker FROM oge_transactions WHERE line_no = 1")).scalar()
-    assert first.items == 1 and second.items == 1
+    assert first.items == 1 and second.items == 2
     assert evs[0]["is_backfill"] and not evs[1]["is_backfill"] and evs[1]["priority"] >= 5
+    assert evs[2]["is_backfill"] and evs[2]["priority"] == 0  # an old document found late is history, not an alert
     assert evs[1]["payload"]["sales"] == 1 and tick == "ZBIO"  # explicit "(TICKER)" only
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, or_, select
@@ -31,7 +32,8 @@ def _relations(conn: Connection, cik: str) -> tuple[list[dict], list[str], list[
     for r in rows:
         texts.append(r["sentence"])
         if r["kind"] in ("bottleneck", "stage"):
-            if not r["hedged"]:
+            # evidence stored before the boilerplate rules is re-checked at read time
+            if not r["hedged"] and L.signal_ok(r["label"], r["sentence"]):
                 labels.append(r["label"])
         elif r["kind"] == "customer":
             strength = L.REL_STRENGTH.get(r["agreement"], 0.4)
@@ -39,6 +41,8 @@ def _relations(conn: Connection, cik: str) -> tuple[list[dict], list[str], list[
                 strength = 0.0
             if r["hedged"]:
                 strength *= 0.3
+            if not L.relation_ok(r["sentence"]):
+                strength = 0.0
             rels.append({"counterparty": r["counterparty"], "category": r["counterparty_category"], "relation": r["relation"],
                          "agreement": r["agreement"], "hedged": r["hedged"], "strength": strength,
                          "filed": r["filed_date"], "url": r["source_url"], "sentence": r["sentence"]})
@@ -56,6 +60,22 @@ def _insider(conn: Connection, cik: str) -> dict:
         insider_transactions.c.filed_date >= since))).all()
     keys = {owner_key(o, n, j) for _v, o, n, j in rows}
     return {"buy_value": float(sum(float(v or 0) for v, *_ in rows)), "buyers": independent_owner_count(conn, keys)}
+
+
+NON_OPERATING_SECTORS = {"FINANCIALS", "REAL_ESTATE", "SHELL_SPAC"}
+NON_OPERATING_NAME_RE = re.compile(
+    r"\b(ETF|FUND|TRUST|BANCORP|BANCSHARES|BANK|BANKSHARES|REIT|CURRENCYSHARES|ACQUISITION CORP|REALTY|PROPERTIES)\b", re.I)
+
+
+def _scope_excluded(conn: Connection, cik: str, name: str | None) -> str | None:
+    """Banks, insurers, REITs, funds/ETFs and SPACs are outside an operating-company discovery engine."""
+    from app.db.models import security_master
+    row = conn.execute(select(security_master.c.sector, security_master.c.sic).where(security_master.c.cik == cik)).first()
+    if row and row[0] in NON_OPERATING_SECTORS:
+        return f"sector {row[0]} (SIC {row[1]})"
+    if (row is None or row[0] is None) and name and NON_OPERATING_NAME_RE.search(name):
+        return "name indicates a fund / bank / REIT"
+    return None
 
 
 def evaluate(conn: Connection, u: dict, *, is_backfill: bool) -> dict:
@@ -84,6 +104,7 @@ def evaluate(conn: Connection, u: dict, *, is_backfill: bool) -> dict:
                        relations=rels, signal_labels=labels, insider=_insider(conn, cik), activist_13d=bool(act),
                        gov_contract_ratio=gov, risks=risks, themes=themes, texts=texts[:400], financing=fin)
     feats["stage_reasons"] = stage_reasons
+    feats["scope_excluded"] = _scope_excluded(conn, cik, u.get("name"))
     sc, level, why = S.score(feats)
     candidate = S.has_real_progress(feats)
     now = datetime.now(timezone.utc)
@@ -216,6 +237,9 @@ def run_discovery(engine: Engine, *, full: bool) -> dict:
     with engine.connect() as conn:
         small = universe_ciks(conn, lo=50e6, hi=1e9)
     out["submissions"] = refresh_submissions(engine, list(small), max_n=800)
+    with engine.connect() as conn:  # SIC sector for every universe company (scope rules), refreshed monthly
+        everyone = universe_ciks(conn, lo=50e6, hi=1e15)
+    out["submissions_all"] = refresh_submissions(engine, list(everyone), max_n=800)
     out["evidence"] = collect(engine, max_docs=1500 if first else 600)
     log.info("discovery: evidence %s", out["evidence"])
     out["evaluation"] = evaluate_all(engine, is_backfill=first)

@@ -21,7 +21,7 @@ import hashlib
 import io
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -36,6 +36,7 @@ from app.sources.base import RunResult, Source
 
 log = logging.getLogger(__name__)
 INDEX_URL = "https://extapps2.oge.gov/201/Presiden.nsf/API.xsp/v2/rest"
+ALERT_MAX_AGE_DAYS = 14  # an older document found later (first load, interrupted load) is history, never an alert
 FILER_RE = re.compile(r"^\s*trump\s*,", re.I)
 HREF_RE = re.compile(r"href='([^']+)'>([^<]+)<", re.I)
 BRACKETS = [(1_001, 15_000), (15_001, 50_000), (50_001, 100_000), (100_001, 250_000), (250_001, 500_000),
@@ -148,8 +149,9 @@ class TrumpOgeSource(Source):
         for d in docs:
             if d["doc_url"] in known:
                 continue
+            old = d["doc_date"] is not None and d["doc_date"] < datetime.now(timezone.utc) - timedelta(days=ALERT_MAX_AGE_DAYS)
             try:
-                res.events += self._ingest(engine, d, is_backfill=first_run)
+                res.events += self._ingest(engine, d, is_backfill=first_run or old)
                 res.items += 1
             except Exception as e:
                 log.warning("OGE %s failed: %s", d["doc_url"], e)

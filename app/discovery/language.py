@@ -35,6 +35,45 @@ SIGNALS: dict[str, tuple[str, str | None]] = {
     "RESEARCH_STAGE": (r"\b(research and development stage|early[- ]stage (technology|company)|prototype)\b", "RESEARCH"),
 }
 
+# Validation sample dv-2026-09-25 showed most HIGH/MEDIUM false positives came from legal / financial
+# boilerplate matching a signal keyword ("sole source of gain", "qualified by these cautionary statements",
+# "Section 721 of the Defense Production Act", credit-agreement "take-or-pay or other prepayments").
+BOILERPLATE_RE = re.compile(
+    r"(sole source of (gain|recovery|return|repayment|payment)|qualified (in (its|their) entirety )?by (these|such|the|reference|materiality|"
+    r"the applicable|the term|education)|representations and warranties|defense production act of 1950|section 721\b|foreign person|"
+    r"national industrial security program|\bcfius\b|take[- ]or[- ]pay or other prepayments|gas imbalances|well[- ]known seasoned issuer|"
+    r"forward[- ]looking statements|safe harbor|indicate by check mark|notwithstanding anything|escrow agent|indemnif)", re.I)
+HEADING_RE = re.compile(r"^\s*(section|article|item|exhibit|schedule)\s+[\w.()]+\s", re.I)
+GOV_ACTION_RE = re.compile(r"\b(award(ed|s)?|grants?|granted|loan( guarantee)?|contract(s|ed)?|offtake|funding|funded|investment|"
+                           r"invest(ed|s)?|equity|selected|price floor|agreements?|purchase order|obligated)\b", re.I)
+RD_EXPENSE_RE = re.compile(r"research and development\b.{0,40}\bexpense", re.I)
+LICENSE_CONTEXT_RE = re.compile(r"\b(royalt\w*|licens\w*|milestone|vest\w*)\b", re.I)
+INVESTOR_CONTEXT_RE = re.compile(r"(investment arm|owns? (more than|approximately|over|about) \d+(\.\d+)? ?%|holds? .{0,60}% of (our|the company'?s|its) "
+                                 r"(outstanding|shares)|beneficial owner of)", re.I)
+TERMINATED_RE = re.compile(r"\bterminat(e|ed|es|ion|ing)\b", re.I)
+CHANNEL_RE = re.compile(r"(app stores?|retailers such as|through (leading )?retailers|marketplaces? such as|rankings circulated)", re.I)
+
+
+def signal_ok(label: str, sentence: str) -> bool:
+    """False when a keyword match is boilerplate / context that does not support the signal."""
+    if BOILERPLATE_RE.search(sentence) or HEADING_RE.match(sentence):
+        return False
+    if label == "GOVERNMENT_BACKED" and not GOV_ACTION_RE.search(sentence):
+        return False  # "critical mineral", "national security" prose without an award / loan / contract
+    if label == "FIRST_COMMERCIAL_PRODUCTION" and LICENSE_CONTEXT_RE.search(sentence):
+        return False  # "royalties ... after the first commercial sale" is a license term, not a milestone reached
+    if label == "RESEARCH_STAGE" and RD_EXPENSE_RE.search(sentence):
+        return False
+    return True
+
+
+def relation_ok(sentence: str) -> bool:
+    """False when a counterparty mention is not a commercial relationship: an investor stake, a terminated
+    agreement, a sales channel (app stores / retailers) or boilerplate."""
+    return not (BOILERPLATE_RE.search(sentence) or INVESTOR_CONTEXT_RE.search(sentence) or TERMINATED_RE.search(sentence)
+                or CHANNEL_RE.search(sentence))
+
+
 HEDGE_RE = re.compile(r"\b(may|might|could|potential(ly)?|expect(s|ed)? to|intend(s)? to|plan(s|ned)? to|anticipate(s)?|no assurance|there can be no|if we|seek(s|ing)? to|aim(s)? to|hope)\b", re.I)
 
 STAGES = ["RESEARCH", "PRE-COMMERCIAL", "PILOT", "CUSTOMER_QUALIFICATION", "EARLY_COMMERCIAL", "PRODUCTION_RAMP",
@@ -142,6 +181,8 @@ def relations_in(sentence: str) -> list[Relation]:
             strength = 0.0  # naming a competitor/supplier is not customer validation
         if hedged:
             strength *= 0.3  # "X is a potential customer" != "X signed a five-year supply agreement"
+        if not relation_ok(sentence):
+            strength = 0.0  # investor stake / terminated agreement / sales channel / boilerplate
         out.append(Relation(canon, cat, rel, agr, hedged, round(strength, 3)))
     return out
 
@@ -158,7 +199,7 @@ def sentence_hash(s: str) -> str:
 
 def signals_in(sentence: str) -> list[str]:
     s = sentence.lower()
-    labels = [label for label, (rx, _stage) in SIGNALS.items() if re.search(rx, s)]
+    labels = [label for label, (rx, _stage) in SIGNALS.items() if re.search(rx, s) and signal_ok(label, sentence)]
     # "We depend on a sole supplier" describes concentration risk, not that the issuer IS a
     # scarce supplier.  Directionless keyword matching previously promoted risk-factor prose.
     dependency = re.search(
