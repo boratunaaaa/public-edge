@@ -178,20 +178,24 @@ def live_groups(conn: Connection, payload: dict, dry_run: bool, run_id: str) -> 
 # ------------------------------------------------------------------ 3. multi-owner Form 4
 
 def cleanup_multi_owner(conn: Connection, run_id: str, dry_run: bool) -> dict:
-    accs = [a for (a,) in conn.execute(select(insider_transactions.c.accession).where(and_(
+    accs = {a for (a,) in conn.execute(select(insider_transactions.c.accession).where(and_(
         insider_transactions.c.joint_owner_ciks.isnot(None), insider_transactions.c.category == "OPEN_MARKET_BUY",
-        insider_transactions.c.is_derivative.is_(False))).distinct()).all()]
+        insider_transactions.c.is_derivative.is_(False))).distinct()).all()}
+    # one pass over buy events (a LIKE 'IOMB:acc:%' per filing cannot use the unique index)
+    by_acc: dict[str, list[dict]] = defaultdict(list)
+    for r in conn.execute(select(events).where(and_(
+            events.c.event_type == "INSIDER_OPEN_MARKET_BUY", events.c.superseded.is_(False)))).mappings():
+        parts = r["dedupe_key"].split(":", 2)
+        if len(parts) == 3 and parts[1] in accs:
+            by_acc[parts[1]].append(dict(r))
+    rows_by_acc: dict[str, list] = defaultdict(list)
+    for r in conn.execute(select(insider_transactions).where(and_(
+            insider_transactions.c.accession.in_(list(by_acc)), insider_transactions.c.category == "OPEN_MARKET_BUY",
+            insider_transactions.c.is_derivative.is_(False)))).mappings() if by_acc else []:
+        rows_by_acc[r["accession"]].append(r)
     n = created = 0
-    for acc in accs:
-        old = [dict(r) for r in conn.execute(select(events).where(and_(
-            events.c.event_type == "INSIDER_OPEN_MARKET_BUY", events.c.superseded.is_(False),
-            events.c.dedupe_key.like(f"IOMB:{acc}:%")))).mappings().all()]
-        if not old:
-            continue
-        rows = conn.execute(select(insider_transactions).where(and_(
-            insider_transactions.c.accession == acc, insider_transactions.c.category == "OPEN_MARKET_BUY",
-            insider_transactions.c.is_derivative.is_(False)))).mappings().all()
-        expected = {f"IOMB:{acc}:{k}"[:200] for k in purchase_groups(conn, rows)}
+    for acc, old in by_acc.items():
+        expected = {f"IOMB:{acc}:{k}"[:200] for k in purchase_groups(conn, rows_by_acc[acc])}
         stale = [e for e in old if e["dedupe_key"] not in expected]
         if not stale:
             continue
