@@ -585,3 +585,31 @@ def test_tenk_history_reads_archived_submissions_files():
     fl = all_annual_filings(sub, date(2020, 1, 1), getter)
     assert [f["accession"] for f in fl] == ["a23", "a24", "r25"]
     assert len(fetched) == 1 and fetched[0].endswith("submissions-001.json")  # the 2001-2010 archive is out of range
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_tenk_successor_can_be_rebased_twice(engine, monkeypatch):
+    """Two late predecessors for the same successor (e.g. a 10-KT then a 10-K) must not collide."""
+    from app.db.models import events, tenk_filings
+    from app.tenk import engine as te
+    base = _doc([_risk(i) for i in range(20)], BASE_MDNA)
+    gc = _doc([_risk(i) for i in range(20)], BASE_MDNA + [
+        "There is substantial doubt about our ability to continue as a going concern within one year after issuance. ",
+        "Our independent registered public accounting firm has expressed substantial doubt about our ability to "
+        "continue as a going concern. "])
+    docs = {"c0": base, "c1": base, "c2": base, "c3": gc}
+    monkeypatch.setattr(te, "fetch_text", lambda cik, f: docs[f["accession"]])
+
+    def f(acc, d):
+        return {"accession": acc, "form": "10-K", "filing_date": d, "accepted_at": None, "primary_doc": "k.htm", "period": None}
+    te.process_filing(engine, "0001953926", "ZBIO", "Z", f("c0", date(2022, 3, 1)), is_backfill=True)
+    te.process_filing(engine, "0001953926", "ZBIO", "Z", f("c3", date(2023, 6, 1)), is_backfill=True)  # compared with c0
+    te.process_filing(engine, "0001953926", "ZBIO", "Z", f("c1", date(2022, 9, 1)), is_backfill=True)  # rebase #1
+    te.process_filing(engine, "0001953926", "ZBIO", "Z", f("c2", date(2023, 1, 1)), is_backfill=True)  # rebase #2
+    with engine.connect() as c:
+        live = c.execute(select(tenk_filings.c.accession, tenk_filings.c.prev_accession).where(tenk_filings.c.status == "ok")).all()
+        n_sup = c.execute(text("SELECT count(*) FROM tenk_filings WHERE status = 'superseded'")).scalar()
+        evs = c.execute(select(events.c.payload).where(events.c.superseded.is_(False))).scalars().all()
+    assert dict(live)["c3"] == "c2" and n_sup == 2
+    assert len(evs) == 1 and evs[0]["prev_accession"] == "c2"

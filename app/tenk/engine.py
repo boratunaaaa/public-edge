@@ -222,11 +222,13 @@ def _recompare_successor(conn, row: dict, name: str | None) -> str | None:
         return _compare_and_emit(conn, nxt, None, name)["status"]
     from sqlalchemy import text as sql
     run_id = f"tenk-late-predecessor-{date.today().isoformat()}"
-    conn.execute(sql("UPDATE tenk_filings SET status = 'superseded', accession = left(accession || '#rp', 25) WHERE id = :i"),
-                 {"i": nxt["id"]})
+    # unique suffix per supersession: the same filing can be re-based more than once (10-KT + 10-K pairs)
+    tag = f"#{nxt['id'] % 65536:04x}"  # row ids differ per re-creation; 20 + 5 = 25 chars
+    conn.execute(sql("UPDATE tenk_filings SET status = 'superseded', accession = left(accession, 20) || :t WHERE id = :i"),
+                 {"i": nxt["id"], "t": tag})
     conn.execute(sql("""UPDATE events SET superseded = true, superseded_reason = 'TENK_PREDECESSOR_ARRIVED',
-                        dedupe_key = left(dedupe_key || '#rp', 200) WHERE dedupe_key = :k AND NOT superseded"""),
-                 {"k": f"tenk:{nxt['accession']}"})
+                        dedupe_key = left(dedupe_key || '#rp' || :t, 200) WHERE dedupe_key = :k AND NOT superseded"""),
+                 {"k": f"tenk:{nxt['accession']}", "t": f"{nxt['id']}"})
     conn.execute(sql("""INSERT INTO data_cleanup_audit (run_id, action, table_name, row_id, before, after, reason, dry_run)
                         VALUES (:r, 'supersede', 'tenk_filings', :i, CAST(:b AS jsonb), '{"status": "superseded"}'::jsonb,
                                 :why, false)"""),
