@@ -23,6 +23,13 @@ _HOST_RPS = {
     "api.telegram.org": 1.0,
     "api.tiingo.com": 0.013,  # free tier: 50 requests / hour
     "extapps2.oge.gov": 0.5,
+    # global markets (development): polite rates, TSX robots.txt asks for a 6 s crawl delay
+    "kap.org.tr": 0.5,
+    "asx.com.au": 1.0,
+    "asx.api.markitdigital.com": 1.0,
+    "tsx.com": 1 / 6,
+    "newswire.ca": 0.5,
+    "globenewswire.com": 0.5,
 }
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 
