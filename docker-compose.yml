@@ -16,6 +16,10 @@ x-app: &app
     ALERT_MIN_PRIORITY: ${ALERT_MIN_PRIORITY:-5}
     MAX_ALERTS_PER_HOUR: ${MAX_ALERTS_PER_HOUR:-8}
     BACKFILL_YEARS: ${BACKFILL_YEARS:-5}
+    # optional: delisted-security prices (operator's own free Tiingo key; empty = SEC-only survivorship handling)
+    TIINGO_API_KEY: ${TIINGO_API_KEY:-}
+    # optional: hit-rate episode windows per event family, e.g. {"NEWS": 45}
+    EPISODE_WINDOWS: ${EPISODE_WINDOWS:-}
     SEC_MAX_RPS: "3"
   depends_on:
     db:

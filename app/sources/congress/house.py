@@ -197,10 +197,15 @@ class SenateSource(Source):
     """Official Senate eFD (efdsearch.senate.gov) is behind Akamai bot protection that returns
     HTTP 403 to all non-browser clients (verified from the server and a residential IP on
     2026-09-24). The previously popular third-party mirrors are also 403. Registered disabled so
-    the gap is visible instead of silently missing."""
+    the gap is visible instead of silently missing.
+
+    Re-checked 2026-09-25: eFD still 403; the public GitHub mirror (senate-stock-watcher-data) is
+    reachable but stops in December 2020 and is a secondary scrape, the S3 mirror is 403. No legal,
+    primary, current source exists -> SENATE_UNAVAILABLE. Bot protection is never circumvented."""
     name = "congress_senate"
     enabled = False
-    disabled_reason = "efdsearch.senate.gov returns HTTP 403 (Akamai bot protection) to automated clients; no official machine-readable alternative"
+    disabled_reason = ("SENATE_UNAVAILABLE: efdsearch.senate.gov returns HTTP 403 (Akamai) to automated clients; the only "
+                       "reachable mirror ends in 2020 and is not a primary source. Congress data = House only.")
 
     def run_live(self, engine: Engine) -> RunResult:
         return RunResult()

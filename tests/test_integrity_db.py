@@ -317,3 +317,29 @@ def test_oge_first_run_is_history_and_new_documents_alert(engine, monkeypatch):
     assert first.items == 1 and second.items == 1
     assert evs[0]["is_backfill"] and not evs[1]["is_backfill"] and evs[1]["priority"] >= 5
     assert evs[1]["payload"]["sales"] == 1 and tick == "ZBIO"  # explicit "(TICKER)" only
+
+
+def test_stored_news_rows_get_timestamp_confidence_and_story_fields(engine):
+    from datetime import datetime, timezone
+    from app.db.models import news_items, news_story_clusters
+    from app.integrity.news_backfill import score_existing
+    seen = datetime(2026, 9, 1, 14, tzinfo=timezone.utc)
+    with engine.begin() as c:
+        cid = c.execute(news_story_clusters.insert().values(ticker="ZBIO", cik="0001953926", primary_item_id=1, public_at=seen,
+                                                            headline="Zenas signs deal").returning(news_story_clusters.c.id)).scalar()
+        c.execute(news_items.insert(), [
+            dict(source="sec_8k", source_tier=1, url="https://www.sec.gov/a", guid="acc1", headline="Zenas signs deal", snippet="x",
+                 original_published_at=seen - timedelta(days=200), first_seen_at=seen, cluster_id=cid),
+            dict(source="news_yahoo_watchlist", source_tier=3, url="https://finance.yahoo.com/b?utm_source=x", guid="y1",
+                 headline="Zenas deal (copy)", snippet="x", original_published_at=None, first_seen_at=seen, cluster_id=cid)])
+        eid = create_event(c, event_type="MATERIAL_NEWS", dedupe_key="NEWS:x", public_date=seen.date(), ticker="ZBIO", title="t",
+                           payload={"cluster_id": cid}, source_url="u")
+    out = score_existing(engine)
+    assert out["items_scored"] == 2 and out["clusters_updated"] == 1 and out["events_updated"] == 1
+    with engine.connect() as c:
+        conf = dict(c.execute(select(news_items.c.source, news_items.c.timestamp_confidence)).all())
+        cl = c.execute(select(news_story_clusters)).mappings().first()
+        ev = c.execute(select(events.c.payload).where(events.c.id == eid)).scalar()
+    assert conf == {"sec_8k": "HIGH", "news_yahoo_watchlist": "LOW"}
+    assert cl["syndicated_count"] == 1 and cl["timestamp_confidence"] == "HIGH" and cl["first_seen_at"] == seen
+    assert ev["timestamp_confidence"] == "HIGH"

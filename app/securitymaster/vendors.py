@@ -47,7 +47,23 @@ def parse_listing_file(raw: bytes) -> list[dict]:
                 continue
             out.append({"symbol": r["ticker"].upper()[:16], "exchange": r["exchange"][:24], "start_date": s, "end_date": e,
                         "asset_type": r["assetType"][:16], "source": "tiingo_listing_file"})
-    return out
+    return merge_periods(out)
+
+
+def merge_periods(rows: list[dict]) -> list[dict]:
+    """One row per (symbol, exchange): the file repeats pairs (case variants, relistings) - keep the widest span."""
+    best: dict[tuple, dict] = {}
+    for r in rows:
+        k = (r["symbol"], r["exchange"])
+        cur = best.get(k)
+        if cur is None:
+            best[k] = dict(r)
+            continue
+        starts = [d for d in (cur["start_date"], r["start_date"]) if d]
+        ends = [d for d in (cur["end_date"], r["end_date"]) if d]
+        cur["start_date"] = min(starts) if starts else None
+        cur["end_date"] = max(ends) if ends else None
+    return list(best.values())
 
 
 def load_listing_periods(conn: Connection) -> int:

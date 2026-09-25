@@ -7,6 +7,7 @@
   python -m app.cli revalidate-returns                  # verify price identity of computed returns
   python -m app.cli walkforward                         # walk-forward threshold study (test windows only)
   python -m app.cli quality                             # data-quality overview (JSON)
+  python -m app.cli news-score                          # timestamp confidence / story fields for stored news
   python -m app.cli validation-sample SAMPLE_ID
   python -m app.cli validation-label SAMPLE_ID TICKER LABEL REASON[,REASON] "notes" LABELER
   python -m app.cli validation-precision SAMPLE_ID
@@ -71,6 +72,9 @@ def main(argv: list[str]) -> int:
     elif cmd == "walkforward":
         from app.backtest.walkforward import run_all
         _print(run_all(eng))
+    elif cmd == "news-score":
+        from app.integrity.news_backfill import score_existing
+        _print(score_existing(eng))
     elif cmd == "quality":
         from app.integrity.quality_report import overview
         with eng.connect() as conn:

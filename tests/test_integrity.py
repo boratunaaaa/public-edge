@@ -234,6 +234,15 @@ def test_walk_forward_scores_only_realized_outcomes(monkeypatch):
     assert s["episodes"] < 120  # late-2023 events were excluded as not yet realized
 
 
+def test_walk_forward_window_failing_the_data_gate_reports_no_rate(monkeypatch):
+    from app.backtest import walkforward as W
+    rows = [row(f"C{k}", date(2021, 1, 1), "win") for k in range(40)] + \
+        [row(f"U{k}", date(2021, 1, 1), "unresolved", reason="NO_PRICE_DATA") for k in range(20)]
+    monkeypatch.setattr(Q, "load_rows", lambda *a, **k: rows)
+    s = W.score_window(None, "INSIDER_OPEN_MARKET_BUY", W.Candidate("all", "TRUE", {}), date(2021, 1, 1), date(2022, 1, 1), 90)
+    assert s["rate"] is None and s["rate_withheld"] and s["unresolved_share"] > 0.1
+
+
 # ------------------------------------------------------------------ Form 4 multi-owner + trusts
 
 def test_row_is_attributed_only_when_its_text_names_one_owner():
@@ -535,6 +544,15 @@ def test_form345_symbols_aggregate_point_in_time_intervals():
     assert agg[("0000000001", "FB")] == [date(2021, 1, 2), date(2022, 5, 15), 2]
     assert agg[("0000000001", "META")][0] == date(2022, 6, 20)
     assert ("0000000002", "NONE") not in agg
+
+
+def test_listing_periods_are_merged_per_symbol_and_exchange():
+    from app.securitymaster.vendors import merge_periods
+    rows = [{"symbol": "ABC", "exchange": "NYSE", "start_date": date(2015, 1, 1), "end_date": date(2019, 1, 1)},
+            {"symbol": "ABC", "exchange": "NYSE", "start_date": date(2020, 1, 1), "end_date": date(2023, 1, 1)},
+            {"symbol": "ABC", "exchange": "NASDAQ", "start_date": date(2024, 1, 1), "end_date": None}]
+    got = {(r["symbol"], r["exchange"]): (r["start_date"], r["end_date"]) for r in merge_periods(rows)}
+    assert got == {("ABC", "NYSE"): (date(2015, 1, 1), date(2023, 1, 1)), ("ABC", "NASDAQ"): (date(2024, 1, 1), None)}
 
 
 def test_sector_mapping():

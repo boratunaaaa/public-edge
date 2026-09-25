@@ -94,10 +94,16 @@ replication of Cohen, Malloy & Pomorski 2012) and holdings increase.
 
 ## Telegram messages (Turkish, for non-experts)
 
-Every alert: company + size + price context, "Ne oldu?", "Neden önemli?", "Geçmiş başarı oranı",
-risk note, "Dikkat" (plain-language risks), source link, and a 6-month price chart.
-**Historical hit rate** = issuer-equal-weighted share of comparable past events whose stock beat
-the S&P 500 over 3 months. It includes a 95% interval and is never presented as an investment score.
-At least 30 distinct issuers are required; any mature sample omitted for missing price/benchmark
-data disables the percentage (survivorship-bias fail-closed). The weekly report carries an
-alert scorecard (how the alerts actually sent 1–4 months ago performed).
+Every alert: company + size + price context, "Ne oldu?", "Neden önemli?", historical hit rate, risk note,
+"Dikkat" (plain-language risks), source link, and a 6-month price chart. **Geçmiş başarı oranı** = share of
+comparable past EPISODES whose stock beat the S&P 500 over 3 months, company-equal weighted, from the
+no-look-ahead backtest — shown ONLY when the data-quality gate says TRUSTED; otherwise the message says
+"gösterilmiyor" with a one-line reason (e.g. how many past samples lack prices). No disclaimers.
+The weekly report's alert scorecard counts beat / not beat / not measurable (no silent exclusion).
+
+## Data integrity (2026-09-25)
+
+See `docs/DATA_INTEGRITY.md`: security master, survivorship handling, episode + company-equal hit rates,
+TRUSTED/PARTIAL/BLOCKED gate, walk-forward, Form 4 joint filings + beneficial owners, legacy cleanup,
+news dedupe/timestamps, point-in-time news backfill, contract mapping confidence, OGE, Data Quality tab
+(`/data-quality`).

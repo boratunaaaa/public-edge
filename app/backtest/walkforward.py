@@ -90,8 +90,10 @@ def score_window(conn: Connection, event_type: str, cand: Candidate, lo: date, h
     """Company-equal hit rate on episodes that START in [lo, hi) and are REALIZED by hi."""
     rows = [r for r in Q.load_rows(conn, event_type, cand.cond, cand.params, horizon, as_of=hi) if r.public_date >= lo]
     st = Q.summarize(rows, horizon, Q.episode_windows().get(Q.family_of(event_type), horizon))
-    return {"rate": st.company_equal_rate, "companies": st.company_n, "episodes": st.resolved_episodes,
-            "unresolved_share": round(st.unresolved_share, 4), "status": st.status}
+    ok = st.company_equal_rate is not None and st.company_n >= Q.MIN_COMPANIES and st.unresolved_share <= Q.PARTIAL_MAX_UNRESOLVED
+    # a window that fails the data gate reports NO rate (its resolved subset could be survivorship-biased)
+    return {"rate": st.company_equal_rate if ok else None, "rate_withheld": not ok, "companies": st.company_n,
+            "episodes": st.resolved_episodes, "unresolved_share": round(st.unresolved_share, 4), "status": st.status}
 
 
 def usable(s: dict) -> bool:
