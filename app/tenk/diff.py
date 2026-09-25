@@ -97,7 +97,7 @@ def fingerprint(s: str) -> int:
 # ------------------------------------------------------------------ topics
 
 TOPICS: dict[str, re.Pattern] = {
-    "GOING_CONCERN": re.compile(r"going concern|substantial doubt", re.I),
+    "GOING_CONCERN": re.compile(r"substantial doubt", re.I),
     "LIQUIDITY": re.compile(r"\bliquidity\b|capital resources|working capital|cash (and cash equivalents )?(will|would|may) (be|not be) sufficient|"
                             r"fund (our )?operations", re.I),
     "CAPITAL_REQUIREMENTS": re.compile(r"(raise|obtain|need|require)\w* (substantial )?additional (capital|financing|funds)", re.I),
@@ -121,8 +121,17 @@ NEGATIVE = re.compile(r"not (be )?sufficient|insufficient|may not be able|unable
 SUFFICIENT = re.compile(r"(sufficient|adequate) to (fund|meet|satisfy).{0,120}(at least|next) (the )?(next )?(<n>|twelve|12) months", re.I)
 
 
+# "Management evaluates whether conditions raise substantial doubt...", "could raise substantial doubt"
+# are accounting-policy / hypothetical boilerplate, not a going-concern conclusion.
+GC_HEDGE = re.compile(r"\b(whether|could|may|might|if|evaluat\w*|no substantial doubt|alleviated|would)\b", re.I)
+CLASSIFIER_VERSION = 2
+
+
 def topics_of(sentence: str) -> list[str]:
-    return [t for t, rx in TOPICS.items() if rx.search(sentence)]
+    out = [t for t, rx in TOPICS.items() if rx.search(sentence)]
+    if "GOING_CONCERN" in out and GC_HEDGE.search(sentence):
+        out.remove("GOING_CONCERN")
+    return out
 
 
 # ------------------------------------------------------------------ profiles + diff
@@ -142,6 +151,7 @@ def build_profile(items: dict[str, str]) -> dict:
                 tagged[str(h)] = [tp, bool(NEGATIVE.search(s)), bool(SUFFICIENT.search(normalize(s))), signature(s)]
         prof[sec] = {"n": len(sents), "hashes": sorted(set(hashes)),
                      "tagged": tagged, "text_hash": hashlib.sha1(normalize(txt).encode()).hexdigest()}
+    prof["_meta"] = {"v": CLASSIFIER_VERSION}
     return prof
 
 
@@ -199,9 +209,9 @@ def compare(old: dict, new: dict, new_texts: dict[str, str] | None = None) -> li
 
     # going concern: presence flips are always material
     gc_old, gc_new = tagged_set(old, None, "GOING_CONCERN"), tagged_set(new, None, "GOING_CONCERN")
-    if gc_new and not gc_old:
+    if len(gc_new) >= MIN_TOPIC_SENTENCES and not gc_old:
         out.append(Change("GOING_CONCERN", "NEW_GOING_CONCERN", "HIGH", len(gc_new), 0, None, None, examples(gc_new)))
-    elif gc_old and not gc_new:
+    elif len(gc_old) >= MIN_TOPIC_SENTENCES and not gc_new:
         out.append(Change("GOING_CONCERN", "REMOVED_GOING_CONCERN", "HIGH", 0, len(gc_old)))
 
     # overall risk-factor shift (count of genuinely new vs removed risk statements)

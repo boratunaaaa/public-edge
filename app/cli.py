@@ -13,6 +13,7 @@
   python -m app.cli validation-precision SAMPLE_ID
   python -m app.cli alpha                               # ALPHA VALIDATION verdict per signal family
   python -m app.cli tenk-live | tenk-backfill [MAX_DOCS]  # 10-K text-change engine
+  python -m app.cli tenk-reclassify [--apply]           # supersede (never delete) filings of an older classifier
   python -m app.cli insider-profiles                    # refresh insider person track records
   python -m app.cli paper-init | paper-run | paper-status
   python -m app.cli paper-propose EVENT_ID [--research] # gate + PENDING proposal (never an order)
@@ -110,6 +111,9 @@ def main(argv: list[str]) -> int:
     elif cmd == "tenk-backfill":
         from app.tenk.engine import run_backfill
         _print(run_backfill(eng, max_docs=int(argv[1]) if len(argv) > 1 else 120))
+    elif cmd == "tenk-reclassify":
+        from app.tenk.engine import supersede_old_classifier
+        _print(supersede_old_classifier(eng, dry_run="--apply" not in argv))
     elif cmd == "insider-profiles":
         from app.signals.insider_profile import refresh_all
         _print(refresh_all(eng))

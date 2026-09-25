@@ -284,3 +284,41 @@ def run_backfill(engine: Engine, max_docs: int = 120, time_budget_s: float = 900
             save_job_state(conn, name, {"done_ciks": sorted(done), "done_quarters": sorted(finished_q)}, status="idle")
     out["quarters_done"] = len(finished_q)
     return out
+
+
+def supersede_old_classifier(engine: Engine, dry_run: bool = True) -> dict:
+    """Filings fingerprinted by an older classifier are re-processed, never deleted: the old filing row
+    is renamed (accession + '#v<n>') and marked superseded, its TENK_CHANGE event is superseded (kept,
+    excluded from statistics) and every change is written to data_cleanup_audit."""
+    import uuid
+
+    from sqlalchemy import text as sql
+
+    from app.tenk.diff import CLASSIFIER_VERSION
+    run_id = f"tenk-reclassify-{date.today().isoformat()}-{uuid.uuid4().hex[:6]}"
+    with engine.begin() as conn:
+        old = conn.execute(sql("""SELECT id, accession, COALESCE((profile->'_meta'->>'v')::int, 1) v FROM tenk_filings
+                                  WHERE status <> 'superseded' AND COALESCE((profile->'_meta'->>'v')::int, 1) < :v"""),
+                           {"v": CLASSIFIER_VERSION}).mappings().all()
+        evs = conn.execute(sql("""SELECT id, dedupe_key FROM events WHERE event_type = 'TENK_CHANGE' AND NOT superseded
+                                  AND dedupe_key = ANY(:k)"""), {"k": [f"tenk:{r['accession']}" for r in old]}).mappings().all()
+        out = {"run_id": run_id, "dry_run": dry_run, "filings": len(old), "events": len(evs)}
+        if dry_run:
+            return out
+        for r in old:
+            new_acc = f"{r['accession']}#v{r['v']}"[:25]
+            conn.execute(sql("UPDATE tenk_filings SET status = 'superseded', accession = :a WHERE id = :i"), {"a": new_acc, "i": r["id"]})
+            conn.execute(sql("""INSERT INTO data_cleanup_audit (run_id, action, table_name, row_id, before, after, reason, dry_run)
+                                VALUES (:r, 'supersede', 'tenk_filings', :i, CAST(:b AS jsonb), CAST(:a AS jsonb), :why, false)"""),
+                         {"r": run_id, "i": r["id"], "b": f'{{"accession": "{r["accession"]}", "status": "ok"}}',
+                          "a": f'{{"accession": "{new_acc}", "status": "superseded"}}',
+                          "why": f"10-K classifier v{r['v']} -> v{CLASSIFIER_VERSION} (going-concern boilerplate fix)"})
+        for e in evs:
+            conn.execute(sql("""UPDATE events SET superseded = true, superseded_reason = 'TENK_CLASSIFIER_OLD',
+                                dedupe_key = left(dedupe_key || '#old', 200) WHERE id = :i"""), {"i": e["id"]})
+            conn.execute(sql("""INSERT INTO data_cleanup_audit (run_id, action, table_name, row_id, before, after, reason, dry_run)
+                                VALUES (:r, 'supersede', 'events', :i, CAST(:b AS jsonb), '{"superseded": true}'::jsonb, :why, false)"""),
+                         {"r": run_id, "i": e["id"], "b": f'{{"dedupe_key": "{e["dedupe_key"]}"}}',
+                          "why": "TENK_CHANGE from an older 10-K classifier; re-created by the current one"})
+        save_job_state(conn, "tenk_backfill", {}, status="idle")  # re-walk the quarters; unchanged filings are skipped
+    return out

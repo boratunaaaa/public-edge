@@ -605,7 +605,7 @@ def alpha_page():
 
 @app.get("/api/paper")
 def api_paper():
-    from app.db.models import paper_accounts, paper_positions, proposed_trades, tenk_changes
+    from app.db.models import paper_accounts, paper_positions, proposed_trades, tenk_changes, tenk_filings
     from app.paper.ledger import account_metrics
     with get_engine().connect() as conn:
         ids = [r[0] for r in conn.execute(select(paper_accounts.c.id).order_by(paper_accounts.c.id)).all()]
@@ -615,7 +615,8 @@ def api_paper():
                                              .order_by(paper_positions.c.id)).mappings()]
         tk = [dict(r) for r in conn.execute(select(tenk_changes.c.ticker, tenk_changes.c.filing_date, tenk_changes.c.change_type,
                                                    tenk_changes.c.materiality, tenk_changes.c.section, tenk_changes.c.n_new)
-                                            .where(tenk_changes.c.materiality != "LOW")
+                                            .where(and_(tenk_changes.c.materiality != "LOW", tenk_changes.c.filing_id.in_(
+                                                select(tenk_filings.c.id).where(tenk_filings.c.status == "ok"))))
                                             .order_by(desc(tenk_changes.c.id)).limit(30)).mappings()]
         prof = [dict(r) for r in conn.execute(text("""SELECT label, count(*) n FROM insider_profiles GROUP BY 1 ORDER BY 2 DESC""")).mappings()]
     return _jsonable({"accounts": accounts, "proposals": props, "open_positions": pos, "tenk_changes": tk, "insider_labels": prof})

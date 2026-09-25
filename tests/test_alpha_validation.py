@@ -54,6 +54,7 @@ def test_tenk_new_going_concern_and_liquidity_deterioration():
     old = build_profile(extract_items(_doc([_risk(i) for i in range(20)], BASE_MDNA)))
     mdna = BASE_MDNA + [
         "There is substantial doubt about our ability to continue as a going concern within one year after issuance. ",
+        "Our independent registered public accounting firm has expressed substantial doubt about our ability to continue as a going concern. ",
         "Our cash and cash equivalents will not be sufficient to fund our operations beyond the second quarter of the year. ",
         "We may be unable to obtain additional financing to maintain adequate liquidity on acceptable terms or at all. "]
     items = extract_items(_doc([_risk(i) for i in range(20)], mdna))
@@ -63,6 +64,17 @@ def test_tenk_new_going_concern_and_liquidity_deterioration():
     # and the reverse direction is recognised as its removal
     back = {c.change_type for c in compare(build_profile(items), old)}
     assert "REMOVED_GOING_CONCERN" in back
+
+
+def test_tenk_going_concern_policy_boilerplate_is_not_a_warning():
+    from app.tenk.diff import build_profile, compare, extract_items
+    old = build_profile(extract_items(_doc([_risk(i) for i in range(20)], BASE_MDNA)))
+    mdna = BASE_MDNA + [
+        "Management evaluates whether there are conditions or events that raise substantial doubt about the Company's ability to continue. ",
+        "A default under the credit agreement could raise substantial doubt about our ability to continue as a going concern. ",
+        "There is substantial doubt about our ability to continue as a going concern within one year after issuance. "]
+    items = extract_items(_doc([_risk(i) for i in range(20)], mdna))
+    assert not any("GOING_CONCERN" in c.change_type for c in compare(old, build_profile(items), items))
 
 
 def test_tenk_risk_increase_needs_many_new_statements():
@@ -230,7 +242,8 @@ def test_tenk_process_filing_creates_typed_changes_and_event(engine, monkeypatch
     from app.tenk import engine as te
     docs = {"a1": _doc([_risk(i) for i in range(20)], BASE_MDNA),
             "a2": _doc([_risk(i) for i in range(20)], BASE_MDNA + [
-                "There is substantial doubt about our ability to continue as a going concern within one year after issuance. "])}
+                "There is substantial doubt about our ability to continue as a going concern within one year after issuance. ",
+                "Our independent registered public accounting firm has expressed substantial doubt about our ability to continue as a going concern. "])}
     monkeypatch.setattr(te, "fetch_text", lambda cik, f: docs[f["accession"]])
     f1 = {"accession": "a1", "form": "10-K", "filing_date": date(2023, 3, 1), "accepted_at": te.acceptance_to_utc("2023-03-01T16:30:00Z"),
           "primary_doc": "k.htm", "period": "2022-12-31"}
@@ -402,3 +415,23 @@ def test_cached_vendor_series_is_used_before_the_live_provider(engine):
         _bars(c, "OLDCO", date(2019, 1, 2), 60)
         got = ensure_prices(c, "OLDCO", date(2019, 1, 2), date(2019, 3, 15), provider=Boom())
     assert len(got) >= 50
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_old_classifier_rows_are_superseded_not_deleted(engine):
+    from app.db.models import data_cleanup_audit, events, tenk_filings
+    from app.tenk.engine import supersede_old_classifier
+    with engine.begin() as c:
+        c.execute(tenk_filings.insert().values(cik="0001953926", accession="0000000001-24-000001", form="10-K",
+                                               filing_date=date(2024, 3, 1), source_url="u", profile={}, status="ok"))
+        _event(c, et="TENK_CHANGE", key="tenk:0000000001-24-000001", payload={"direction": "NEGATIVE"})
+    assert supersede_old_classifier(engine)["filings"] == 1  # dry run changes nothing
+    r = supersede_old_classifier(engine, dry_run=False)
+    assert r["filings"] == 1 and r["events"] == 1
+    with engine.connect() as c:
+        f = c.execute(select(tenk_filings)).mappings().one()
+        e = c.execute(select(events)).mappings().one()
+        n_audit = len(c.execute(select(data_cleanup_audit)).all())
+    assert f["status"] == "superseded" and f["accession"].endswith("#v1")
+    assert e["superseded"] and e["dedupe_key"].endswith("#old") and n_audit == 2
