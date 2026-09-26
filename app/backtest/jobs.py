@@ -89,9 +89,12 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
             if sym is None:
                 status = "no_data" if (today - pdate).days > 10 else "pending"
                 nodata += status == "no_data"
+                # a verified merger exit cannot price an event whose ENTRY has no predecessor price: kept apart from
+                # price recovery, never filled from the successor
+                why = "HISTORICAL_PRICE_STILL_MISSING" if _has_resolution(conn, cik) else _missing(missing, dl, pdate)
                 conn.execute(events.update().where(events.c.id == eid).values(
                     returns_status=status, returns_checked_at=now, returns_error=None, price_symbol=None,
-                    price_symbol_basis=None, missing_reason=_missing(missing, dl, pdate)))
+                    price_symbol_basis=None, missing_reason=why))
                 continue
             if sym in failed:
                 conn.execute(events.update().where(events.c.id == eid).values(
@@ -119,14 +122,16 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                 terminal = None  # the source's coverage ended before the delisting: no cash-out at a stale price
             if key in otc_keys:
                 terminal = None  # confirmed OTC continuation: the holding is valued on OTC quotes after the delisting
-            res = compute_returns(bars, spy, pdate, pat, as_of=today, terminal_date=terminal)
+            cexit = _corporate_exit(conn, cik, cache)
+            res = compute_returns(bars, spy, pdate, pat, as_of=today, terminal_date=terminal, corporate_exit=cexit)
             if not res:
                 status = "no_data" if (today - pdate).days > 10 else "pending"
                 nodata += status == "no_data"
                 conn.execute(events.update().where(events.c.id == eid).values(
                     returns_status=status, returns_checked_at=now, returns_error=None, price_symbol=sym,
-                    price_symbol_basis=basis_used, missing_reason=_missing(series_missing or "NO_PRICE_DATA", dl, pdate)
-                    if status == "no_data" else None))
+                    price_symbol_basis=basis_used,
+                    missing_reason=("HISTORICAL_PRICE_STILL_MISSING" if cexit is not None or _has_resolution(conn, cik)
+                                    else _missing(series_missing or "NO_PRICE_DATA", dl, pdate)) if status == "no_data" else None))
                 continue
             for r in res:
                 vals = dict(entry_date=r.entry_date, entry_price=r.entry_price, exit_date=r.exit_date, exit_price=r.exit_price,
@@ -140,6 +145,30 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                 price_symbol_basis=basis_used, missing_reason=None))
             done += 1
     return {"processed": done, "no_data": nodata, "retry": retry, "candidates": len(rows)}
+
+
+def _has_resolution(conn: Connection, cik: str | None) -> bool:
+    from app.corpactions import resolution_for
+    return resolution_for(conn, cik) is not None
+
+
+def _corporate_exit(conn: Connection, cik: str | None, cache: dict):
+    """Verified merger consideration for this issuer (CONFIRMED + SIMPLE), valued with the successor's real price."""
+    from app.corpactions import exit_value, resolution_for, successor_window
+    res = resolution_for(conn, cik)
+    if res is None:
+        return None
+    key = f"cae|{res['id']}"
+    if key not in cache:
+        bars = []
+        if float(res["share_ratio"] or 0) > 0 and res["successor_ticker"]:
+            lo, hi = successor_window(res)
+            try:
+                bars = ensure_prices(conn, res["successor_ticker"], lo, min(hi, date.today()))
+            except PriceFetchError:
+                bars = None
+        cache[key] = exit_value(res, bars) if bars is not None else None
+    return cache[key]
 
 
 class SectorBench:

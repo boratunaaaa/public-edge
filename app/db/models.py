@@ -321,7 +321,7 @@ event_returns = Table(
     Column("excess_ret", Float),
     Column("mae", Float),
     Column("mfe", Float),
-    Column("exit_basis", String(20), nullable=False, server_default="horizon"),  # horizon | delisting_terminal
+    Column("exit_basis", String(20), nullable=False, server_default="horizon"),  # horizon | delisting_terminal | merger_cash | merger_stock | merger_mixed
     # sector-matched benchmark (SPDR sector ETF of the issuer's SIC sector) over the same holding period
     Column("sector_etf", String(8)),
     Column("sector_ret", Float),
@@ -1055,3 +1055,29 @@ provider_raw = Table(
     Column("body_gz", LargeBinary, nullable=False),
 )
 Index("ix_provider_raw_provider_ref", provider_raw.c.provider, provider_raw.c.request_ref)
+
+# Verified merger / acquisition consideration used to RESOLVE A POSITION'S EXIT (never to fabricate historical
+# prices of the predecessor). Only CONFIRMED + SIMPLE rows are used by the backtest.
+corporate_action_resolution = Table(
+    "corporate_action_resolution", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("security_id", String(32), nullable=False),  # CIK:<predecessor cik>
+    Column("action_type", String(24), nullable=False),  # STOCK_MERGER | CASH_MERGER | MIXED_MERGER
+    Column("announcement_date", Date),
+    Column("effective_date", Date, nullable=False),
+    Column("predecessor_cik", String(10), nullable=False, index=True),
+    Column("successor_cik", String(10)),
+    Column("predecessor_ticker", String(16)),
+    Column("successor_ticker", String(16)),
+    Column("cash_component", Numeric(18, 6)),
+    Column("share_ratio", Numeric(18, 8)),
+    Column("currency", String(3), nullable=False, server_default="USD"),
+    Column("source_accession", String(25)),
+    Column("evidence", JSONB, nullable=False, server_default="[]"),  # primary-document quotes with offsets
+    Column("validation_status", String(20), nullable=False),  # CONFIRMED | CONFLICT | INSUFFICIENT
+    Column("complexity", String(32), nullable=False, server_default="SIMPLE"),  # SIMPLE | COMPLEX_CORPORATE_ACTION
+    Column("validation_version", String(40)),
+    Column("notes", Text),
+    _created(),
+    UniqueConstraint("predecessor_cik", "effective_date", name="uq_corporate_action_resolution_pred_eff"),
+)

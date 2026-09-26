@@ -91,9 +91,12 @@ def _terminal_exit(bars: list[Bar], entry: Bar, horizon: int, as_of: date, termi
 
 def compute_returns(bars: list[Bar], spy_bars: list[Bar] | None, public_date: date, public_at: datetime | None,
                     as_of: date | None = None, horizons: tuple[int, ...] = HORIZONS,
-                    terminal_date: date | None = None) -> list[HorizonReturn]:
+                    terminal_date: date | None = None, corporate_exit=None) -> list[HorizonReturn]:
     """terminal_date: documented delisting date (security master). Horizons that end after it exit at
-    the last traded price; the benchmark still runs to the full horizon (cash earns nothing)."""
+    the last traded price; the benchmark still runs to the full horizon (cash earns nothing).
+    corporate_exit (app.corpactions.CorporateExit): a verified merger consideration. A horizon that ends after
+    the merger's effective date - with no price of the predecessor at the horizon - exits at that value
+    (it takes precedence over the last-traded-price terminal exit)."""
     # vendor sanity: a non-positive close / adjusted close is corrupt data (seen: Yahoo adj_close < 0 for a
     # bankrupt issuer), never a price - such bars are dropped instead of producing a return below -100 %
     bars = sorted((b for b in bars if b.close and b.close > 0 and (b.adj_close is None or b.adj_close > 0)),
@@ -114,12 +117,21 @@ def compute_returns(bars: list[Bar], spy_bars: list[Bar] | None, public_date: da
     for h in horizons:
         basis = "horizon"
         x = _exit_bar(bars, e, h, as_of)
+        xp = None
+        ce = corporate_exit
+        if x is None and ce is not None and e.date < ce.effective_date < e.date + timedelta(days=h) \
+                and e.date + timedelta(days=h) <= as_of:
+            last = [b for b in bars if e.date <= b.date <= ce.effective_date]
+            if last:  # value per share on the predecessor's adjusted basis of its last session
+                xp = ce.value * _adj_factor(last[-1])
+                x = Bar(ce.exit_date, xp, xp, xp, xp, xp, 0)
+                basis = ce.basis
         if x is None:
             x = _terminal_exit(bars, e, h, as_of, terminal_date)
             basis = "delisting_terminal"
         if x is None:
             continue
-        xp = _adj_close(x)
+        xp = xp or _adj_close(x)
         if not xp:
             continue
         ret = xp / ep - 1.0
@@ -129,7 +141,7 @@ def compute_returns(bars: list[Bar], spy_bars: list[Bar] | None, public_date: da
         mae = (min(lows) / ep - 1.0) if lows else None
         mfe = (max(highs) / ep - 1.0) if highs else None
         spy_ret = None
-        if basis == "delisting_terminal":
+        if basis == "delisting_terminal" or basis.startswith("merger_"):
             target = e.date + timedelta(days=h)
             later = [b for b in spy_sorted if e.date < b.date <= target]
             spy_x = later[-1] if later and (target - later[-1].date).days <= 7 else None

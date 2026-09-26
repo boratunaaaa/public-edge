@@ -38,7 +38,7 @@ def benchmark_return(bars_by_date: dict[date, Bar], sorted_bars: list[Bar], entr
     """Benchmark return over exactly the stock's holding period (same entry session open -> same exit
     session close). A delisting-terminal exit is benchmarked over the full horizon (cash earns 0)."""
     e = bars_by_date.get(entry)
-    if exit_basis == "delisting_terminal" and horizon is not None:
+    if (exit_basis == "delisting_terminal" or exit_basis.startswith("merger_")) and horizon is not None:
         target = entry + timedelta(days=horizon)
         later = [b for b in sorted_bars if entry < b.date <= target]
         x = later[-1] if later and (target - later[-1].date).days <= 7 else None
