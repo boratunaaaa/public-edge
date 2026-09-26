@@ -469,6 +469,7 @@ def test_confirmed_otc_holding_is_valued_on_otc_quotes_not_cashed_out_at_delisti
     with engine.connect() as c:
         assert c.execute(select(events_t.c.returns_checked_at).where(events_t.c.id == other)).scalar() is None
     assert out["candidates"] == 1
+    assert compute_pending(engine, backfill=None, event_ids=[other])["candidates"] == 1  # only the listed event
     with engine.connect() as c:
         r = c.execute(select(event_returns).where(event_returns.c.event_id == eid, event_returns.c.horizon_days == 180)).mappings().one()
     assert r["exit_basis"] != "delisting_terminal" and r["exit_date"] > date(2023, 6, 1)
