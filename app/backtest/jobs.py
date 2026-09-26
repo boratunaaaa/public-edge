@@ -24,12 +24,14 @@ def _ensure_spy(conn: Connection) -> list:
     return ensure_prices(conn, BENCHMARK, PRICE_HISTORY_START, date.today())
 
 
-def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600, backfill: bool | None = None) -> dict:
+def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600, backfill: bool | None = None,
+                    ciks: list[str] | None = None) -> dict:
     """Compute/refresh returns for events whose horizons have (newly) elapsed.
 
     The price series is chosen by the security master (same CIK, never a reused symbol); an event
     that cannot be priced is recorded with WHY (missing_reason) instead of silently disappearing.
-    backfill: None = all events, True/False = only historical / only live (separate processes)."""
+    backfill: None = all events, True/False = only historical / only live (separate processes).
+    ciks: only these issuers (targeted recompute after a new price source, never the whole universe)."""
     from app.securitymaster.provider import get_security_master
     t0 = time.time()
     today = date.today()
@@ -44,6 +46,8 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
              events.c.public_date <= today - timedelta(days=2), due]
     if backfill is not None:
         conds.append(events.c.is_backfill.is_(backfill))
+    if ciks:
+        conds.append(events.c.issuer_cik.in_([c.zfill(10) for c in ciks]))
     with engine.connect() as conn:
         rows = conn.execute(select(events.c.id, events.c.ticker, events.c.issuer_cik, events.c.public_date, events.c.public_at)
                             .where(and_(*conds)).order_by(events.c.issuer_cik, events.c.ticker, events.c.public_date)

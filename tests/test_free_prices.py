@@ -454,6 +454,7 @@ def test_otc_continuation_with_a_reused_symbol_is_still_rejected(engine):
 def test_confirmed_otc_holding_is_valued_on_otc_quotes_not_cashed_out_at_delisting(engine):
     from app.backtest.jobs import compute_pending
     from app.db.models import event_returns
+    from app.db.models import events as events_t
     from app.marketdata.provider import store_bars
     from app.pricesources.store import save_source
     with engine.begin() as c:
@@ -462,7 +463,12 @@ def test_confirmed_otc_holding_is_valued_on_otc_quotes_not_cashed_out_at_delisti
         store_bars(c, "SPY", series(date(2022, 12, 1), 600, 380.0, 0.2))
         save_source(c, cik=OLD, symbol="OLDB", provider="antigravity_yf", bars=_otc_bars(), identity="symbol",
                     source_ref="t", otc_continuation=OTC_EVIDENCE)
-    compute_pending(engine, backfill=None)
+        other = _unresolved_event(c, cik="0000000777", symbol="ZZZ", key="other")
+        c.execute(text("UPDATE events SET returns_status = 'retry', returns_checked_at = NULL WHERE id = :i"), {"i": other})
+    out = compute_pending(engine, backfill=None, ciks=[OLD])  # targeted: the other issuer is not touched
+    with engine.connect() as c:
+        assert c.execute(select(events_t.c.returns_checked_at).where(events_t.c.id == other)).scalar() is None
+    assert out["candidates"] == 1
     with engine.connect() as c:
         r = c.execute(select(event_returns).where(event_returns.c.event_id == eid, event_returns.c.horizon_days == 180)).mappings().one()
     assert r["exit_basis"] != "delisting_terminal" and r["exit_date"] > date(2023, 6, 1)
