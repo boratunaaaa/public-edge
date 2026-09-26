@@ -7,7 +7,7 @@ The mapping onto the existing core `events` row (no schema change needed for dev
   dedupe_key  = "<country>:<source>:<source_id>:<family>:<ticker>"
   issuer_cik  = NULL (non-US issuers have no CIK) ; ticker = local exchange code
   payload     = {"country", "exchange", "family", "security_id", "price_sensitive", "raw", "fields", ...}
-A proposed migration (docs/proposed_migrations/0009_global_markets.py, NOT applied) adds first-class columns.
+A proposed migration (docs/proposed_migrations/0010_global_markets.py, NOT applied) adds first-class columns.
 """
 from __future__ import annotations
 
