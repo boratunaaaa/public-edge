@@ -809,7 +809,7 @@ tenk_filings = Table(
     Column("source_url", Text, nullable=False),
     Column("sections", JSONB, nullable=False, server_default="[]"),
     Column("profile", JSONB, nullable=False, server_default="{}"),  # sentence fingerprints per section
-    Column("status", String(16), nullable=False),  # ok | no_sections | fetch_failed
+    Column("status", String(16), nullable=False),  # ok | no_sections | fetch_failed | extract_failed
     Column("prev_accession", String(25)),
     Column("n_changes", Integer),
     Column("is_backfill", Boolean, nullable=False, server_default="false"),

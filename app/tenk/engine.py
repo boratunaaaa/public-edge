@@ -117,10 +117,13 @@ class Extracted(str):
     """Document text whose sections and fingerprint profile were computed in a memory-capped child process."""
     items: dict
     profile: dict
+    failed: str | None = None  # "memory" / "timeout" / "exit <code>" when the child could not extract
 
 
 EXTRACT_MEMORY_BYTES = 700 * 1024**2  # multi-MB 10-K HTML + regex copies OOM-killed the 1 GB backfill container
 EXTRACT_TIMEOUT_S = 300
+_CHILD_CODE = ("import sys, json; from app.tenk.engine import _extract_inproc; "
+               "h, i, p = _extract_inproc(sys.stdin.buffer.read()); sys.stdout.write(json.dumps([h, i, p]))")
 
 
 def _extract_inproc(raw: bytes) -> tuple[str, dict, dict]:
@@ -132,8 +135,10 @@ def _extract_inproc(raw: bytes) -> tuple[str, dict, dict]:
 
 def extract_isolated(raw: bytes) -> Extracted:
     """HTML -> text -> sections -> profile in a child process with an address-space cap (same pattern as the OGE
-    PDF extraction): a pathological filing fails alone as FetchError-free 'no_sections' instead of killing the
-    backfill process. Only the sections (bounded) and the profile come back to the parent."""
+    PDF extraction): a pathological filing fails alone (status 'extract_failed', visible and never silently
+    'no_sections') instead of killing the backfill process. The child also volunteers as the kernel OOM victim
+    (oom_score_adj 1000), so a container-level memory squeeze kills the child, not the backfill loop.
+    Only the sections (bounded) and the profile come back to the parent."""
     import json as _json
     import resource
     import subprocess
@@ -144,15 +149,26 @@ def extract_isolated(raw: bytes) -> Extracted:
             resource.setrlimit(resource.RLIMIT_AS, (EXTRACT_MEMORY_BYTES + 300 * 1024**2,) * 2)
         except (ValueError, OSError):
             pass
-    code = ("import sys, json; from app.tenk.engine import _extract_inproc; "
-            "h, i, p = _extract_inproc(sys.stdin.buffer.read()); sys.stdout.write(json.dumps([h, i, p]))")
+        try:
+            with open("/proc/self/oom_score_adj", "w") as fh:
+                fh.write("1000")
+        except OSError:
+            pass
+    head, items, prof, failed = "", {}, {}, None
     try:
-        r = subprocess.run([sys.executable, "-c", code], input=raw, capture_output=True, timeout=EXTRACT_TIMEOUT_S, preexec_fn=_limit)
-        head, items, prof = _json.loads(r.stdout) if r.returncode == 0 else ("", {}, {})
-    except (subprocess.TimeoutExpired, ValueError):
-        head, items, prof = "", {}, {}
+        r = subprocess.run([sys.executable, "-c", _CHILD_CODE], input=raw, capture_output=True, timeout=EXTRACT_TIMEOUT_S, preexec_fn=_limit)
+        if r.returncode == 0:
+            head, items, prof = _json.loads(r.stdout)
+        else:
+            failed = "memory" if b"MemoryError" in r.stderr[-2000:] or r.returncode == -9 else f"exit {r.returncode}"
+    except subprocess.TimeoutExpired:
+        failed = "timeout"
+    except ValueError:
+        failed = "bad_output"
+    if failed:
+        log.warning("10-K extraction failed in the child (%s, %d bytes)", failed, len(raw))
     out = Extracted(head or " ")
-    out.items, out.profile = items, prof
+    out.items, out.profile, out.failed = items, prof, failed
     return out
 
 
@@ -190,6 +206,8 @@ def process_filing(engine: Engine, cik: str, ticker: str | None, name: str | Non
         items = extract_items(txt) if txt else {}
         prof = build_profile(items)
     status = "ok" if len(items) >= 2 else ("no_sections" if txt else "not_found")
+    if isinstance(txt, Extracted) and txt.failed:
+        status = "extract_failed"  # not retried automatically: the same document would fail the same way
     with engine.begin() as conn:
         if existing:
             conn.execute(tenk_filings.update().where(tenk_filings.c.id == existing[0]).values(

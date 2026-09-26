@@ -1178,4 +1178,12 @@ def test_tenk_extraction_runs_isolated_and_matches_inprocess():
     _, items, prof = te._extract_inproc(doc)
     assert out.items == items and out.profile["RISK_FACTORS"]["hashes"] == prof["RISK_FACTORS"]["hashes"]
     bad = te.extract_isolated(b"\x00" * 10)
-    assert bad.items == {}  # a broken document yields no sections, never an exception into the backfill
+    assert bad.items == {} and bad.failed is None  # a broken document yields no sections, never an exception
+
+
+def test_tenk_extraction_memory_blowup_is_contained(monkeypatch):
+    """A child that exceeds its address-space cap fails alone and is reported, never silently 'no_sections'."""
+    from app.tenk import engine as te
+    monkeypatch.setattr(te, "_CHILD_CODE", "x = bytearray(3 * 1024**3)")  # 3 GB > the 1 GB cap
+    out = te.extract_isolated(b"<html>doc</html>")
+    assert out.failed == "memory" and out.items == {}
