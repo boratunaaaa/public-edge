@@ -10,6 +10,8 @@ A hit rate is only shown when it is TRUSTED. It is computed on EPISODES, not raw
       - performance delisting (bankruptcy / exchange
         compliance, SEC Form 25 + 8-K) inside the horizon   -> loss (Shumway 1997 delisting bias)
       - anything else without a verified return             -> unresolved (never dropped)
+    Not a survivorship exclusion: events flagged NOT_TRADEABLE / PRE_LISTING (the security could not be
+    bought on that date - app.integrity.tradeability) are outside the denominator, flagged not deleted.
 Status:
   TRUSTED  unresolved <= 2%, >= 98% of resolved outcomes on a verified point-in-time price identity,
            benchmark complete, >= MIN_COMPANIES issuers and >= MIN_EPISODES episodes
@@ -154,6 +156,7 @@ def load_rows(conn: Connection, event_type: str, cond: str, params: dict, horizo
         LEFT JOIN security_master sm ON sm.cik = e.issuer_cik
         WHERE e.event_type = :et AND NOT e.superseded AND e.date_quality <> 'estimated'
           AND COALESCE(e.payload->>'universe_quality', '') <> 'current_universe_survivorship_biased'
+          AND COALESCE(e.payload->>'tradeability', '') NOT IN ('NOT_TRADEABLE', 'PRE_LISTING')
           AND COALESCE(e.payload->>'timestamp_confidence', '') <> 'LOW'
           AND e.public_date <= :mature AND ({cond})
         ORDER BY 2, e.public_date, e.id""")

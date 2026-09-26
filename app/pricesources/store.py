@@ -41,7 +41,8 @@ def other_series(conn: Connection, cik: str, provider: str) -> list[list[Bar]]:
 def save_source(conn: Connection, *, cik: str, symbol: str, provider: str, bars: list[Bar], source_ref: str,
                 identity: str, raw: bytes | None = None, vendor_name: str | None = None,
                 delisting_date: date | None = None, source_end: date | None = None,
-                truncated_at_delisting: bool = False, extra_checks: dict | None = None) -> tuple[int, Verdict]:
+                truncated_at_delisting: bool = False, extra_checks: dict | None = None,
+                otc_continuation: dict | None = None) -> tuple[int, Verdict]:
     cik = cik.zfill(10)
     bars = sorted({b.date: b for b in bars}.values(), key=lambda b: b.date)
     if delisting_date is None:
@@ -50,7 +51,8 @@ def save_source(conn: Connection, *, cik: str, symbol: str, provider: str, bars:
         delisting_date = dl.date if dl else None
     verdict = classify(conn, cik, symbol, bars, identity=identity, vendor_name=vendor_name,
                        delisting_date=delisting_date, other_series=other_series(conn, cik, provider),
-                       source_end=source_end, truncated_at_delisting=truncated_at_delisting)
+                       source_end=source_end, truncated_at_delisting=truncated_at_delisting,
+                       otc_continuation=otc_continuation)
     verdict.checks.update(extra_checks or {})
     vals = dict(source_ref=source_ref, retrieved_at=datetime.now(timezone.utc),
                 raw_sha256=hashlib.sha256(raw).hexdigest() if raw else None,
@@ -78,14 +80,15 @@ def queue_recompute(conn: Connection, cik: str) -> int:
                         {"c": cik}).rowcount
 
 
-def vendor_series(conn: Connection, cik: str | None, on: date) -> tuple[list[Bar], str, str] | None:
-    """The caller must not apply a delisting terminal exit beyond the series' last bar when the series was
-    cut by its source (checks.cut_by_source_end): see app.backtest.jobs."""
-    """Best ACCEPTED series of this CIK that covers `on` (entry within 10 days): (bars, basis, symbol)."""
+def vendor_series(conn: Connection, cik: str | None, on: date) -> tuple[list[Bar], str, str, bool] | None:
+    """Best ACCEPTED series of this CIK that covers `on` (entry within 10 days): (bars, basis, symbol, otc).
+    otc=True: a confirmed OTC continuation - the holding continues on OTC quotes after the exchange delisting,
+    so the caller must not cash out at the delisting (see app.backtest.jobs). The caller must not apply a
+    delisting terminal exit beyond the series' last bar when the series was cut by its source either."""
     if not cik:
         return None
     rows = conn.execute(select(price_sources.c.id, price_sources.c.provider, price_sources.c.symbol,
-                               price_sources.c.validation_status).where(and_(
+                               price_sources.c.validation_status, price_sources.c.checks).where(and_(
         price_sources.c.cik == cik.zfill(10), price_sources.c.validation_status.in_(ACCEPTED),
         price_sources.c.first_date <= on + timedelta(days=5), price_sources.c.last_date >= on))).all()
     if not rows:
@@ -93,4 +96,4 @@ def vendor_series(conn: Connection, cik: str | None, on: date) -> tuple[list[Bar
     rows = sorted(rows, key=lambda r: (r.validation_status != "TRUSTED", PROVIDER_RANK.get(r.provider, 9)))
     best = rows[0]
     basis = "vendor_trusted" if best.validation_status == "TRUSTED" else "vendor_validated"
-    return load_bars(conn, best.id), basis, best.symbol
+    return load_bars(conn, best.id), basis, best.symbol, bool((best.checks or {}).get("otc_continuation"))

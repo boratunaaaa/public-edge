@@ -57,6 +57,7 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
         return {"processed": 0, "error": f"benchmark unavailable: {e}"}
     done = nodata = retry = 0
     cache: dict[str, list] = {}
+    otc_keys: set[str] = set()  # vendor series confirmed as OTC continuations: no cash-out at the delisting
     failed: dict[str, str] = {}
     sectors = SectorBench()
     for eid, ticker, cik, pdate, pat in rows:
@@ -73,8 +74,10 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                 from app.pricesources.store import vendor_series
                 vendor = vendor_series(conn, cik, pdate)
                 if vendor is not None:
-                    vbars, vbasis, vsym = vendor
+                    vbars, vbasis, vsym, votc = vendor
                     cache[f"{cik}|vendor"] = (vbars, vbasis, None)
+                    if votc:
+                        otc_keys.add(f"{cik}|vendor")
                     sym, basis = vsym, vbasis
             if sym is None:
                 status = "no_data" if (today - pdate).days > 10 else "pending"
@@ -107,6 +110,8 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                 "historical_symbol_verified", "vendor_trusted", "vendor_validated")) else None
             if terminal and basis_used.startswith("vendor") and all_bars and all_bars[-1].date < terminal - timedelta(days=15):
                 terminal = None  # the source's coverage ended before the delisting: no cash-out at a stale price
+            if key in otc_keys:
+                terminal = None  # confirmed OTC continuation: the holding is valued on OTC quotes after the delisting
             res = compute_returns(bars, spy, pdate, pat, as_of=today, terminal_date=terminal)
             if not res:
                 status = "no_data" if (today - pdate).days > 10 else "pending"

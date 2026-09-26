@@ -6,7 +6,9 @@ Checks (all must hold for an accepted series):
   ownership    the symbol is recorded for THIS CIK in SEC Form 3/4/5 symbols or its own events, and no
                other CIK used the symbol inside the series' date range (ticker reuse)
   delisting    the series ends around the SEC-documented delisting (a series that keeps trading more
-               than 30 days after delisting belongs to someone else / a successor security)
+               than 30 days after delisting belongs to someone else / a successor security) - unless an
+               independent OTC-continuation cross-check (SEC filings: same CIK, same security quoted OTC)
+               confirmed it; such a series is never better than VALIDATED_FALLBACK
   completeness >= 90% of trading days present, no non-positive prices
   cross-check  where a second series overlaps, daily adjusted RETURNS agree (levels are not compared,
                so raw vs split-adjusted is never mistaken for a disagreement)
@@ -90,7 +92,8 @@ class Verdict:
 
 def classify(conn: Connection, cik: str, symbol: str, bars: list[Bar], *, identity: str, vendor_name: str | None = None,
              delisting_date: date | None = None, other_series: list[list[Bar]] | None = None,
-             today: date | None = None, source_end: date | None = None, truncated_at_delisting: bool = False) -> Verdict:
+             today: date | None = None, source_end: date | None = None, truncated_at_delisting: bool = False,
+             otc_continuation: dict | None = None) -> Verdict:
     """source_end: last date the SOURCE covers (a dataset snapshot); a series ending there is cut by the
     source, not by the company. truncated_at_delisting: exchange part of a series that continued past the
     SEC delisting (OTC / successor quotes removed) - never better than VALIDATED_FALLBACK."""
@@ -138,9 +141,12 @@ def classify(conn: Connection, cik: str, symbol: str, bars: list[Bar], *, identi
     # --- delisting consistency
     cut_by_source = source_end is not None and last >= source_end - timedelta(days=4)
     ck["cut_by_source_end"] = cut_by_source
+    otc_ok = bool(otc_continuation) and otc_continuation.get("status") == "CONFIRMED_OTC"
+    if otc_ok:
+        ck["otc_continuation"] = otc_continuation
     if delisting_date:
         ck["delisting_date"] = delisting_date.isoformat()
-        if last > delisting_date + timedelta(days=DELIST_AFTER_DAYS):
+        if last > delisting_date + timedelta(days=DELIST_AFTER_DAYS) and not otc_ok:
             conflict.append("TRADES_AFTER_DELISTING")
         elif last < delisting_date - timedelta(days=DELIST_BEFORE_DAYS) and not cut_by_source:
             low.append("ENDS_BEFORE_DELISTING")
@@ -167,7 +173,10 @@ def classify(conn: Connection, cik: str, symbol: str, bars: list[Bar], *, identi
     if low:
         v.status, v.confidence, v.reasons = "LOW_CONFIDENCE", 0.3, low
         return v
-    if truncated_at_delisting:
+    if otc_ok:
+        v.status, v.confidence = "VALIDATED_FALLBACK", 0.6
+        v.reasons.append("OTC_CONTINUATION_CONFIRMED")
+    elif truncated_at_delisting:
         ck["truncated_at_delisting"] = True
         v.status, v.confidence = "VALIDATED_FALLBACK", 0.6
         v.reasons.append("TRUNCATED_AT_SEC_DELISTING")

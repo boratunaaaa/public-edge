@@ -406,3 +406,87 @@ def test_quota_reservation_is_atomic_across_connections(engine):
     c1.close()
     c2.close()
     assert ok1 is True and res["ok2"] is False and res["why2"] == "PER_HOUR_LIMIT"
+
+
+# ------------------------------------------------------------------ OTC continuation + tradeability
+
+OTC_EVIDENCE = {"status": "CONFIRMED_OTC", "evidence": ["8-K item 3.01 names the OTC symbol"], "source": "sec"}
+
+
+def _otc_bars():
+    """Exchange trading until the 2023-03-17 delisting, then the same security quoted OTC at half the price."""
+    bars = series(date(2022, 6, 1), 400, 20.0, 0.0)
+    return [b if b.date <= date(2023, 3, 17) else Bar(b.date, 10.0, 10.1, 9.9, 10.0, 10.0, 500) for b in bars]
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_otc_continuation_needs_confirmed_independent_evidence(engine):
+    from app.pricesources.store import save_source
+    with engine.begin() as c:
+        _company(c, reason_marker=None)
+        _, none = save_source(c, cik=OLD, symbol="OLDB", provider="antigravity_yf", bars=_otc_bars(), identity="symbol",
+                              source_ref="t")
+        _, weak = save_source(c, cik=OLD, symbol="OLDB", provider="antigravity_yf2", bars=_otc_bars(), identity="symbol",
+                              source_ref="t", otc_continuation={"status": "INSUFFICIENT_EVIDENCE"})
+        _, ok = save_source(c, cik=OLD, symbol="OLDB", provider="antigravity_yf3", bars=_otc_bars(), identity="symbol",
+                            source_ref="t", otc_continuation=OTC_EVIDENCE)
+    assert none.status == weak.status == "REJECTED" and "TRADES_AFTER_DELISTING" in weak.reasons
+    assert ok.status == "VALIDATED_FALLBACK" and "OTC_CONTINUATION_CONFIRMED" in ok.reasons  # never TRUSTED
+    assert ok.checks["otc_continuation"] == OTC_EVIDENCE
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_otc_continuation_with_a_reused_symbol_is_still_rejected(engine):
+    from app.pricesources.store import save_source
+    with engine.begin() as c:
+        _company(c, reason_marker=None)
+        c.execute(text("""INSERT INTO security_symbols (cik, symbol, first_seen, last_seen, n_obs, source)
+                          VALUES ('0000000999', 'OLDB', '2023-06-01', '2024-01-01', 3, 'form345_filing')"""))
+        _, v = save_source(c, cik=OLD, symbol="OLDB", provider="antigravity_yf", bars=_otc_bars(), identity="symbol",
+                           source_ref="t", otc_continuation=OTC_EVIDENCE)
+    assert v.status == "REJECTED" and "TICKER_REUSED_IN_RANGE" in v.reasons
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline")
+def test_confirmed_otc_holding_is_valued_on_otc_quotes_not_cashed_out_at_delisting(engine):
+    from app.backtest.jobs import compute_pending
+    from app.db.models import event_returns
+    from app.marketdata.provider import store_bars
+    from app.pricesources.store import save_source
+    with engine.begin() as c:
+        _company(c, reason_marker=None)
+        eid = _unresolved_event(c)
+        store_bars(c, "SPY", series(date(2022, 12, 1), 600, 380.0, 0.2))
+        save_source(c, cik=OLD, symbol="OLDB", provider="antigravity_yf", bars=_otc_bars(), identity="symbol",
+                    source_ref="t", otc_continuation=OTC_EVIDENCE)
+    compute_pending(engine, backfill=None)
+    with engine.connect() as c:
+        r = c.execute(select(event_returns).where(event_returns.c.event_id == eid, event_returns.c.horizon_days == 180)).mappings().one()
+    assert r["exit_basis"] != "delisting_terminal" and r["exit_date"] > date(2023, 6, 1)
+    assert r["exit_price"] == pytest.approx(10.0) and r["ret"] == pytest.approx(-0.5, abs=0.01)  # the OTC loss is kept
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_not_tradeable_and_pre_listing_are_flagged_audited_and_outside_the_denominator(engine):
+    from app.backtest import quality as Q
+    from app.integrity import tradeability
+    with engine.begin() as c:
+        _company(c, delisted=None)
+        a = _unresolved_event(c, key="a", d=date(2023, 1, 10))
+        b = _unresolved_event(c, key="b", d=date(2023, 1, 11))
+        p = _unresolved_event(c, key="p", d=date(2023, 1, 12))
+        dry = tradeability.mark(c, [(a, "NOT_TRADEABLE", {"sec_exchanges": []})], "t-dry", dry_run=True)
+        n0 = len(Q.load_rows(c, "INSIDER_OPEN_MARKET_BUY", "TRUE", {}, 30, as_of=date(2024, 6, 1)))
+        out = tradeability.mark(c, [(a, "NOT_TRADEABLE", {"sec_exchanges": []}), (p, "PRE_LISTING", {"listing_start": "2023-05-01"})],
+                                "t-run", dry_run=False)
+        again = tradeability.mark(c, [(a, "NOT_TRADEABLE", {"sec_exchanges": []})], "t-run2", dry_run=False)
+        rows = Q.load_rows(c, "INSIDER_OPEN_MARKET_BUY", "TRUE", {}, 30, as_of=date(2024, 6, 1))
+        audit = c.execute(text("SELECT count(*) FROM data_cleanup_audit WHERE action = 'FLAG_TRADEABILITY'")).scalar()
+        kept = c.execute(text("SELECT count(*) FROM events WHERE NOT superseded")).scalar()
+    assert dry["NOT_TRADEABLE"] == 1 and n0 == 3
+    assert out["NOT_TRADEABLE"] == 1 and out["PRE_LISTING"] == 1 and again["unchanged"] == 1
+    assert [r.event_id for r in rows] == [b] and audit == 2 and kept == 3  # flagged, never deleted
