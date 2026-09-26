@@ -124,7 +124,7 @@ def parse_schedule13_xml(xml: str, form_type: str) -> Schedule13:
         form_type=form_type,
         issuer_cik=issuer_cik.zfill(10) if issuer_cik else None,
         issuer_name=issuer_name,
-        cusip=(cusip or "").replace(" ", "")[:9] or None,
+        cusip=_cusip(cusip),
         event_date=ev,
         persons=persons,
         item4_text=purpose,
@@ -144,6 +144,13 @@ _ITEM4_RE = re.compile(r"item\s*4\.?\s*[-–—:.]?\s*purpose\s+of\s+(the\s+)?tr
 _CUSIP_RE = re.compile(r"\b([0-9A-Z]{6}\s?[0-9A-Z]{2}\s?[0-9])\b\s*(?:\(CUSIP|\n?\s*\(?CUSIP)", re.I)
 
 
+def _cusip(raw: str | None) -> str | None:
+    """9 characters without whitespace (the text pattern may span a line break), else None: a value that does not
+    fit is never written (it failed the insert and the filing was re-fetched every backfill cycle)."""
+    c = re.sub(r"\s", "", raw or "").upper()
+    return c if len(c) == 9 and c.isalnum() else None
+
+
 def parse_schedule13_legacy(text_or_html: str, form_type: str) -> Schedule13:
     txt = html_to_text(text_or_html) if "<" in text_or_html[:5000] else text_or_html
     pcts = [float(p) for p in _PCT_RE.findall(txt) if 0 < float(p) <= 100]
@@ -152,7 +159,7 @@ def parse_schedule13_legacy(text_or_html: str, form_type: str) -> Schedule13:
     cm = _CUSIP_RE.search(txt)
     persons = [ReportingPerson(name="", cik=None, percent=max(pcts) if pcts else None, shares=None)] if pcts else []
     return Schedule13(form_type=form_type, issuer_cik=None, issuer_name=None,
-                      cusip=cm.group(1).replace(" ", "") if cm else None, event_date=None,
+                      cusip=_cusip(cm.group(1)) if cm else None, event_date=None,
                       persons=persons, item4_text=item4)
 
 

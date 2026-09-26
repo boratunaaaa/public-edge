@@ -319,11 +319,16 @@ def list_13d_filings(year: int, qtr: int) -> list[tuple[str, str, str]]:
     return list(out.values())
 
 
+MAX_13D_FAILS = 3
+
+
 def backfill_13d(engine: Engine, years: int) -> dict:
     name = "backfill_13d"
     with engine.begin() as conn:
         st = job_state(conn, name)
     done = set(st.get("done", []))
+    fails: dict[str, int] = dict(st.get("fail_counts") or {})
+    gave_up = set(st.get("gave_up") or [])
     today = date.today()
     for y in range(today.year - years, today.year + 1):
         for qn in range(1, 5):
@@ -333,6 +338,8 @@ def backfill_13d(engine: Engine, years: int) -> dict:
             items = list_13d_filings(y, qn)
             ok = err = 0
             for form, cik, acc in items:
+                if acc in gave_up:
+                    continue  # failed MAX_13D_FAILS times: recorded in job_state, not re-fetched every cycle
                 if not disk_ok():
                     with engine.begin() as conn:
                         save_job_state(conn, name, {**st, "done": sorted(done)}, status="paused", error="low disk")
@@ -348,11 +355,16 @@ def backfill_13d(engine: Engine, years: int) -> dict:
                     ok += 1
                 except Exception as e:
                     err += 1
+                    fails[acc] = fails.get(acc, 0) + 1
+                    if fails[acc] >= MAX_13D_FAILS:
+                        gave_up.add(acc)
+                        fails.pop(acc)
                     log.warning("13D backfill %s failed: %s", acc, e)
             # current quarter stays open so later filings get picked up next time
             if date(y, 3 * qn, 28) < today:
                 done.add(key)
-            st = {"done": sorted(done), "last": {"quarter": key, "filings": len(items), "ok": ok, "errors": err}}
+            st = {"done": sorted(done), "last": {"quarter": key, "filings": len(items), "ok": ok, "errors": err},
+                  "fail_counts": fails, "gave_up": sorted(gave_up)}
             with engine.begin() as conn:
                 save_job_state(conn, name, st, status="running")
             log.info("13D backfill %s: %s", key, st["last"])

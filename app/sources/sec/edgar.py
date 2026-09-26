@@ -2,12 +2,19 @@
 from __future__ import annotations
 
 import html
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
 
 from app import http
 from app.parsers.sec_common import accession_from_url, full_text_url
+
+log = logging.getLogger(__name__)
+# The primary document comes first in an EDGAR full submission; what follows are exhibits (some filers embed
+# 60-80 MB of encoded exhibits in a SC 13D). Decoding and parsing those in-process OOM-killed the 1 GB backfill
+# container every cycle on 2026-09-25/26, so only the head of the submission is read.
+MAX_FULL_TEXT_BYTES = 15_000_000
 
 FEED_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
 
@@ -71,5 +78,10 @@ def fetch_new(form_type: str, is_known, max_pages: int = 6, owner: str = "includ
     return list(seen.values())
 
 
-def fetch_full_text(cik: str, accession: str) -> str:
-    return http.get(full_text_url(cik, accession)).text
+def fetch_full_text(cik: str, accession: str, max_bytes: int = MAX_FULL_TEXT_BYTES) -> str:
+    r = http.get(full_text_url(cik, accession), headers={"Range": f"bytes=0-{max_bytes - 1}"})
+    raw = r.content
+    if len(raw) >= max_bytes:
+        log.info("full text %s capped at %d bytes (of %s)", accession, max_bytes,
+                 r.headers.get("content-range", "").rsplit("/", 1)[-1] or len(raw))
+    return raw[:max_bytes].decode(r.encoding or "utf-8", "ignore")
