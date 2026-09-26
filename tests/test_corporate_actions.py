@@ -75,6 +75,8 @@ def test_only_confirmed_simple_resolutions_value_the_exit(engine, status, comple
         eid = _unresolved_event(c)
         store_bars(c, "SPY", series(date(2022, 12, 1), 600, 380.0, 0.2))
         store_bars(c, "NEWB", series(EFF - timedelta(days=30), 60, 50.0, 0.0))
+        _company(c, cik="0000000888", name="New Bancorp Inc", symbol="NEWB", delisted=None, first=date(2019, 1, 1),
+                 last=date(2024, 1, 1))  # the successor's symbol is verified for its CIK
         save_source(c, cik=OLD, symbol="OLDB", provider="finsaber", bars=series(date(2022, 6, 1), 205, 20.0, 0.0),
                     identity="cik", source_ref="t")
         _resolution(c, validation_status=status, complexity=complexity)

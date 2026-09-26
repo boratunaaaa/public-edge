@@ -161,11 +161,18 @@ def _corporate_exit(conn: Connection, cik: str | None, cache: dict):
     key = f"cae|{res['id']}"
     if key not in cache:
         bars = []
-        if float(res["share_ratio"] or 0) > 0 and res["successor_ticker"]:
+        if float(res["share_ratio"] or 0) > 0:
+            # the successor's price through the same identity path as every event (same CIK, verified symbol) -
+            # never a bare ticker, which may belong to another security at the closing date
+            from app.securitymaster.provider import VERIFIED_BASES, get_security_master
             lo, hi = successor_window(res)
             try:
-                bars = ensure_prices(conn, res["successor_ticker"], lo, min(hi, date.today()))
+                ps = get_security_master(conn).get_historical_price(res["successor_cik"], lo, min(hi, date.today()),
+                                                                    on=res["effective_date"])
+                bars = ps.bars if ps.basis in VERIFIED_BASES else None
             except PriceFetchError:
+                bars = None
+            if not res["successor_cik"]:
                 bars = None
         cache[key] = exit_value(res, bars) if bars is not None else None
     return cache[key]
