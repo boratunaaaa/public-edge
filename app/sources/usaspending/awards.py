@@ -163,13 +163,30 @@ def process_award(conn: Connection, a: dict, *, is_backfill: bool, first_seen: d
     return created
 
 
+def _search_resilient(start: date, end: date, page: int, date_type: str, attempts: int = 4, pause_s: float = 60.0) -> dict:
+    """USAspending drops connections under load ("Server disconnected"): beyond the HTTP client's own retries,
+    back off for minutes before giving up, so a transient outage never becomes a data gap."""
+    import time as _time
+    for i in range(attempts):
+        try:
+            return search_new_awards(start, end, page, date_type=date_type)
+        except Exception as e:  # noqa: BLE001
+            if i == attempts - 1:
+                raise
+            log.warning("usaspending page %s %s..%s failed (%s), retry in %.0fs", page, start, end, e, pause_s * (i + 1))
+            _time.sleep(pause_s * (i + 1))
+    raise RuntimeError("unreachable")
+
+
 def ingest_range(engine: Engine, start: date, end: date, *, is_backfill: bool, max_pages: int = 50,
-                 date_type: str = "new_awards_only", min_base_date: date | None = None) -> RunResult:
+                 date_type: str = "new_awards_only", min_base_date: date | None = None, start_page: int = 1,
+                 checkpoint=None) -> RunResult:
+    """checkpoint(page) is called after each fully processed page (resume point for the backfill)."""
     res = RunResult()
     with engine.connect() as conn:
         resolver.load(conn)
-    for page in range(1, max_pages + 1):
-        d = search_new_awards(start, end, page, date_type=date_type)
+    for page in range(start_page, max_pages + 1):
+        d = _search_resilient(start, end, page, date_type)
         rows = d.get("results") or []
         for a in rows:
             if min_base_date is not None:
@@ -182,6 +199,8 @@ def ingest_range(engine: Engine, start: date, end: date, *, is_backfill: bool, m
                 res.items += 1
             except Exception as e:
                 log.warning("award %s failed: %s", a.get("generated_internal_id"), e)
+        if checkpoint is not None:
+            checkpoint(page)
         if not (d.get("page_metadata") or {}).get("hasNext"):
             break
     return res
@@ -196,7 +215,8 @@ class UsaSpendingSource(Source):
         # Records published/updated recently whose award was signed in the last 150 days.
         # (date_signed alone would miss DoD awards, which appear ~90 days after signing.)
         end = date.today()
-        return ingest_range(engine, end - timedelta(days=3), end, is_backfill=False, date_type="last_modified_date",
+        # 5-day overlap: an outage shorter than that is re-covered by the next successful run (idempotent inserts)
+        return ingest_range(engine, end - timedelta(days=5), end, is_backfill=False, date_type="last_modified_date",
                             min_base_date=end - timedelta(days=150))
 
     def run_backfill(self, engine: Engine, years: int = 5) -> RunResult:
@@ -211,7 +231,12 @@ class UsaSpendingSource(Source):
             key = m.strftime("%Y-%m")
             nxt = (m.replace(day=28) + timedelta(days=4)).replace(day=1)
             if key not in done:
-                r = ingest_range(engine, m, nxt - timedelta(days=1), is_backfill=True)
+                resume = (st.get("page") or 0) + 1 if st.get("month") == key else 1
+
+                def cp(page, _key=key):
+                    with engine.begin() as conn:
+                        save_job_state(conn, name, {"done": sorted(done), "month": _key, "page": page}, status="running")
+                r = ingest_range(engine, m, nxt - timedelta(days=1), is_backfill=True, start_page=resume, checkpoint=cp)
                 total.items += r.items
                 done.add(key)
                 with engine.begin() as conn:

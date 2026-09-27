@@ -211,3 +211,25 @@ def test_cusip_check_digit():
     from app.markets.identity import cusip_check_digit_ok
     assert cusip_check_digit_ok("037833100") and cusip_check_digit_ok("B5950S113") is not None
     assert not cusip_check_digit_ok("037833101")
+
+
+def test_usaspending_resumes_from_page_checkpoint_after_disconnect(engine, clean, monkeypatch):
+    from app.sources.usaspending import awards as A
+    calls, failed = [], []
+
+    def search(start, end, page, date_type="new_awards_only"):
+        calls.append(page)
+        if page == 3 and not failed:
+            failed.append(1)
+            raise RuntimeError("Server disconnected without sending a response.")
+        return {"results": [], "page_metadata": {"hasNext": page < 4}}
+    monkeypatch.setattr(A, "search_new_awards", search)
+    monkeypatch.setattr(A, "_search_resilient", lambda s, e, p, dt, **k: search(s, e, p, dt))
+    import datetime as _dt
+    today = _dt.date.today()
+    with pytest.raises(RuntimeError):
+        A.ingest_range(engine, today, today, is_backfill=True, checkpoint=lambda p: calls.append(("cp", p)))
+    assert ("cp", 2) in calls and ("cp", 3) not in calls
+    calls.clear()
+    A.ingest_range(engine, today, today, is_backfill=True, start_page=3)
+    assert calls == [3, 4]
