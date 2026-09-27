@@ -161,6 +161,10 @@ class SpkBulletinSource(Source):
         with engine.connect() as c:
             done = set(c.execute(text("SELECT DISTINCT source_url FROM dataset_records WHERE dataset = 'tr_spk_bulletin'")).scalars())
         res = RunResult(watermark={"year": year})
+        from app.sources.tr import members
+        rows = members.fetch()  # TR security master first: codes in bulletins resolve point in time
+        with engine.begin() as c:
+            res.watermark["tr_securities"] = members.sync(c, rows, date.today())
         for url in bulletin_urls(year):
             if url in done:
                 continue

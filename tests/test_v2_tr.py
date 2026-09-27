@@ -46,3 +46,15 @@ def test_store_resolves_code_via_tr_master_and_names_need_review(engine, clean):
         nr = c.execute(text("SELECT count(*) FROM dataset_records WHERE needs_review AND country = 'TR'")).scalar()
     assert len(ids) == 1 and ev["security_id"] == "TR:XIST:OZATD" and ev["available_at"] == end_of_local_day(date(2026, 9, 25), "TR")
     assert ids2 == [] and nr == 2  # Kiler / Ayes are not in this test's TR master: stored for review, no event
+
+
+def test_kap_member_list_builds_tr_master(engine, clean):
+    from app.markets import master_db
+    from app.sources.tr.members import parse, sync
+    rows = parse((FX / "kap_bist_sirketler_excerpt.txt").read_text())
+    assert len(rows) == 28 and rows[0]["codes"] == ["ACSEL"] and any(len(r["codes"]) > 1 for r in rows)
+    with engine.begin() as c:
+        n = sync(c, rows, date(2026, 9, 28))
+        assert master_db.resolve(c, "ACSEL", date(2026, 9, 28), country="TR") == "TR:XIST:ACSEL"
+        assert master_db.resolve(c, "ACSEL", date(2026, 1, 1), country="TR") is None  # before first sight: unknown
+    assert n >= 28
