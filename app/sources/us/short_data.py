@@ -157,6 +157,8 @@ class FinraShortVolumeSource(Source):
             if out.get("rows"):
                 res.items += 1
                 res.watermark["last_trade_date"] = str(d)
+                from app.jobs.v2_steps import after_finra
+                after_finra(engine, [d], is_backfill=False)
         return res
 
     def run_backfill(self, engine: Engine, start: date = date(2024, 1, 2)) -> RunResult:
@@ -178,6 +180,7 @@ class SecFtdSource(Source):
     slow = True
     country, dataset, license_status, parser_version = "US", "fails_to_deliver", "OPEN", PARSER_VERSION
     stale_after = timedelta(days=25)  # two files a month
+    live_events = True
 
     def run_live(self, engine: Engine, backfill_since: str = "cnsfails202401a") -> RunResult:
         now = datetime.now(timezone.utc)
@@ -191,4 +194,7 @@ class SecFtdSource(Source):
             res.items += 1
             res.watermark.setdefault("newest_file", name)
             log.info("ftd %s", out)
+            if out.get("rows") and self.live_events:
+                from app.jobs.v2_steps import after_ftd
+                after_ftd(engine, [name], is_backfill=False)
         return res

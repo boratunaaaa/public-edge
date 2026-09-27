@@ -201,9 +201,19 @@ def upgrade() -> None:
         sa.Column('increased_holders', sa.Integer()), sa.Column('decreased_holders', sa.Integer()),
         sa.Column('available_at', TS, nullable=False),
         sa.PrimaryKeyConstraint('cusip', 'period', name=op.f('pk_inst_cusip_quarter_13f')))
+    op.create_table('hypothesis_log',
+        sa.Column('id', sa.BigInteger(), primary_key=True), sa.Column('family', sa.String(48), nullable=False),
+        sa.Column('variant', sa.String(64), server_default='base', nullable=False),
+        sa.Column('run_at', TS, server_default=sa.text('now()'), nullable=False), sa.Column('horizon', sa.Integer(), nullable=False),
+        sa.Column('n_events', sa.Integer()), sa.Column('n_companies', sa.Integer()), sa.Column('in_sample_rate', sa.Float()),
+        sa.Column('out_of_sample_rate', sa.Float()), sa.Column('p_value', sa.Float()), sa.Column('adjusted_p', sa.Float()),
+        sa.Column('verdict', sa.String(24)), sa.Column('params', J, server_default='{}', nullable=False),
+        sa.PrimaryKeyConstraint('id', name=op.f('pk_hypothesis_log')))
+    op.create_index('ix_hypothesis_log_family', 'hypothesis_log', ['family', 'run_at'])
 
 
 def downgrade() -> None:
+    op.drop_table('hypothesis_log')
     for t in ('inst_cusip_quarter_13f', 'inst_holdings_13f', 'inst_filings_13f', 'fails_to_deliver', 'short_interest',
               'short_volume_daily', 'dataset_records', 'entity_edges', 'event_market_snapshots', 'source_daily_status',
               'rate_limits', 'dataset_manifests', 'raw_documents', 'security_symbol_periods', 'global_securities'):

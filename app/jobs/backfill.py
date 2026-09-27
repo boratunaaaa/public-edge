@@ -116,6 +116,9 @@ def run_once(engine) -> None:
     # official 8-K history for the news backtest: point-in-time listed universe (not today's list)
     from app.news.backfill import backfill_news_8k
     step(engine, "news_8k", lambda: backfill_news_8k(engine, days=settings.news_backfill_days))
+    # V2 datasets (HISTORICAL_LOW queue): disk-guarded, idempotent, checkpointed
+    from app.jobs.v2_steps import run_historical
+    run_historical(engine, step)
 
 
 def main() -> None:

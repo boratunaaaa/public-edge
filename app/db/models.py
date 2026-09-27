@@ -1431,3 +1431,23 @@ inst_cusip_quarter_13f = Table(  # all managers aggregated per CUSIP and quarter
     Column("decreased_holders", Integer),
     _ts("available_at", nullable=False),  # latest original filing counted (deadline effect: 45 days after quarter end)
 )
+
+# Multiple-testing ledger: every evaluated hypothesis (family x variant x horizon) is recorded, so the false-discovery
+# control counts ALL tests ever run, not only the ones that looked good.
+hypothesis_log = Table(
+    "hypothesis_log", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("family", String(48), nullable=False),
+    Column("variant", String(64), nullable=False, server_default="base"),
+    _ts("run_at", nullable=False, server_default=func.now()),
+    Column("horizon", Integer, nullable=False),
+    Column("n_events", Integer),
+    Column("n_companies", Integer),
+    Column("in_sample_rate", Float),
+    Column("out_of_sample_rate", Float),
+    Column("p_value", Float),
+    Column("adjusted_p", Float),  # Benjamini-Hochberg over every hypothesis in the ledger
+    Column("verdict", String(24)),
+    Column("params", JSONB, nullable=False, server_default="{}"),
+)
+Index("ix_hypothesis_log_family", hypothesis_log.c.family, hypothesis_log.c.run_at)
