@@ -669,3 +669,67 @@ setTimeout(()=>location.reload(),1500)}</script>"""
             "<h3>Son 10-K metin değişimleri (MEDIUM/HIGH)</h3>", _tbl(d["tenk_changes"]),
             "<h3>Insider kişi profilleri — etiket dağılımı</h3>", _tbl(d["insider_labels"]), js]
     return _page("Sanal Portföy", "paper", "".join(body))
+
+
+# ------------------------------------------------------------------ V2 observability / provenance
+
+@app.get("/api/v2/health")
+def api_v2_health():
+    """Actionable operations view: per-source health + day status, shared quotas, queues, disk, DB growth."""
+    import shutil
+
+    from app.core import ratelimit
+    with get_engine().connect() as conn:
+        src = [dict(r) for r in conn.execute(text("""
+            SELECT h.source, h.country, h.dataset, h.status legacy_status, h.health_status, h.last_success, h.last_event,
+                   h.consecutive_failures, h.response_status, h.latency_ms, h.schema_fingerprint, h.expected_fingerprint,
+                   h.parser_version, h.watermark, h.license_status, d.status today_status, d.runs today_runs, d.failures today_failures
+            FROM source_health h LEFT JOIN source_daily_status d ON d.source = h.source AND d.day = CURRENT_DATE
+            ORDER BY h.source""")).mappings()]
+        quotas = ratelimit.status(conn)
+        jobs = [dict(r) for r in conn.execute(text("""SELECT name, status, last_started, last_finished, left(last_error, 200) err
+                                                      FROM processing_jobs WHERE name NOT LIKE 'pit_facts:%' ORDER BY name""")).mappings()]
+        db_bytes = conn.execute(text("SELECT pg_database_size(current_database())")).scalar()
+        pending = conn.execute(text("SELECT count(*) FROM events WHERE returns_status IN ('pending', 'retry')")).scalar()
+    du = shutil.disk_usage("/")
+    return _jsonable({"sources": src, "quotas": quotas, "jobs": jobs, "db_bytes": db_bytes, "returns_queue": pending,
+                      "disk": {"free_gb": round(du.free / 1024**3, 1), "used_pct": round(100 * du.used / du.total, 1)}})
+
+
+@app.get("/api/v2/provenance/{eid}")
+def api_v2_provenance(eid: int):
+    """Signal -> event -> source document chain ("Kaynağı görüntüle")."""
+    with get_engine().connect() as conn:
+        ev = conn.execute(text("""SELECT id, event_type, event_family, country, exchange, security_id, ticker, issuer_cik, public_date,
+                                         available_at, accepted_at, first_seen_at, date_quality, source_url, source_accession,
+                                         parser_version, identity_confidence, event_confidence, needs_review, superseded,
+                                         canonical_id, feature_source_event_ids FROM events WHERE id = :i"""), {"i": eid}).mappings().first()
+        if ev is None:
+            raise HTTPException(404)
+        comps = []
+        for cid in (ev["feature_source_event_ids"] or []):
+            c = conn.execute(text("SELECT id, event_type, public_date, available_at, source_url FROM events WHERE id = :i"),
+                             {"i": cid}).mappings().first()
+            if c:
+                comps.append(dict(c))
+        snap = conn.execute(text("SELECT * FROM event_market_snapshots WHERE event_id = :i"), {"i": eid}).mappings().first()
+    return _jsonable({"event": dict(ev), "components": comps, "market_snapshot": dict(snap) if snap else None})
+
+
+@app.get("/api/v2/signals")
+def api_v2_signals():
+    from app.core.signal_registry import as_rows
+    with get_engine().connect() as conn:
+        ledger = [dict(r) for r in conn.execute(text("""SELECT DISTINCT ON (family, horizon) family, horizon, n_events, n_companies,
+                                                           in_sample_rate, out_of_sample_rate, p_value, adjusted_p, verdict, run_at
+                                                        FROM hypothesis_log ORDER BY family, horizon, run_at DESC""")).mappings()]
+        n_tests = conn.execute(text("SELECT count(DISTINCT (family, variant, horizon)) FROM hypothesis_log")).scalar()
+    return _jsonable({"families": as_rows(), "latest": ledger, "hypotheses_tested": n_tests})
+
+
+@app.get("/api/v2/manifests")
+def api_v2_manifests():
+    with get_engine().connect() as conn:
+        rows = [dict(r) for r in conn.execute(text("""SELECT DISTINCT ON (dataset) * FROM dataset_manifests
+                                                      ORDER BY dataset, generated_at DESC""")).mappings()]
+    return _jsonable({"manifests": rows})
