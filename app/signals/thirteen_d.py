@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "13d-class-v3"
+VERSION = "13d-class-v3.1"
 FLAGS = ("board_change", "strategic_alternatives", "sale_request", "capital_allocation", "governance_change",
          "management_change", "proxy_intent", "financing_only", "passive_ownership", "technical_amendment")
 STRONG = ("board_change", "proxy_intent", "sale_request", "governance_change", "management_change")
@@ -241,12 +241,20 @@ def gather(conn, f: dict, campaign_index: dict | None = None) -> dict:
                     prior_other += 1
     elif key:
         rows = conn.execute(text("""SELECT issuer_cik FROM thirteen_d_classification c JOIN activist_filings a ON a.accession = c.accession
-                                    WHERE c.investor_key = :k AND a.filed_date < :d AND (c.flags->>'stated_strong')::int > 0"""),
+                                    WHERE c.investor_key = :k AND a.filed_date < :d AND c.filing_class = 'ACTIVIST_13D'
+                                      AND c.confidence IN ('HIGH', 'MEDIUM') AND (c.flags->>'stated_strong')::int > 0"""),
                             {"k": key, "d": filed}).scalars().all()
         prior_other = len({r for r in rows if r != issuer})
         prior_chain = sum(1 for r in rows if r == issuer)
     return {"insider": agg, "members": members, "names": names, "investor_key": key,
             "prior_campaign_issuers": prior_other, "prior_chain_demands": prior_chain}
+
+
+def is_campaign(features: dict, percent: float | None, names: list[str], issuer_name: str | None) -> bool:
+    """A filing counts toward a filer's campaign record only when its own text makes it an activist filing (stated demand,
+    not an agreement / financing / control stake) - never merely because board terms are mentioned."""
+    cls, conf, _ = classify(features, percent=percent, names=names, issuer_name=issuer_name)
+    return cls == "ACTIVIST_13D" and conf in USABLE
 
 
 def classify_filing(conn, f: dict, campaign_index: dict | None = None, persist: bool = True) -> dict:
