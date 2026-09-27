@@ -1,0 +1,1345 @@
+{
+  "meta": {
+    "disclaimer": "Do not rely on openFDA to make decisions regarding medical care. While we make every effort to ensure that data is accurate, you should assume all results are unvalidated. We may limit or otherwise restrict your access to the API in line with our Terms of Service.",
+    "terms": "https://open.fda.gov/terms/",
+    "license": "https://open.fda.gov/license/",
+    "last_updated": "2026-09-24",
+    "results": {
+      "skip": 0,
+      "limit": 3,
+      "total": 523
+    }
+  },
+  "results": [
+    {
+      "submissions": [
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "15",
+          "submission_status": "AP",
+          "submission_status_date": "20241101",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling",
+          "application_docs": [
+            {
+              "id": "80131",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2024/215866Orig1s010, s015, s022ltr.pdf",
+              "date": "20241105",
+              "type": "Letter"
+            },
+            {
+              "id": "80137",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/label/2024/215866s010s015s022lbl.pdf",
+              "date": "20241105",
+              "type": "Label"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "6",
+          "submission_status": "AP",
+          "submission_status_date": "20230728",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling",
+          "application_docs": [
+            {
+              "id": "74957",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2023/215866Orig1s002,s006ltr.pdf",
+              "date": "20230731",
+              "type": "Letter"
+            },
+            {
+              "id": "74960",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/label/2023/215866Orig1s002s006lbl.pdf",
+              "date": "20230731",
+              "type": "Label"
+            }
+          ]
+        },
+        {
+          "submission_type": "ORIG",
+          "submission_number": "1",
+          "submission_status": "AP",
+          "submission_status_date": "20220513",
+          "review_priority": "PRIORITY",
+          "submission_class_code": "TYPE 1",
+          "submission_class_code_description": "Type 1 - New Molecular Entity",
+          "application_docs": [
+            {
+              "id": "71068",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/label/2022/215866s000lbl.pdf",
+              "date": "20220513",
+              "type": "Label"
+            },
+            {
+              "id": "71073",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2022/215866Orig1s000ltr.pdf",
+              "date": "20220516",
+              "type": "Letter"
+            },
+            {
+              "id": "71307",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/nda/2022/215866Orig1s000TOC.html",
+              "date": "20220615",
+              "type": "Review"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "2",
+          "submission_status": "AP",
+          "submission_status_date": "20230728",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling",
+          "application_docs": [
+            {
+              "id": "74956",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2023/215866Orig1s002,s006ltr.pdf",
+              "date": "20230731",
+              "type": "Letter"
+            },
+            {
+              "id": "74959",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/label/2023/215866Orig1s002s006lbl.pdf",
+              "date": "20230731",
+              "type": "Label"
+            },
+            {
+              "id": "80489",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/nda/2024/215866Orig1s002.pdf",
+              "date": "20241204",
+              "type": "Review"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "52",
+          "submission_status": "AP",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling",
+          "application_docs": [
+            {
+              "id": "87076",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/215866Orig1s052lbl.pdf",
+              "date": "20260901",
+              "type": "Label"
+            },
+            {
+              "id": "87080",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2026/215866Orig1s052,217806Orig1s050ltr.pdf",
+              "date": "20260901",
+              "type": "Letter"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "44",
+          "submission_status": "AP",
+          "submission_status_date": "20260827",
+          "review_priority": "STANDARD",
+          "submission_class_code": "EFFICACY",
+          "submission_class_code_description": "Efficacy",
+          "application_docs": [
+            {
+              "id": "87069",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2026/215866Orig1s044,215866Orig1s045ltr.pdf",
+              "date": "20260828",
+              "type": "Letter"
+            },
+            {
+              "id": "87100",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/215866s044s045lbl.pdf",
+              "date": "20260901",
+              "type": "Label"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "34",
+          "submission_status": "AP",
+          "submission_status_date": "20250925",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling",
+          "application_docs": [
+            {
+              "id": "83541",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2025/215866Orig1s034ltr.pdf",
+              "date": "20250926",
+              "type": "Letter"
+            },
+            {
+              "id": "83557",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/label/2025/215866s034lbl.pdf",
+              "date": "20250926",
+              "type": "Label"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "22",
+          "submission_status": "AP",
+          "submission_status_date": "20241101",
+          "review_priority": "901 REQUIRED",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling",
+          "application_docs": [
+            {
+              "id": "80132",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2024/215866Orig1s010, s015, s022ltr.pdf",
+              "date": "20241105",
+              "type": "Letter"
+            },
+            {
+              "id": "80136",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/label/2024/215866s010s015s022lbl.pdf",
+              "date": "20241105",
+              "type": "Label"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "9",
+          "submission_status": "AP",
+          "submission_status_date": "20260120",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling",
+          "application_docs": [
+            {
+              "id": "84787",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2026/215866Orig1s009ltr.pdf",
+              "date": "20260121",
+              "type": "Letter"
+            },
+            {
+              "id": "84788",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2026/215866Orig1s009ltr.pdf",
+              "date": "20260121",
+              "type": "Letter"
+            },
+            {
+              "id": "84797",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/label/2026/215866s009lbl.pdf",
+              "date": "20260121",
+              "type": "Label"
+            },
+            {
+              "id": "84798",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/215866s009lbl.pdf#page=25",
+              "date": "20260121",
+              "type": "Medication Guide"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "10",
+          "submission_status": "AP",
+          "submission_status_date": "20241101",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling",
+          "application_docs": [
+            {
+              "id": "80130",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2024/215866Orig1s010, s015, s022ltr.pdf",
+              "date": "20241105",
+              "type": "Letter"
+            },
+            {
+              "id": "80138",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/label/2024/215866s010s015s022lbl.pdf",
+              "date": "20241105",
+              "type": "Label"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "39",
+          "submission_status": "AP",
+          "submission_status_date": "20251219",
+          "review_priority": "PRIORITY",
+          "submission_class_code": "EFFICACY",
+          "submission_class_code_description": "Efficacy",
+          "application_docs": [
+            {
+              "id": "84507",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/label/2025/215866s039lbl.pdf",
+              "date": "20251223",
+              "type": "Label"
+            },
+            {
+              "id": "84514",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2025/215866Orig1s039ltr.pdf",
+              "date": "20251223",
+              "type": "Letter"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "45",
+          "submission_status": "AP",
+          "submission_status_date": "20260827",
+          "review_priority": "STANDARD",
+          "submission_class_code": "EFFICACY",
+          "submission_class_code_description": "Efficacy",
+          "application_docs": [
+            {
+              "id": "87070",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2026/215866Orig1s044,215866Orig1s045ltr.pdf",
+              "date": "20260828",
+              "type": "Letter"
+            },
+            {
+              "id": "87101",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/215866s044s045lbl.pdf",
+              "date": "20260901",
+              "type": "Label"
+            },
+            {
+              "id": "87102",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/215866s044s045lbl.pdf#page=27",
+              "date": "20260901",
+              "type": "Medication Guide"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "41",
+          "submission_status": "AP",
+          "submission_status_date": "20260107",
+          "review_priority": "STANDARD",
+          "submission_class_code": "MANUF (CMC)",
+          "submission_class_code_description": "Manufacturing (CMC)",
+          "application_docs": [
+            {
+              "id": "84716",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2026/215866Orig1s041ltr.pdf",
+              "date": "20260108",
+              "type": "Letter"
+            },
+            {
+              "id": "84721",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/215866s041lbl.pdf",
+              "date": "20260108",
+              "type": "Label"
+            },
+            {
+              "id": "84722",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/215866s041lbl.pdf#page=24",
+              "date": "20260108",
+              "type": "Medication Guide"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "31",
+          "submission_status": "AP",
+          "submission_status_date": "20250528",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling",
+          "application_docs": [
+            {
+              "id": "82350",
+              "url": "https://www.accessdata.fda.gov/drugsatfda_docs/appletter/2025/215866Orig1s031ltr.pdf",
+              "date": "20250529",
+              "type": "Letter"
+            },
+            {
+              "id": "82379",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/label/2025/215866s031lbl.pdf",
+              "date": "20250602",
+              "type": "Label"
+            }
+          ]
+        }
+      ],
+      "application_number": "NDA215866",
+      "sponsor_name": "ELI LILLY AND CO",
+      "openfda": {
+        "application_number": [
+          "NDA215866"
+        ],
+        "brand_name": [
+          "MOUNJARO",
+          "MOUNJARO KWIKPEN"
+        ],
+        "generic_name": [
+          "TIRZEPATIDE"
+        ],
+        "manufacturer_name": [
+          "Eli Lilly and Company"
+        ],
+        "product_ndc": [
+          "0002-3002",
+          "0002-1506",
+          "0002-1495",
+          "0002-1484",
+          "0002-1471",
+          "0002-1460",
+          "0002-1457",
+          "0002-1152",
+          "0002-1243",
+          "0002-2214",
+          "0002-2340",
+          "0002-2423",
+          "0002-4052",
+          "0002-4103",
+          "0002-4210",
+          "0002-4304",
+          "0002-4523",
+          "0002-4612",
+          "0002-3466",
+          "0002-3455",
+          "0002-3444",
+          "0002-3433",
+          "0002-3422",
+          "0002-3411"
+        ],
+        "product_type": [
+          "HUMAN PRESCRIPTION DRUG"
+        ],
+        "route": [
+          "SUBCUTANEOUS"
+        ],
+        "substance_name": [
+          "TIRZEPATIDE"
+        ],
+        "rxcui": [
+          "2601743",
+          "2601746",
+          "2601755",
+          "2601758",
+          "2601761",
+          "2601764",
+          "2601767",
+          "2601770",
+          "2601773",
+          "2601776",
+          "2601784",
+          "2601785",
+          "2644396",
+          "2644399",
+          "2644401",
+          "2644403",
+          "2644405",
+          "2644407",
+          "2644409",
+          "2644411",
+          "2644413",
+          "2644415",
+          "2644417",
+          "2644419",
+          "2732437",
+          "2732442",
+          "2732446",
+          "2732449",
+          "2732452",
+          "2732456",
+          "2733666",
+          "2733668",
+          "2733670",
+          "2733671",
+          "2733673",
+          "2733675",
+          "2734623",
+          "2734628",
+          "2734632",
+          "2734636",
+          "2734640",
+          "2734644",
+          "2735286",
+          "2735288",
+          "2735290",
+          "2735292",
+          "2735294",
+          "2735297"
+        ],
+        "spl_id": [
+          "8f6367b6-bf0d-46e1-ba7d-0417523474e5"
+        ],
+        "spl_set_id": [
+          "d2d7da5d-ad07-4228-955f-cf7e355c8cc0"
+        ],
+        "package_ndc": [
+          "0002-1506-01",
+          "0002-1506-80",
+          "0002-1506-61",
+          "0002-1495-01",
+          "0002-1495-80",
+          "0002-1484-01",
+          "0002-1484-80",
+          "0002-1471-01",
+          "0002-1471-80",
+          "0002-1460-01",
+          "0002-1460-80",
+          "0002-1457-01",
+          "0002-1457-80",
+          "0002-1152-01",
+          "0002-1243-01",
+          "0002-2214-01",
+          "0002-2340-01",
+          "0002-2423-01",
+          "0002-3002-01",
+          "0002-4052-01",
+          "0002-4052-11",
+          "0002-4103-01",
+          "0002-4103-11",
+          "0002-4210-01",
+          "0002-4210-11",
+          "0002-4304-01",
+          "0002-4304-11",
+          "0002-4523-01",
+          "0002-4523-11",
+          "0002-4612-01",
+          "0002-4612-11",
+          "0002-3466-01",
+          "0002-3466-11",
+          "0002-3455-01",
+          "0002-3455-11",
+          "0002-3444-01",
+          "0002-3444-11",
+          "0002-3433-01",
+          "0002-3433-11",
+          "0002-3422-01",
+          "0002-3422-11",
+          "0002-3411-01",
+          "0002-3411-11"
+        ],
+        "nui": [
+          "N0000194015",
+          "N0000000152",
+          "N0000178480",
+          "N0000020058"
+        ],
+        "pharm_class_epc": [
+          "Glucose-dependent Insulinotropic Polypeptide Receptor Agonist [EPC]",
+          "GLP-1 Receptor Agonist [EPC]"
+        ],
+        "pharm_class_moa": [
+          "G-Protein-linked Receptor Interactions [MoA]",
+          "Glucagon-like Peptide-1 (GLP-1) Agonists [MoA]"
+        ],
+        "unii": [
+          "OYN3CCI6QE"
+        ]
+      },
+      "products": [
+        {
+          "product_number": "018",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "60MG/2.4ML (25MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "024",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO KWIKPEN",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "60MG/2.4ML (25MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "016",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "40MG/2.4ML (16.7MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "008",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "5MG/0.5ML (5MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "022",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO KWIKPEN",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "40MG/2.4ML (16.7MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "014",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "20MG/2.4ML (8.33MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "006",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO (AUTOINJECTOR)",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "15MG/0.5ML (15MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "020",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO KWIKPEN",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "20MG/2.4ML (8.33MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "012",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "15MG/0.5ML (15MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "004",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO (AUTOINJECTOR)",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "10MG/0.5ML (10MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "010",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "10MG/0.5ML (10MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "002",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO (AUTOINJECTOR)",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "5MG/0.5ML (5MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "019",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO KWIKPEN",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "10MG/2.4ML (4.17MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "017",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "50MG/2.4ML (20.8MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "009",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "7.5MG/0.5ML (7.5MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "023",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO KWIKPEN",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "50MG/2.4ML (20.8MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "015",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "30MG/2.4ML (12.5MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "007",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "2.5MG/0.5ML (2.5MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "021",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO KWIKPEN",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "30MG/2.4ML (12.5MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "013",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "10MG/2.4ML (4.17MG/ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "005",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO (AUTOINJECTOR)",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "12.5MG/0.5ML (12.5MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "011",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "12.5MG/0.5ML (12.5MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "003",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO (AUTOINJECTOR)",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "7.5MG/0.5ML (7.5MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        },
+        {
+          "product_number": "001",
+          "reference_drug": "Yes",
+          "brand_name": "MOUNJARO (AUTOINJECTOR)",
+          "active_ingredients": [
+            {
+              "name": "TIRZEPATIDE",
+              "strength": "2.5MG/0.5ML (2.5MG/0.5ML)"
+            }
+          ],
+          "reference_standard": "Yes",
+          "dosage_form": "SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        }
+      ]
+    },
+    {
+      "submissions": [
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "8",
+          "submission_status": "AP",
+          "submission_status_date": "19910128",
+          "submission_class_code": "MANUF (CMC)",
+          "submission_class_code_description": "Manufacturing (CMC)"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "6",
+          "submission_status": "AP",
+          "submission_status_date": "19880318",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "11",
+          "submission_status": "AP",
+          "submission_status_date": "20260807",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "7",
+          "submission_status": "AP",
+          "submission_status_date": "19890613",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "3",
+          "submission_status": "AP",
+          "submission_status_date": "19821110",
+          "submission_class_code": "MANUF (CMC)",
+          "submission_class_code_description": "Manufacturing (CMC)"
+        },
+        {
+          "submission_type": "ORIG",
+          "submission_number": "1",
+          "submission_status": "AP",
+          "submission_status_date": "19771220"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "10",
+          "submission_status": "AP",
+          "submission_status_date": "20260807",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        }
+      ],
+      "application_number": "ANDA085432",
+      "sponsor_name": "HIKMA",
+      "products": [
+        {
+          "product_number": "001",
+          "reference_drug": "No",
+          "brand_name": "SODIUM BUTABARBITAL",
+          "active_ingredients": [
+            {
+              "name": "BUTABARBITAL SODIUM",
+              "strength": "30MG"
+            }
+          ],
+          "reference_standard": "No",
+          "dosage_form": "TABLET",
+          "route": "ORAL",
+          "marketing_status": "Discontinued"
+        }
+      ]
+    },
+    {
+      "submissions": [
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "11",
+          "submission_status": "AP",
+          "submission_status_date": "20161216",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "46",
+          "submission_status": "AP",
+          "submission_status_date": "20231215",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "38",
+          "submission_status": "AP",
+          "submission_status_date": "20220503",
+          "submission_class_code": "REMS",
+          "submission_class_code_description": "REMS"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "52",
+          "submission_status": "AP",
+          "submission_status_date": "20251222",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "44",
+          "submission_status": "AP",
+          "submission_status_date": "20230525",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "9",
+          "submission_status": "AP",
+          "submission_status_date": "20160707",
+          "submission_class_code": "REMS",
+          "submission_class_code_description": "REMS"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "42",
+          "submission_status": "AP",
+          "submission_status_date": "20221216",
+          "submission_class_code": "REMS",
+          "submission_class_code_description": "REMS"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "7",
+          "submission_status": "AP",
+          "submission_status_date": "20150205",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "26",
+          "submission_status": "AP",
+          "submission_status_date": "20210114",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "40",
+          "submission_status": "AP",
+          "submission_status_date": "20220617",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "5",
+          "submission_status": "AP",
+          "submission_status_date": "20130904",
+          "submission_class_code": "REMS",
+          "submission_class_code_description": "REMS"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "16",
+          "submission_status": "AP",
+          "submission_status_date": "20180201",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "3",
+          "submission_status": "AP",
+          "submission_status_date": "20140418",
+          "submission_class_code": "MANUF (CMC)",
+          "submission_class_code_description": "Manufacturing (CMC)",
+          "application_docs": [
+            {
+              "id": "10167",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/appletter/2014/203136Orig1s003ltr.pdf",
+              "date": "20140529",
+              "type": "Letter"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "30",
+          "submission_status": "AP",
+          "submission_status_date": "20210304",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "14",
+          "submission_status": "AP",
+          "submission_status_date": "20180131",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "59",
+          "submission_status": "AP",
+          "submission_status_date": "20260814",
+          "submission_class_code": "REMS",
+          "submission_class_code_description": "REMS"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "10",
+          "submission_status": "AP",
+          "submission_status_date": "20161216",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "49",
+          "submission_status": "AP",
+          "submission_status_date": "20250221",
+          "submission_class_code": "REMS",
+          "submission_class_code_description": "REMS"
+        },
+        {
+          "submission_type": "ORIG",
+          "submission_number": "1",
+          "submission_status": "AP",
+          "submission_status_date": "20130222",
+          "submission_class_code": "UNKNOWN",
+          "application_docs": [
+            {
+              "id": "44587",
+              "title": "REMS",
+              "url": "http://www.accessdata.fda.gov/scripts/cder/rems/index.cfm?event=RemsDetails.page&REMS=9",
+              "date": "20150702",
+              "type": "Other"
+            },
+            {
+              "id": "32381",
+              "url": "http://www.accessdata.fda.gov/drugsatfda_docs/appletter/2013/203136Orig1s000ltr.pdf",
+              "date": "20130226",
+              "type": "Letter"
+            }
+          ]
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "37",
+          "submission_status": "AP",
+          "submission_status_date": "20220617",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "43",
+          "submission_status": "AP",
+          "submission_status_date": "20240320",
+          "submission_class_code": "REMS",
+          "submission_class_code_description": "REMS"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "35",
+          "submission_status": "AP",
+          "submission_status_date": "20220614",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "19",
+          "submission_status": "AP",
+          "submission_status_date": "20181031",
+          "submission_class_code": "REMS",
+          "submission_class_code_description": "REMS"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "6",
+          "submission_status": "AP",
+          "submission_status_date": "20150212",
+          "submission_class_code": "REMS",
+          "submission_class_code_description": "REMS"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "25",
+          "submission_status": "AP",
+          "submission_status_date": "20210114",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "17",
+          "submission_status": "AP",
+          "submission_status_date": "20180201",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "21",
+          "submission_status": "AP",
+          "submission_status_date": "20191008",
+          "review_priority": "STANDARD",
+          "submission_class_code": "LABELING",
+          "submission_class_code_description": "Labeling"
+        },
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "13",
+          "submission_status": "AP",
+          "submission_status_date": "20170523",
+          "submission_class_code": "REMS",
+          "submission_class_code_description": "REMS"
+        }
+      ],
+      "application_number": "ANDA203136",
+      "sponsor_name": "AMNEAL PHARMS",
+      "openfda": {
+        "application_number": [
+          "ANDA203136"
+        ],
+        "brand_name": [
+          "BUPRENORPHINE HCL AND NALOXONE HCL"
+        ],
+        "generic_name": [
+          "BUPRENORPHINE AND NALOXONE"
+        ],
+        "manufacturer_name": [
+          "Amneal Pharmaceuticals LLC"
+        ],
+        "product_ndc": [
+          "65162-415",
+          "65162-416"
+        ],
+        "product_type": [
+          "HUMAN PRESCRIPTION DRUG"
+        ],
+        "route": [
+          "SUBLINGUAL"
+        ],
+        "substance_name": [
+          "BUPRENORPHINE HYDROCHLORIDE",
+          "NALOXONE HYDROCHLORIDE DIHYDRATE"
+        ],
+        "rxcui": [
+          "351266",
+          "351267"
+        ],
+        "spl_id": [
+          "4cea862f-8edf-4035-a7f5-328beff51a29"
+        ],
+        "spl_set_id": [
+          "17b63f10-c9df-44be-80fa-6f1c305583b8"
+        ],
+        "package_ndc": [
+          "65162-416-03",
+          "65162-416-09",
+          "65162-415-03",
+          "65162-415-09"
+        ],
+        "unii": [
+          "56W8MW3EN1",
+          "5Q187997EE"
+        ]
+      },
+      "products": [
+        {
+          "product_number": "002",
+          "reference_drug": "No",
+          "brand_name": "BUPRENORPHINE HYDROCHLORIDE AND NALOXONE HYDROCHLORIDE",
+          "active_ingredients": [
+            {
+              "name": "BUPRENORPHINE HYDROCHLORIDE",
+              "strength": "EQ 8MG BASE"
+            },
+            {
+              "name": "NALOXONE HYDROCHLORIDE",
+              "strength": "EQ 2MG BASE"
+            }
+          ],
+          "reference_standard": "No",
+          "dosage_form": "TABLET",
+          "route": "SUBLINGUAL",
+          "marketing_status": "Prescription",
+          "te_code": "AB"
+        },
+        {
+          "product_number": "001",
+          "reference_drug": "No",
+          "brand_name": "BUPRENORPHINE HYDROCHLORIDE AND NALOXONE HYDROCHLORIDE",
+          "active_ingredients": [
+            {
+              "name": "BUPRENORPHINE HYDROCHLORIDE",
+              "strength": "EQ 2MG BASE"
+            },
+            {
+              "name": "NALOXONE HYDROCHLORIDE",
+              "strength": "EQ 0.5MG BASE"
+            }
+          ],
+          "reference_standard": "No",
+          "dosage_form": "TABLET",
+          "route": "SUBLINGUAL",
+          "marketing_status": "Prescription",
+          "te_code": "AB"
+        }
+      ]
+    }
+  ]
+}

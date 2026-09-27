@@ -144,3 +144,23 @@ def get(url: str, **kw) -> httpx.Response:
 
 def post(url: str, **kw) -> httpx.Response:
     return request("POST", url, **kw)
+
+
+def download(url: str, path: str, *, chunk: int = 1 << 20, headers: dict | None = None) -> int:
+    """Stream a large file to disk (never held in memory). Returns bytes written."""
+    hdrs = {"User-Agent": settings.sec_user_agent if _host_key(url) == "sec.gov" else "Mozilla/5.0 (compatible; PublicEdge/1.0)"}
+    hdrs.update(headers or {})
+    _bucket(url).wait()
+    shared = _SHARED_KEY.get(_host_key(url)) if _SHARED else None
+    if shared:
+        from app.core import ratelimit
+        ratelimit.acquire(shared)
+    n = 0
+    with _client.stream("GET", url, headers=hdrs, timeout=600) as r:
+        if r.status_code >= 400:
+            raise HttpError(url, r.status_code, "download failed")
+        with open(path, "wb") as f:
+            for b in r.iter_bytes(chunk):
+                f.write(b)
+                n += len(b)
+    return n

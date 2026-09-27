@@ -29,6 +29,12 @@ x-app: &app
     PAPER_DASHBOARD_URL: ${PAPER_DASHBOARD_URL:-}
     INSIDER_PROFILE_MIN_EPISODES: ${INSIDER_PROFILE_MIN_EPISODES:-8}
     SEC_MAX_RPS: "3"
+    # V2: one shared request budget per API across worker / backfill / intelligence (app.core.ratelimit)
+    PE_SHARED_RATELIMIT: ${PE_SHARED_RATELIMIT:-1}
+    RAW_LAKE_DIR: /data/raw
+    EXPORT_DIR: /data/exports
+  volumes:
+    - ${PE_DATA_DIR:-/opt/public-edge-data}:/data
   depends_on:
     db:
       condition: service_healthy

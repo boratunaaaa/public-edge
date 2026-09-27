@@ -274,6 +274,7 @@ def test_news_backfill_uses_listed_at_the_time_universe(engine, monkeypatch):
         assert sm.resolve_ticker_at_date("0000000888", date(2022, 6, 1)) == "GONE"
         assert sm.resolve_ticker_at_date("0000000888", day) is None  # not listed anymore on a recent date
     monkeypatch.setattr(nb, "daily_8k", lambda d: [("0000000888", "0000000888-26-000001")] if d == day else [])
+    monkeypatch.setattr(nb, "disk_ok", lambda: True)  # the guard reads the host's free space
     fetched = []
     monkeypatch.setattr(nb.edgar, "fetch_full_text", lambda cik, acc: fetched.append(acc) or "")
     out = nb.backfill_news_8k(engine, days=5)
