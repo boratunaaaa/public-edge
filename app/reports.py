@@ -57,10 +57,12 @@ def daily_report(engine: Engine, now: datetime | None = None) -> str:
         _section("🧭 Takip ettiğimiz şirketlerde görüş değişikliği",
                  [f"{t}: {TEZ.get(c, c)} — {x[:90]}" for t, c, x in tch]) + \
         _section("👀 Takip listesindeki şirketlerde yeni gelişmeler", ol(wl_dev))
-    head = f"🗞 <b>PUBLIC EDGE GÜNLÜK ÖZET</b> — {now:%d.%m.%Y}\n"
-    if not parts:
-        return head + "\nSon 24 saatte kayda değer bir gelişme olmadı."
-    return head + "\n" + "\n".join(parts).rstrip()
+    from app.reports_v2 import morning_sections
+    with engine.connect() as conn:
+        more = morning_sections(conn, now)
+    head = f"🗞 <b>PUBLIC EDGE MORNING BRIEF</b> — {now:%d.%m.%Y}\n"
+    us = parts or ["Son 24 saatte kayda değer bir gelişme olmadı.", ""]
+    return head + "\n🇺🇸 <b>ABD</b>\n" + "\n".join(us + more).rstrip()
 
 
 def alert_scorecard(conn, now: datetime) -> list[str]:

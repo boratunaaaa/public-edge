@@ -98,6 +98,25 @@ def _alpha_tasks(engine, now: datetime, last_scan: list[float]) -> None:
             log.exception("%s failed", name)
             with engine.begin() as conn:
                 health_failure(conn, f"alpha:{name}", f"{type(e).__name__}: {e}")
+    try:  # forward market snapshot of fresh live events (V2 #73)
+        from app.core.snapshots import capture_pending
+        snap = capture_pending(engine, limit=50)
+        if snap:
+            log.info("market snapshots %s", snap)
+    except Exception:
+        log.exception("market snapshots failed")
+    if st.get("paper") == today and not st.get("paper_report_sent") == today:
+        try:
+            from app.notifications.dispatch import deliver
+            from app.reports_v2 import paper_report
+            msg = paper_report(engine, now.date())
+            if msg:
+                deliver(engine, f"report:paper:{today}", "report", msg)
+            with engine.begin() as conn:
+                st2 = job_state(conn, "alpha_daily")
+                save_job_state(conn, "alpha_daily", {**st2, "paper_report_sent": today}, status="idle")
+        except Exception:
+            log.exception("paper report failed")
     if time.time() - last_scan[0] >= PROPOSAL_EVERY_S:
         last_scan[0] = time.time()
         try:
