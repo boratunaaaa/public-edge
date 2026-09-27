@@ -2,8 +2,8 @@
 
 Global markets (TR / CA / AU) as first-class citizens of the shared core.
 
-Revision ID: 0010 (proposed)
-Revises: 0009 (corporate_action_resolution, applied in production 2026-09-26)
+Revision ID: 0011 (proposed)
+Revises: 0010 (activist_reporting_persons; 0009 = corporate_action_resolution, both in production)
 
 Why each change:
 * events.country / events.exchange / events.security_id - the development mapping keeps them in payload; the core
@@ -18,8 +18,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0010"
-down_revision = "0009"
+revision = "0011"
+down_revision = "0010"
 
 
 def upgrade() -> None:

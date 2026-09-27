@@ -76,7 +76,7 @@ environment `/opt/public-edge-global-dev` + dev database `pe_global_dev` in the 
   arife closure and the Feb-2023 earthquake halt.
 
 ## Schema changes proposed (NOT applied)
-`docs/proposed_migrations/0010_global_markets.py`: `events.country/exchange/security_id` + index (exchange, ticker, date),
+`docs/proposed_migrations/0011_global_markets.py`: `events.country/exchange/security_id` + index (exchange, ticker, date),
 `global_securities`, `global_symbol_periods`, `source_schema_state`. **Required before any second market goes live**:
 several core queries key by ticker only (multi-signal, related events, dashboard) and tickers collide across exchanges
 (BHP on ASX and as a NYSE ADR) - today protected only because foreign event types never map to US signal families
@@ -110,10 +110,10 @@ several core queries key by ticker only (multi-signal, related events, dashboard
 1. TR: KAP list/API behind WAF; production needs the licensed KAP data service (MKK) or an agreed access path.
 2. AU: announcement bodies behind ASX terms (personal vs commercial use) - owner decision (and possibly ASX authority).
 3. CA: SEDI / SEDAR+ bot manager - insider data needs an authorised feed (e.g. a licensed SEDI data product).
-4. Core: exchange-aware keys (proposed migration 0010) before more than one market is live.
+4. Core: exchange-aware keys (proposed migration 0011) before more than one market is live.
 
 ## Recommended deployment order
-1. `fix-tenk-memory` (production stability) - then migration 0010 on a restored copy (dry-run) and deploy.
+1. `fix-tenk-memory` (production stability) - then migration 0011 on a restored copy (dry-run) and deploy.
 2. **AU headline adapter** (live list every 15 min; events stored, not alerted; backtest with the ASX calendar + `.AX` prices).
 3. TR once the KAP access path is agreed (licensed feed), reusing the parser unchanged; CA news beta only after that.
 
@@ -131,4 +131,4 @@ zero-volume BIST holiday bars; cross-exchange ticker collisions like BHP) that w
 * Code: `app/markets/*`, `app/sources/{tr,ca,au}/*`, `scripts/global_sample_ingest.py`, `scripts/global_load_sim.py`
 * Fixtures: `tests/fixtures/global/{tr,ca,au,prices}` (real public data only)
 * Samples: `data/global_samples/{tr,ca,au}_canonical_events.jsonl` (source URL, publication time, raw + normalized)
-* Proposal: `docs/proposed_migrations/0010_global_markets.py` (not applied)
+* Proposal: `docs/proposed_migrations/0011_global_markets.py` (not applied)
