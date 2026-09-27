@@ -1105,3 +1105,18 @@ activist_reporting_persons = Table(
     _created(),
     UniqueConstraint("accession", "person_index", name="uq_activist_reporting_persons_acc_idx"),
 )
+
+# What a Schedule 13D actually is (a 13D is not by itself activism). One row per filing, re-derivable (version).
+thirteen_d_classification = Table(
+    "thirteen_d_classification", metadata,
+    Column("accession", String(25), primary_key=True),
+    Column("issuer_cik", String(10), index=True),
+    Column("investor_key", String(160), index=True),
+    Column("filing_class", String(32), nullable=False, index=True),  # ACTIVIST_13D | INSIDER_13D | CONTROL_HOLDER_13D | PASSIVE_OR_STRUCTURAL_13D | AMBIGUOUS_13D
+    Column("confidence", String(8), nullable=False),  # HIGH | MEDIUM | LOW
+    Column("reasons", JSONB, nullable=False, server_default="[]"),
+    Column("flags", JSONB, nullable=False, server_default="{}"),  # structured Item 4 flags
+    Column("evidence", JSONB, nullable=False, server_default="{}"),
+    Column("version", String(24), nullable=False),
+    Column("classified_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)

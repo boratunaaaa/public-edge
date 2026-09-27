@@ -215,6 +215,15 @@ def process_13d(conn: Connection, sub: Submission, cik_for_url: str, *, is_backf
         "item4_labels": labels, "source_url": url,
     }], ["accession"])
     save_reporting_persons(conn, sub.accession, issuer_cik, d.persons, names, issuer_name)
+    if thirteen_d:
+        from app.signals.thirteen_d import classify_filing
+        try:
+            with conn.begin_nested():
+                classify_filing(conn, {"accession": sub.accession, "issuer_cik": issuer_cik, "investor_cik": investor_cik,
+                                       "investor_name": investor_name, "filed_date": sub.filed_date or (sub.accepted_at.date() if sub.accepted_at else None),
+                                       "percent": pct, "item4_text": d.item4_text, "is_amendment": is_amendment(sub.form_type)})
+        except Exception:  # classification never blocks ingestion; the filing stays unclassified (not counted as activist)
+            log.exception("13D classification failed for %s", sub.accession)
     mark_filing(conn, fid, "ok")
     created: list[int] = []
     # Amendments are not independent events.  Create a new signal only for a material ownership

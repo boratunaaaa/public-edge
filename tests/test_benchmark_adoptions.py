@@ -96,12 +96,28 @@ def test_business_days_between():
 pytestmark_db = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL not set")
 
 
-def _13d(c, acc, investor, filed, amend=False):
-    from app.db.models import activist_filings
+def _13d(c, acc, investor, filed, amend=False, cls="ACTIVIST_13D", conf="HIGH"):
+    from app.db.models import activist_filings, thirteen_d_classification
     c.execute(activist_filings.insert().values(accession=acc, form_type="SC 13D", is_13d=True, is_amendment=amend,
                                                issuer_cik="0001737450", ticker="OPRA", investor_cik=investor,
                                                investor_name=f"Fund {investor}", percent=6.0, filed_date=filed,
                                                item4_class="BOARD_SEAT", source_url="u"))
+    c.execute(thirteen_d_classification.insert().values(accession=acc, issuer_cik="0001737450", investor_key=investor,
+                                                        filing_class=cls, confidence=conf, version="t"))
+
+
+@pytestmark_db
+@pytest.mark.usefixtures("clean")
+def test_insider_control_and_low_confidence_13ds_never_make_a_pack(engine):
+    from app.signals.crowding import crowding_check
+    with engine.begin() as c:
+        _13d(c, "k1", "0000000301", date(2025, 6, 1))
+        _13d(c, "k2", "0000000302", date(2025, 6, 5), cls="INSIDER_13D")
+        _13d(c, "k3", "0000000303", date(2025, 6, 6), cls="CONTROL_HOLDER_13D")
+        _13d(c, "k4", "0000000304", date(2025, 6, 7), conf="LOW")
+        assert crowding_check(c, "0001737450", date(2025, 6, 7), ticker="OPRA") is None
+        _13d(c, "k5", "0000000305", date(2025, 6, 8), conf="MEDIUM")
+        assert crowding_check(c, "0001737450", date(2025, 6, 8), ticker="OPRA") is not None
 
 
 @pytestmark_db

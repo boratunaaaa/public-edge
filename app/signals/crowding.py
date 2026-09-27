@@ -5,6 +5,8 @@ Idea from nncl12345/investor-holdings (crowded activist trades); academic basis:
 Mathews (2022) "Wolf pack activism", Coffee & Palia (2016). Own implementation - no code copied.
 Investors of one economic group (joint filers / linked entities in the beneficial-owner graph) count
 once, the public date is the filing date of the 13D that completes the pack (no look-ahead).
+Only filings classified ACTIVIST_13D with HIGH / MEDIUM confidence count (app.signals.thirteen_d): insiders, control
+holders, passive / structural and unclassified 13Ds never make a pack.
 """
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from datetime import date, timedelta
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection, Engine
 
-from app.db.models import activist_filings
+from app.db.models import activist_filings, thirteen_d_classification as tdc
 from app.db.store import create_event
 from app.signals.owners import beneficial_roots
 
@@ -28,7 +30,8 @@ def crowding_check(conn: Connection, issuer_cik: str | None, as_of: date, *, tic
         return None
     rows = conn.execute(select(activist_filings.c.investor_cik, activist_filings.c.investor_name, activist_filings.c.filed_date,
                                activist_filings.c.percent, activist_filings.c.item4_class, activist_filings.c.accession,
-                               activist_filings.c.source_url).where(and_(
+                               activist_filings.c.source_url).join(tdc, tdc.c.accession == activist_filings.c.accession).where(and_(
+        tdc.c.filing_class == "ACTIVIST_13D", tdc.c.confidence.in_(("HIGH", "MEDIUM")),
         activist_filings.c.issuer_cik == issuer_cik, activist_filings.c.is_13d.is_(True),
         activist_filings.c.is_amendment.is_(False), activist_filings.c.investor_cik.isnot(None),
         activist_filings.c.filed_date > as_of - timedelta(days=WINDOW_DAYS), activist_filings.c.filed_date <= as_of))
