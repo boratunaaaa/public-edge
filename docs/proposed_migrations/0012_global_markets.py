@@ -3,7 +3,7 @@
 Global markets (TR / CA / AU) as first-class citizens of the shared core.
 
 Revision ID: 0012 (proposed)
-Revises: 0011 (activist_reporting_persons; 0009 = corporate_action_resolution, both in production)
+Revises: 0011 (thirteen_d_classification; 0010 = activist_reporting_persons, 0009 = corporate_action_resolution, all in production)
 
 Why each change:
 * events.country / events.exchange / events.security_id - the development mapping keeps them in payload; the core
