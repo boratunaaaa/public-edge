@@ -1081,3 +1081,27 @@ corporate_action_resolution = Table(
     _created(),
     UniqueConstraint("predecessor_cik", "effective_date", name="uq_corporate_action_resolution_pred_eff"),
 )
+
+# Every reporting person of a Schedule 13D / 13G (group filings keep all members; the filing's investor fields hold
+# only the lead). identity_key = CIK, else NAME:<normalized name> - never a fuzzy merge.
+activist_reporting_persons = Table(
+    "activist_reporting_persons", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("accession", String(25), nullable=False, index=True),
+    Column("issuer_cik", String(10), index=True),
+    Column("group_id", String(40)),  # GRP:<accession> when several persons report as a group
+    Column("person_index", Integer, nullable=False),
+    Column("name", Text, nullable=False),
+    Column("name_norm", Text, nullable=False),
+    Column("cik", String(10), index=True),
+    Column("identity_key", String(160), nullable=False, index=True),
+    Column("kind", String(12), nullable=False, server_default="UNKNOWN"),  # INDIVIDUAL | ENTITY | UNKNOWN
+    Column("type_codes", JSONB, nullable=False, server_default="[]"),  # cover-page "type of reporting person"
+    Column("percent", Float),
+    Column("is_lead", Boolean, nullable=False, server_default="false"),
+    Column("confidence", String(12), nullable=False),  # HIGH | MEDIUM | NAME | AMBIGUOUS
+    Column("cik_evidence", Text),
+    Column("source", String(32), nullable=False),  # xml_reportingPersonInfo | cover_page | sec_header
+    _created(),
+    UniqueConstraint("accession", "person_index", name="uq_activist_reporting_persons_acc_idx"),
+)

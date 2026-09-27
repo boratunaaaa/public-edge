@@ -63,6 +63,7 @@ class ReportingPerson:
     cik: str | None
     percent: float | None
     shares: float | None
+    type_codes: list = field(default_factory=list)  # cover page "type of reporting person" (IN, CO, PN, OO, IA ...)
 
 
 @dataclass
@@ -151,13 +152,54 @@ def _cusip(raw: str | None) -> str | None:
     return c if len(c) == 9 and c.isalnum() else None
 
 
+_RP_START = re.compile(r"NAMES?\s+OF\s+REPORTING\s+PERSONS?", re.I)
+_RP_NAME = re.compile(r"NAMES?\s+OF\s+REPORTING\s+PERSONS?[^A-Za-z]{0,6}(?:I\.?R\.?S\.?\s+IDENTIFICATION\s+NOS?\.?\s+OF\s+ABOVE\s+PERSONS?\s*"
+                      r"\(ENTITIES\s+ONLY\)\s*)?[:.]?\s*(.{2,160}?)\s*(?=\(?\s*2\s*\)?\s*\.?\s*CHECK|I\.R\.S\.|S\.S\.\s+OR|IRS\s+Identification|\(a\)\s*[☐☒\[\]o]|$)",
+                      re.I | re.S)
+_RP_TYPE = re.compile(r"TYPE\s+OF\s+REPORTING\s+PERSONS?\s*(?:\(\s*See\s+Instructions?\s*\))?\s*[:.]?\s*\(?\s*((?:IN|CO|PN|OO|IA|HC|BD|BK|IC|IV|EP|FI|CP|SA)(?:\s*[,;/]\s*(?:IN|CO|PN|OO|IA|HC|BD|BK|IC|IV|EP|FI|CP|SA))*)\b", re.I)
+_RP_PCT = re.compile(r"PERCENT\s+OF\s+CLASS\s+REPRESENTED\s+BY\s+AMOUNT\s+IN\s+ROW\s*\(?\s*\d+\s*\)?\s*[:.]?\s*(?:\(?\s*\d+\s*\)\s*)?([0-9]{1,3}(?:\.[0-9]+)?)\s*%?", re.I)
+
+
+def cover_reporting_persons(txt: str) -> list[ReportingPerson]:
+    """One entry per cover page (name, percent of class, type codes); duplicates collapsed by exact name."""
+    out, seen = [], set()
+    starts = [m.start() for m in _RP_START.finditer(txt)]
+    for i, st in enumerate(starts):
+        seg = txt[st: starts[i + 1] if i + 1 < len(starts) else st + 6000]
+        m = _RP_NAME.search(seg)
+        if not m:
+            continue
+        name = re.sub(r"\s+", " ", re.sub(r"[☐☒]", " ", m.group(1))).strip(" :.-_*")
+        name = re.sub(r"^\(?1\)?\.?\s*", "", name)
+        name = re.sub(r"\s*(?:I\.R\.S\..*|S\.S\. or .*|\(ENTITIES ONLY\).*)$", "", name, flags=re.I).strip(" ,.;:")
+        name = re.sub(r"\s*(?:\(?\d+\)?\.?\s*)?Check\s+the\s+Appropriate.*$", "", name, flags=re.I)
+        name = re.sub(r"\s*[-–—,]\s*an?\s+(?:individual|natural person)\s*$", "", name, flags=re.I).strip(" ,.;:–-")
+        name = re.sub(r"\s+\d{2}-\d{7}$", "", name)  # trailing EIN
+        name = re.sub(r"\s*\(\d{1,2}\)$", "", name).strip(" ,.;:")  # footnote marker
+        if re.fullmatch(r"(?:Combined|All|The)\s+Reporting\s+Persons?", name, re.I):
+            continue
+        key = re.sub(r"[^A-Z0-9&]", "", name.upper())
+        if not (2 < len(name) < 120) or key in seen:
+            continue
+        seen.add(key)
+        pc = _RP_PCT.search(seg)
+        ty = _RP_TYPE.search(seg)
+        out.append(ReportingPerson(name=name, cik=None, percent=float(pc.group(1)) if pc and 0 <= float(pc.group(1)) <= 100 else None,
+                                   shares=None, type_codes=re.findall(r"[A-Z]{2}", ty.group(1).upper()) if ty else []))
+    return out
+
+
 def parse_schedule13_legacy(text_or_html: str, form_type: str) -> Schedule13:
     txt = html_to_text(text_or_html) if "<" in text_or_html[:5000] else text_or_html
     pcts = [float(p) for p in _PCT_RE.findall(txt) if 0 < float(p) <= 100]
     m4 = _ITEM4_RE.search(txt)
     item4 = " ".join(m4.group(2).split())[:20000] if m4 else None
     cm = _CUSIP_RE.search(txt)
-    persons = [ReportingPerson(name="", cik=None, percent=max(pcts) if pcts else None, shares=None)] if pcts else []
+    persons = cover_reporting_persons(txt)
+    if persons and pcts and all(p.percent is None for p in persons):
+        persons[0].percent = max(pcts)  # keep the filing-level maximum as before
+    if not persons:
+        persons = [ReportingPerson(name="", cik=None, percent=max(pcts) if pcts else None, shares=None)] if pcts else []
     return Schedule13(form_type=form_type, issuer_cik=None, issuer_name=None,
                       cusip=_cusip(cm.group(1)) if cm else None, event_date=None,
                       persons=persons, item4_text=item4)

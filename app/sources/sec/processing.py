@@ -127,6 +127,51 @@ def process_form4(conn: Connection, sub: Submission, cik_for_url: str, *, is_bac
 
 # ------------------------------------------------------------------ Schedule 13D
 
+def _norm_name(s: str | None) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^A-Za-z0-9&]", " ", s or "")).strip().upper()
+
+
+def lead_investor(d, names: dict, issuer_cik: str | None, issuer_name: str | None) -> tuple[str | None, str | None]:
+    """The filing's lead investor - never the issuer. Issuers often file their insiders' Schedule 13D under their own
+    CIK (SEC header FILED BY = issuer); the investor then comes from the cover page, without a CIK."""
+    issuer_n = _norm_name(issuer_name)
+    real = [p for p in d.persons if p.name and not (p.cik and issuer_cik and p.cik.zfill(10) == issuer_cik)
+            and _norm_name(p.name) != issuer_n]
+    lead = real[0] if real else None
+    if lead and lead.cik:
+        return lead.name, lead.cik.zfill(10)
+    filed_by = [(n, c) for n, c in names.get("FILED BY", []) if c and c != issuer_cik and _norm_name(n) != issuer_n]
+    if filed_by:
+        return filed_by[0]
+    if lead:
+        return lead.name, None
+    return None, None
+
+
+def save_reporting_persons(conn: Connection, accession: str, issuer_cik: str | None, persons: list, names: dict,
+                           issuer_name: str | None) -> int:
+    """Every reporting person of the filing (group filings keep all members). CIK only from the XML or an EXACT
+    name match with a non-issuer FILED BY entry of the SEC header."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from app.db.models import activist_reporting_persons as arp
+    issuer_n = _norm_name(issuer_name)
+    fb = {_norm_name(n): c for n, c in names.get("FILED BY", []) if c and c != issuer_cik}
+    real = [p for p in persons if p.name and _norm_name(p.name) != issuer_n and not (p.cik and p.cik.zfill(10) == issuer_cik)]
+    group = f"GRP:{accession}" if len(real) > 1 else None
+    for i, p in enumerate(real):
+        cik = p.cik.zfill(10) if p.cik else fb.get(_norm_name(p.name))
+        conf, ev = ("HIGH", "xml reportingPersonCIK") if p.cik else (("HIGH", "exact name = SEC header FILED BY") if cik else ("NAME", None))
+        entity = bool(set(p.type_codes) & {"CO", "PN", "OO", "IA", "HC", "BD", "BK", "IC", "IV", "EP", "FI", "CP", "SA"})
+        kind = "INDIVIDUAL" if ("IN" in p.type_codes and not entity) else ("ENTITY" if entity else "UNKNOWN")
+        conn.execute(pg_insert(arp).values(
+            accession=accession, issuer_cik=issuer_cik, group_id=group, person_index=i, name=p.name, name_norm=_norm_name(p.name),
+            cik=cik, identity_key=cik or f"NAME:{_norm_name(p.name)}"[:160], kind=kind, type_codes=list(p.type_codes), percent=p.percent,
+            is_lead=(i == 0), confidence=conf, cik_evidence=ev, source="xml_reportingPersonInfo" if p.cik else "cover_page",
+        ).on_conflict_do_nothing(index_elements=["accession", "person_index"]))
+    return len(real)
+
+
 def process_13d(conn: Connection, sub: Submission, cik_for_url: str, *, is_backfill: bool = False, header_text: str = "") -> list[int]:
     url = index_url(cik_for_url, sub.accession)
     xml = primary_xml(sub)
@@ -142,9 +187,7 @@ def process_13d(conn: Connection, sub: Submission, cik_for_url: str, *, is_backf
     names = parse_filer_names(header_text)
     issuer_cik = d.issuer_cik or (names["SUBJECT COMPANY"][0][1] if names["SUBJECT COMPANY"] else None)
     issuer_name = d.issuer_name or (names["SUBJECT COMPANY"][0][0] if names["SUBJECT COMPANY"] else None)
-    lead = d.lead
-    investor_name = (lead.name if lead and lead.name else None) or (names["FILED BY"][0][0] if names["FILED BY"] else None)
-    investor_cik = (lead.cik if lead and lead.cik else None) or (names["FILED BY"][0][1] if names["FILED BY"] else None)
+    investor_name, investor_cik = lead_investor(d, names, issuer_cik, issuer_name)
     ticker = resolver.ticker_for_cik(issuer_cik) or resolver.ticker_for_cusip(d.cusip)
     if ticker and d.cusip:
         remember_cusip(conn, ticker, d.cusip)
@@ -171,6 +214,7 @@ def process_13d(conn: Connection, sub: Submission, cik_for_url: str, *, is_backf
         "accepted_at": sub.accepted_at, "item4_text": (d.item4_text or "")[:20000] or None, "item4_class": cls,
         "item4_labels": labels, "source_url": url,
     }], ["accession"])
+    save_reporting_persons(conn, sub.accession, issuer_cik, d.persons, names, issuer_name)
     mark_filing(conn, fid, "ok")
     created: list[int] = []
     # Amendments are not independent events.  Create a new signal only for a material ownership
