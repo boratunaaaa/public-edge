@@ -67,3 +67,16 @@ def test_founder_family_shares_the_issuer_name():
     f = item4_features(BOILER)
     assert classify(f, names=["Estate of Bruce A. Nordstrom"], issuer_name="NORDSTROM INC")[0] == "CONTROL_HOLDER_13D"
     assert classify(f, names=["Starboard Value LP"], issuer_name="NORDSTROM INC")[0] != "CONTROL_HOLDER_13D"
+
+
+def test_control_acquisitions_are_not_activism():
+    f = item4_features("The Reporting Persons acquired the Ordinary Shares for the purpose of acquiring control of the Issuer. The Reporting "
+                       "Persons intend to nominate directors to the board.")
+    assert classify(f, percent=45.9)[0] == "CONTROL_HOLDER_13D"
+    g = item4_features("In connection with the Offtake Agreement, the Reporting Persons have the right to appoint one director and intend to "
+                       "nominate a director to the board.")
+    assert classify(g, percent=9.9)[0] != "ACTIVIST_13D"
+    assert classify(item4_features(PROXY_TXT), percent=35.0, prior_campaigns=5)[0] == "ACTIVIST_13D"  # an activist's large stake stays activist
+
+
+PROXY_TXT = PROXY

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "13d-class-v2"
+VERSION = "13d-class-v3"
 FLAGS = ("board_change", "strategic_alternatives", "sale_request", "capital_allocation", "governance_change",
          "management_change", "proxy_intent", "financing_only", "passive_ownership", "technical_amendment")
 STRONG = ("board_change", "proxy_intent", "sale_request", "governance_change", "management_change")
@@ -65,7 +65,8 @@ STRUCTURAL = re.compile(r"(?:in connection with|pursuant to|as a result of) (?:t
                         r"lock[- ]?up|sponsor|founder shares|registration rights|estate planning|\bgifts?\b|distribution to (?:its )?(?:members|partners|limited partners)", re.I)
 CONTROL_CUES = re.compile(r"(?:right|entitled) to (?:designate|nominate|appoint) .{0,80}(?:director|board)|stockholders'? agreement|shareholders'? agreement|"
                           r"investor rights agreement|nominating agreement|controlled company|majority (?:stockholder|shareholder|owner)|parent (?:company|entity)|"
-                          r"voting agreement|voting trust|family (?:trust|limited partnership|office)|estate of", re.I)
+                          r"voting agreement|voting trust|family (?:trust|limited partnership|office)|estate of|acquir\w* control|purpose of (?:acquiring|obtaining) control|"
+                          r"(?:offtake|collaboration|license|licensing|supply|commercial|mutual support|share purchase|stock purchase) agreement", re.I)
 
 
 SUPPORT = re.compile(r"support(?:s|ing|ed)? (?:the )?(?:re-?election|incumbent|current (?:board|management)|management|the board|the company's (?:board|nominees))|"
@@ -140,17 +141,18 @@ def classify(features: dict, *, insider: dict | None = None, percent: float | No
     sponsor = any(re.search(r"\bsponsor\b", n, re.I) for n in names)
     control_cue = bool(features.get("control_cues"))
     big = percent is not None and percent >= 50
+    large = percent is not None and percent >= 30 and prior_campaigns < 2  # a 30 %+ block without an activist record is a control position
     founder = current and percent is not None and percent >= 20
     activist_record = prior_campaigns >= 2
     # 1. control holders (never activist statistics)
-    if (big or founder or vehicle or sponsor or family or (control_cue and (current or (percent or 0) >= 10))) and not (strong and activist_record):
-        why = [x for x, ok in (("parent/majority >= 50%", big), ("insider with >= 20%", founder), ("trust/family vehicle of an insider", vehicle),
+    if (big or large or founder or vehicle or sponsor or family or (control_cue and (current or (percent or 0) >= 10))) and not (strong and activist_record):
+        why = [x for x, ok in (("parent/majority >= 50%", big), (">= 30% block without an activist record", large and not big), ("insider with >= 20%", founder), ("trust/family vehicle of an insider", vehicle),
                                ("SPAC sponsor", sponsor), ("founder family (name shared with the issuer)", family),
                                ("board-designation / stockholders' / investor-rights agreement", control_cue)) if ok]
         conf = "HIGH" if (big or founder or (vehicle and current) or sponsor) else "MEDIUM"
         return "CONTROL_HOLDER_13D", conf, why
     # agreement / financing / merger-driven stakes: board rights come from a contract, not a campaign
-    deal = bool(control_cue or features.get("structural") or features.get("financing_only_raw"))
+    deal = bool(control_cue or features.get("structural") or features.get("financing_only_raw"))  # incl. offtake / collaboration / purchase agreements
     if deal and strong and not activist_record and "proxy_intent" not in strong:
         return "PASSIVE_OR_STRUCTURAL_13D", "MEDIUM", ["board / governance terms stem from an agreement, financing or merger - not a campaign"]
     # 2. current insiders
