@@ -60,7 +60,9 @@ FAMILIES: tuple[SignalFamily, ...] = (
     SignalFamily("TR_BUYBACK", "TR", "0", ("TR_BUYBACK",), ("kap",), "pay geri alım execution table"),
     SignalFamily("TR_CONTRACT", "TR", "0", ("TR_CONTRACT",), ("kap",), "iş ilişkisi / sözleşme disclosures"),
     SignalFamily("TR_CAPACITY_INVESTMENT", "TR", "0", ("TR_CAPACITY_INVESTMENT",), ("kap",), "kapasite / fabrika / yatırım disclosures"),
-    SignalFamily("TR_DILUTION_RISK", "TR", "0", ("TR_CAPITAL_INCREASE",), ("kap",), "bedelli / tahsisli sermaye artırımı", context_only=True),
+    SignalFamily("TR_DILUTION_RISK", "TR", "1", ("TR_RIGHTS_ISSUE_APPROVAL",), ("tr_spk_bulletin",), "SPK-approved bedelli share issue (dilution %)", context_only=True),
+    SignalFamily("TR_BONUS_ISSUE", "TR", "1", ("TR_BONUS_ISSUE_APPROVAL",), ("tr_spk_bulletin",), "SPK-approved bedelsiz (bonus) share issue, % of current capital"),
+    SignalFamily("TR_SPK_ENFORCEMENT", "TR", "1", ("TR_SPK_ENFORCEMENT",), ("tr_spk_bulletin",), "SPK criminal complaint / trading ban / fine concerning trading in the stock", context_only=True),
     # ---- CA candidates
     SignalFamily("CA_GOV_CONTRACT", "CA", "1", ("CA_GOV_CONTRACT_WIN",), ("ca_canadabuys",), "federal contract award to a listed supplier (publication date)"),
     SignalFamily("CA_GRANT", "CA", "0", (), ("ca_grants",), "federal grant / contribution (forward only: no publication date in the file)", context_only=True),

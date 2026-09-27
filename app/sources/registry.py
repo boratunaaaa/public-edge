@@ -13,6 +13,7 @@ from app.sources.us.clinical import ClinicalTrialsSource
 from app.sources.us.fda import OpenFdaSource
 from app.sources.us.short_data import FinraShortVolumeSource, SecFtdSource
 from app.sources.ca.official import BankOfCanadaValetSource, CanadaBuysSource
+from app.sources.tr.spk import SpkBulletinSource
 
 SOURCES: list[Source] = [
     SecForm4Source(),
@@ -37,6 +38,7 @@ SOURCES: list[Source] = [
     CftcCotSource(),
     CanadaBuysSource(),
     BankOfCanadaValetSource(),
+    SpkBulletinSource(),
     PlannedSource("senate_lda", "BLOCKED: lda.gov (Senate LDA API) answers 403 (Akamai) from the tested network; anonymous API otherwise allowed"),
     PlannedSource("uspto_patents", "AUTH_REQUIRED: PatentsView / USPTO ODP API needs a (free) API key"),
     PlannedSource("fred_alfred", "AUTH_REQUIRED: FRED/ALFRED vintages need a (free) API key"),
