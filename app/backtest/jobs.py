@@ -5,7 +5,7 @@ import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import func, and_, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine
 
@@ -52,7 +52,9 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
     if event_ids:
         conds.append(events.c.id.in_(event_ids))
     with engine.connect() as conn:
-        rows = conn.execute(select(events.c.id, events.c.ticker, events.c.issuer_cik, events.c.public_date, events.c.public_at)
+        rows = conn.execute(select(events.c.id, events.c.ticker, events.c.issuer_cik, events.c.public_date,
+                                   # V2: available_at is the only entry anchor (same as public_at / end-of-day for old rows)
+                                   func.coalesce(events.c.available_at, events.c.public_at))
                             .where(and_(*conds)).order_by(events.c.issuer_cik, events.c.ticker, events.c.public_date)
                             .limit(limit)).all()
     if not rows:

@@ -31,6 +31,13 @@ BASE_MDNA = ["As of December 31, 2023, we had cash and cash equivalents of $41.2
              FILLER * 6]
 
 
+
+@pytest.fixture(autouse=True)
+def _tenk_disk_guard_off(monkeypatch):
+    """run_backfill stops on LOW_DISK using the host's real free space; logic tests must not depend on it."""
+    import app.tenk.engine as te
+    monkeypatch.setattr(te, "MIN_FREE_BYTES", 0)
+
 def test_tenk_sections_skip_the_table_of_contents():
     from app.tenk.diff import extract_items
     risks = [_risk(i) for i in range(20)]
@@ -1187,3 +1194,9 @@ def test_tenk_extraction_memory_blowup_is_contained(monkeypatch):
     monkeypatch.setattr(te, "_CHILD_CODE", "x = bytearray(3 * 1024**3)")  # 3 GB > the 1 GB cap
     out = te.extract_isolated(b"<html>doc</html>")
     assert out.failed == "memory" and out.items == {}
+
+
+def test_tenk_backfill_stops_on_low_disk(engine, monkeypatch):
+    import app.tenk.engine as te
+    monkeypatch.setattr(te, "MIN_FREE_BYTES", 10**18)
+    assert te.run_backfill(engine)["skipped"] == "LOW_DISK"

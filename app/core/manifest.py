@@ -43,7 +43,7 @@ def build(conn: Connection, dataset: str, *, export: bool = False, export_dir: P
     first = last = None
     writer = None
     out_path = None
-    cur = conn.execution_options(stream_results=True).execute(text(f"{spec['sql']} ORDER BY {spec['order']}"))
+    cur = conn.execute(text(f"{spec['sql']} ORDER BY {spec['order']}").execution_options(stream_results=True))
     cols = list(cur.keys())
     while True:
         rows = cur.fetchmany(batch)
