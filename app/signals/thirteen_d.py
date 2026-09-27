@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "13d-class-v1"
+VERSION = "13d-class-v2"
 FLAGS = ("board_change", "strategic_alternatives", "sale_request", "capital_allocation", "governance_change",
          "management_change", "proxy_intent", "financing_only", "passive_ownership", "technical_amendment")
 STRONG = ("board_change", "proxy_intent", "sale_request", "governance_change", "management_change")
@@ -37,7 +37,7 @@ DEMAND = re.compile(r"\b(?:urg\w*|request\w*|demand\w*|call(?:ed|s|ing)? (?:on|f
                     r"ha(?:s|ve) had,? (?:and intends? to continue to have,? )?(?:constructive )?(?:discussions|conversations|engagement)|"
                     r"intends? to (?:engage|communicate|continue (?:to )?(?:engage|discuss|have))|expressed (?:its|their) (?:views|concerns))\b", re.I)
 PAT = {
-    "board_change": re.compile(r"nominat\w* .{0,80}(?:director|board|nominee)|board (?:seat|representation)|appoint\w* .{0,60}(?:to the board|as (?:a |an )?(?:independent )?director)|"
+    "board_change": re.compile(r"nominat\w* .{0,200}(?:director|board|nominee)|slate of (?:director )?(?:nominees|candidates|persons)|board (?:seat|representation)|appoint\w* .{0,60}(?:to the board|as (?:a |an )?(?:independent )?director)|"
                                r"(?:reconstitut|refresh|replac)\w* .{0,40}board|remov\w* .{0,40}director|cooperation agreement|settlement agreement|board composition|"
                                r"composition of the board|board (?:refreshment|changes)|add\w* .{0,30}(?:new )?directors", re.I),
     "proxy_intent": re.compile(r"proxy (?:contest|fight|solicitation)|solicit\w* (?:of )?(?:proxies|consents)|consent solicitation|withhold (?:campaign|votes?)|"
@@ -68,6 +68,21 @@ CONTROL_CUES = re.compile(r"(?:right|entitled) to (?:designate|nominate|appoint)
                           r"voting agreement|voting trust|family (?:trust|limited partnership|office)|estate of", re.I)
 
 
+SUPPORT = re.compile(r"support(?:s|ing|ed)? (?:the )?(?:re-?election|incumbent|current (?:board|management)|management|the board|the company's (?:board|nominees))|"
+                     r"in support of (?:the )?(?:board|management|incumbent)", re.I)
+GENERIC = {"INC", "CORP", "CORPORATION", "COMPANY", "HOLDINGS", "HOLDING", "GROUP", "TRUST", "FUND", "CAPITAL", "PARTNERS", "INTERNATIONAL",
+           "GLOBAL", "FINANCIAL", "BANCORP", "BANK", "THE", "AND", "OF", "LLC", "LTD", "AMERICA", "AMERICAN", "ENERGY", "TECHNOLOGIES",
+           "TECHNOLOGY", "THERAPEUTICS", "ACQUISITION", "INVESTMENT", "INVESTMENTS", "MANAGEMENT", "SERVICES", "SYSTEMS", "RESOURCES",
+           "INDUSTRIES", "FAMILY", "ESTATE", "FOUNDATION", "NATIONAL", "FIRST", "UNITED", "NEW", "LIMITED", "PLC"}
+
+
+def shares_issuer_name(names: list[str], issuer_name: str | None) -> bool:
+    """A founder-family cue: a reporting person's name shares a distinctive token with the issuer (Nordstrom)."""
+    tok = lambda s: {w for w in re.findall(r"[A-Z]{4,}", (s or "").upper()) if w not in GENERIC}  # noqa: E731
+    it = tok(issuer_name)
+    return bool(it) and any(tok(n) & it for n in names)
+
+
 def split_sentences(text: str) -> list[str]:
     t = re.sub(r"\s+", " ", text or "")
     return [s.strip() for s in re.split(r"(?<=[.;])\s+(?=[A-Z(])", t) if len(s.strip()) > 20]
@@ -83,7 +98,7 @@ def item4_features(text: str | None, *, is_amendment: bool = False) -> dict:
         return out | {"evidence": ev, "hedged_mentions": hedged}
     sents = split_sentences(text)
     for s in sents:
-        hedge = bool(HEDGE.search(s))
+        hedge = bool(HEDGE.search(s)) or bool(SUPPORT.search(s))
         demand = bool(DEMAND.search(s))
         for f, rx in PAT.items():
             if rx.search(s):
@@ -97,6 +112,8 @@ def item4_features(text: str | None, *, is_amendment: bool = False) -> dict:
     if TECHNICAL.search(full) and not active:
         out["technical_amendment"] = True
         ev["technical_amendment"] = [m.group(0) for m in TECHNICAL.finditer(full)][:3]
+    out["financing_only_raw"] = bool(re.search(r"investor rights agreement|credit agreement|securities purchase agreement|subscription agreement|"
+                                               r"note purchase agreement|financing|backstop", full, re.I))
     if FINANCING.search(full) and not active:
         out["financing_only"] = True
         ev["financing_only"] = [m.group(0) for m in FINANCING.finditer(full)][:3]
@@ -109,7 +126,7 @@ def item4_features(text: str | None, *, is_amendment: bool = False) -> dict:
 
 
 def classify(features: dict, *, insider: dict | None = None, percent: float | None = None, names: list[str] | None = None,
-             prior_campaigns: int = 0, is_amendment: bool = False) -> tuple[str, str, list[str]]:
+             prior_campaigns: int = 0, is_amendment: bool = False, issuer_name: str | None = None) -> tuple[str, str, list[str]]:
     """(class, confidence, reasons). insider = {"current_officer_director": bool, "former": bool, "ten_pct_only": bool,
     "linked_to_insider": bool}; prior_campaigns = other issuers where this filer made stated activist demands."""
     insider = insider or {}
@@ -119,17 +136,23 @@ def classify(features: dict, *, insider: dict | None = None, percent: float | No
     reasons: list[str] = []
     current = bool(insider.get("current_officer_director"))
     vehicle = any(re.search(r"\b(?:trust|family|foundation|estate|holdings?)\b", n, re.I) for n in names) and bool(insider.get("linked_to_insider"))
+    family = shares_issuer_name(names, issuer_name)
     sponsor = any(re.search(r"\bsponsor\b", n, re.I) for n in names)
     control_cue = bool(features.get("control_cues"))
     big = percent is not None and percent >= 50
     founder = current and percent is not None and percent >= 20
     activist_record = prior_campaigns >= 2
     # 1. control holders (never activist statistics)
-    if (big or founder or vehicle or sponsor or (control_cue and (current or (percent or 0) >= 25))) and not (strong and activist_record):
+    if (big or founder or vehicle or sponsor or family or (control_cue and (current or (percent or 0) >= 10))) and not (strong and activist_record):
         why = [x for x, ok in (("parent/majority >= 50%", big), ("insider with >= 20%", founder), ("trust/family vehicle of an insider", vehicle),
-                               ("SPAC sponsor", sponsor), ("board-designation / stockholders' agreement", control_cue)) if ok]
+                               ("SPAC sponsor", sponsor), ("founder family (name shared with the issuer)", family),
+                               ("board-designation / stockholders' / investor-rights agreement", control_cue)) if ok]
         conf = "HIGH" if (big or founder or (vehicle and current) or sponsor) else "MEDIUM"
         return "CONTROL_HOLDER_13D", conf, why
+    # agreement / financing / merger-driven stakes: board rights come from a contract, not a campaign
+    deal = bool(control_cue or features.get("structural") or features.get("financing_only_raw"))
+    if deal and strong and not activist_record and "proxy_intent" not in strong:
+        return "PASSIVE_OR_STRUCTURAL_13D", "MEDIUM", ["board / governance terms stem from an agreement, financing or merger - not a campaign"]
     # 2. current insiders
     if current:
         if strong and not activist_record:
@@ -233,7 +256,7 @@ def classify_filing(conn, f: dict, campaign_index: dict | None = None, persist: 
     ev = gather(conn, f, campaign_index)
     record = ev["prior_campaign_issuers"] + (2 if ev["prior_chain_demands"] else 0)
     cls, conf, reasons = classify(feats, insider=ev["insider"], percent=f["percent"], names=ev["names"],
-                                  prior_campaigns=record, is_amendment=f["is_amendment"])
+                                  prior_campaigns=record, is_amendment=f["is_amendment"], issuer_name=f.get("issuer_name"))
     stated = sum(1 for x in STRONG if feats.get(x))
     flags = {k: bool(feats.get(k)) for k in FLAGS} | {"structural": bool(feats.get("structural")), "empty": bool(feats.get("empty")),
                                                        "stated_strong": stated, "hedged": feats.get("hedged_mentions")}

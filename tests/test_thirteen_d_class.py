@@ -52,3 +52,18 @@ def test_insider_status_is_point_in_time():
     assert insider_status([(date(2021, 1, 5), False, True, False)], filed)["former"]  # a former executive is not a current insider
     assert insider_status([(date(2024, 5, 1), False, False, True)], filed)["ten_pct_only"]  # a 10% owner alone is not an insider
     assert not insider_status([(date(2025, 3, 1), True, False, False)], filed)["current_officer_director"]  # later role: no look-ahead
+
+
+def test_support_for_management_and_deal_rights_are_not_activism():
+    sup = item4_features("C. Johnson acquired the Shares for investment and intends to support the re-election of the incumbent members "
+                         "of the Issuer's board of trustees, who would be opposed by the dissident nominees.")
+    assert not sup["board_change"]
+    deal = item4_features("Pursuant to the Investor Rights Agreement, the Reporting Person entered into a cooperation agreement and has the "
+                          "right to designate one director; the Reporting Person intends to nominate its designee to the board.")
+    assert classify(deal)[0] != "ACTIVIST_13D"
+
+
+def test_founder_family_shares_the_issuer_name():
+    f = item4_features(BOILER)
+    assert classify(f, names=["Estate of Bruce A. Nordstrom"], issuer_name="NORDSTROM INC")[0] == "CONTROL_HOLDER_13D"
+    assert classify(f, names=["Starboard Value LP"], issuer_name="NORDSTROM INC")[0] != "CONTROL_HOLDER_13D"

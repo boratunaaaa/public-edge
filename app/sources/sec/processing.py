@@ -219,7 +219,7 @@ def process_13d(conn: Connection, sub: Submission, cik_for_url: str, *, is_backf
         from app.signals.thirteen_d import classify_filing
         try:
             with conn.begin_nested():
-                classify_filing(conn, {"accession": sub.accession, "issuer_cik": issuer_cik, "investor_cik": investor_cik,
+                classify_filing(conn, {"accession": sub.accession, "issuer_cik": issuer_cik, "issuer_name": issuer_name, "investor_cik": investor_cik,
                                        "investor_name": investor_name, "filed_date": sub.filed_date or (sub.accepted_at.date() if sub.accepted_at else None),
                                        "percent": pct, "item4_text": d.item4_text, "is_amendment": is_amendment(sub.form_type)})
         except Exception:  # classification never blocks ingestion; the filing stays unclassified (not counted as activist)
