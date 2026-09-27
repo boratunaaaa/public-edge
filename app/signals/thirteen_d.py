@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-VERSION = "13d-class-v3.1"
+VERSION = "13d-class-v3.2"
 FLAGS = ("board_change", "strategic_alternatives", "sale_request", "capital_allocation", "governance_change",
          "management_change", "proxy_intent", "financing_only", "passive_ownership", "technical_amendment")
 STRONG = ("board_change", "proxy_intent", "sale_request", "governance_change", "management_change")
@@ -66,7 +66,8 @@ STRUCTURAL = re.compile(r"(?:in connection with|pursuant to|as a result of) (?:t
 CONTROL_CUES = re.compile(r"(?:right|entitled) to (?:designate|nominate|appoint) .{0,80}(?:director|board)|stockholders'? agreement|shareholders'? agreement|"
                           r"investor rights agreement|nominating agreement|controlled company|majority (?:stockholder|shareholder|owner)|parent (?:company|entity)|"
                           r"voting agreement|voting trust|family (?:trust|limited partnership|office)|estate of|acquir\w* control|purpose of (?:acquiring|obtaining) control|"
-                          r"(?:offtake|collaboration|license|licensing|supply|commercial|mutual support|share purchase|stock purchase) agreement", re.I)
+                          r"(?:offtake|collaboration|license|licensing|supply|commercial|mutual support|share purchase|stock purchase) agreement|"
+                          r"agreement and plan of merger|merger agreement|rollover|(?:voting and )?support agreement|consortium|buyer group|going[- ]private transaction", re.I)
 
 
 SUPPORT = re.compile(r"support(?:s|ing|ed)? (?:the )?(?:re-?election|incumbent|current (?:board|management)|management|the board|the company's (?:board|nominees))|"

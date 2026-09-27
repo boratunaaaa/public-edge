@@ -80,3 +80,10 @@ def test_control_acquisitions_are_not_activism():
 
 
 PROXY_TXT = PROXY
+
+
+def test_take_private_consortium_members_are_not_activists():
+    f = item4_features("On November 24, 2023, the Issuer announced that it had entered into an Agreement and Plan of Merger with TSH "
+                       "Investment. The Reporting Person entered into a rollover agreement and a support agreement and intends to vote "
+                       "in favor of the merger and the sale of the company.")
+    assert classify(f, percent=1.8)[0] != "ACTIVIST_13D"
