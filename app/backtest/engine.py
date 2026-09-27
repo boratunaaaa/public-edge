@@ -46,13 +46,15 @@ def _adj_close(b: Bar) -> float | None:
     return b.adj_close if b.adj_close else b.close
 
 
-def entry_bar(bars: list[Bar], public_date: date, public_at: datetime | None) -> Bar | None:
+def entry_bar(bars: list[Bar], public_date: date, public_at: datetime | None, calendar=None) -> Bar | None:
     """First bar on/after the first session that opens after publication.
 
     If the theoretical session has no bar (halt / missing data) we take the next available
-    bar - never an earlier one.
+    bar - never an earlier one. `calendar` (app.markets.calendars.MarketCalendar) selects the
+    exchange; None = NYSE (US behaviour unchanged).
     """
-    target = first_tradable_session(public_date, public_at)
+    target = calendar.first_tradable_session(public_date, public_at) if calendar is not None \
+        else first_tradable_session(public_date, public_at)
     for b in bars:
         if b.date >= target and b.open:
             return b
@@ -91,7 +93,7 @@ def _terminal_exit(bars: list[Bar], entry: Bar, horizon: int, as_of: date, termi
 
 def compute_returns(bars: list[Bar], spy_bars: list[Bar] | None, public_date: date, public_at: datetime | None,
                     as_of: date | None = None, horizons: tuple[int, ...] = HORIZONS,
-                    terminal_date: date | None = None, corporate_exit=None) -> list[HorizonReturn]:
+                    terminal_date: date | None = None, corporate_exit=None, calendar=None) -> list[HorizonReturn]:
     """terminal_date: documented delisting date (security master). Horizons that end after it exit at
     the last traded price; the benchmark still runs to the full horizon (cash earns nothing).
     corporate_exit (app.corpactions.CorporateExit): a verified merger consideration. A horizon that ends after
@@ -104,7 +106,7 @@ def compute_returns(bars: list[Bar], spy_bars: list[Bar] | None, public_date: da
     if not bars:
         return []
     as_of = as_of or bars[-1].date
-    e = entry_bar(bars, public_date, public_at)
+    e = entry_bar(bars, public_date, public_at, calendar)
     if e is None:
         return []
     ep = _adj_open(e)
