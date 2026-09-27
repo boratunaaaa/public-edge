@@ -360,8 +360,11 @@ def test_proposal_approval_paper_fill_exit_and_pnl(engine, monkeypatch):
         pos = c.execute(select(paper_positions).order_by(paper_positions.c.id)).mappings().all()
         open_px = next(b for b in ledger._bars(c, "ZBIO", date(2024, 3, 4), date(2024, 3, 4))).open
         assert pos[0]["entry_date"] == date(2024, 3, 4)
-        assert pos[0]["entry_price"] == pytest.approx(open_px * 1.002)  # SMALL cap: 20 bps slippage
-        assert pos[0]["cost"] == pytest.approx(0.03 * 10_000 + 1.0)
+        o = c.execute(select(paper_orders).where(paper_orders.c.position_id == pos[0]["id"])).mappings().one()
+        # V2 fill model: cost = max(SMALL-cap floor 20 bps, half-spread + sqrt impact), recorded on the order
+        assert o["slippage_bps"] >= 20 and o["fill_model"] in ("LIQUID", "NORMAL", "ILLIQUID")
+        assert pos[0]["entry_price"] == pytest.approx(open_px * (1 + o["slippage_bps"] / 1e4))
+        assert pos[0]["cost"] <= 0.03 * 10_000 + 1.0 + 1e-6  # participation cap may reduce the size, never raise it
         prop = c.execute(select(proposed_trades)).mappings().one()
         assert prop["research_only"] and prop["approval_status"] == "APPROVED"
     ledger.run(engine, today=date(2024, 6, 20))
@@ -523,7 +526,8 @@ def test_paper_valuation_stop_and_sale_survive_a_split_after_entry(engine, monke
         value, px, _ = ledger.position_value(c, e, date(2024, 5, 10))
         assert px == pytest.approx(100 * 50 / 49, rel=1e-6)  # dividend counted as reinvested, split neutral
         a = rows["A_30D"]  # sold at the first open on/after 2024-04-03, still before the split
-        assert a["status"] == "CLOSED" and a["exit_price"] == pytest.approx(100 * (1 - 0.002), rel=1e-6)
+        so = c.execute(text("SELECT slippage_bps FROM paper_orders WHERE position_id = :p AND side = 'SELL'"), {"p": a["id"]}).scalar()
+        assert a["status"] == "CLOSED" and so >= 20 and a["exit_price"] == pytest.approx(100 * (1 - so / 1e4), rel=1e-6)
         assert a["realized_pnl"] == pytest.approx(a["shares"] * a["exit_price"] - 1.0 - a["cost"])
         nav = c.execute(text("SELECT nav FROM paper_performance p JOIN paper_accounts a ON a.id = p.account_id "
                              "WHERE a.strategy = 'B_90D'")).scalar()

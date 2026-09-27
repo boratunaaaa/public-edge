@@ -200,6 +200,7 @@ def create_proposal(engine: Engine, event_id: int, *, research_only: bool = Fals
             thesis=thesis_tr(ev)[:500], risks=risks_tr, reasons=[FAMILY_TR.get(fam, fam)], data_quality=g.data_quality,
             gate={"passed": g.passed, "failed": g.failed, "family_check": fam_ok[1], **g.info}, approval_status="PENDING",
             expires_at=now + timedelta(hours=PROPOSAL_TTL_HOURS), research_only=fam_ok[1] != "FAMILY_OUTPERFORMING",
+            signal_time=ev.get("available_at") or ev.get("public_at"),
         ).returning(proposed_trades.c.id)).scalar_one()
     return {"created": True, "id": pid, "code": code}
 
@@ -280,8 +281,11 @@ def decide(engine: Engine, code: str, approve: bool, by: str, now: datetime | No
                     approval_status="EXPIRED", decided_at=now, decided_by="system:source_superseded"))
                 return {"ok": False, "error": "SOURCE_SUPERSEDED"}
         status = "APPROVED" if approve else "REJECTED"
+        from app.marketdata.calendar import NY, first_tradable_session
+        elig = datetime.combine(first_tradable_session(now.date(), now), datetime.min.time().replace(hour=9, minute=30), NY) \
+            if approve else None
         conn.execute(proposed_trades.update().where(proposed_trades.c.id == p["id"]).values(
-            approval_status=status, decided_at=now, decided_by=by[:40]))
+            approval_status=status, decided_at=now, decided_by=by[:40], eligible_market_at=elig))
         orders = queue_buy(conn, dict(p), now) if approve else []
     return {"ok": True, "status": status, "orders": orders}
 

@@ -52,13 +52,17 @@ def slippage_bps(market_cap: float | None, bucket: str | None) -> float:
     return _f("PAPER_SLIPPAGE_BPS", 10)
 
 
-def ensure_accounts(conn: Connection, capital: float | None = None) -> dict[str, int]:
+def ensure_accounts(conn: Connection, capital: float | None = None, book: str = "MAIN") -> dict[str, int]:
+    """MAIN books trade only TRUSTED + OUTPERFORMING families; RESEARCH books (same five strategies) trade
+    research-only proposals. The two are never aggregated."""
     capital = capital or STARTING_CAPITAL
     out = {}
     for strat, (name, _, _) in STRATEGIES.items():
+        if book == "RESEARCH":
+            name = name.replace("PUBLIC EDGE PAPER", "PUBLIC EDGE RESEARCH")
         aid = conn.execute(select(paper_accounts.c.id).where(paper_accounts.c.name == name)).scalar()
         if aid is None:
-            aid = conn.execute(paper_accounts.insert().values(name=name, strategy=strat, starting_capital=capital,
+            aid = conn.execute(paper_accounts.insert().values(name=name, strategy=strat, starting_capital=capital, book=book,
                                                               commission_per_trade=COMMISSION).returning(paper_accounts.c.id)).scalar_one()
             conn.execute(paper_cash.insert().values(account_id=aid, on_date=date.today(), delta=capital, balance_after=capital,
                                                     reason="DEPOSIT"))
@@ -81,7 +85,7 @@ def _move_cash(conn: Connection, account_id: int, on: date, delta: float, reason
 
 def queue_buy(conn: Connection, proposal: dict, decided_at: datetime) -> list[int]:
     """One BUY order per active strategy book; fills at the first session opening after the decision."""
-    accts = ensure_accounts(conn)
+    accts = ensure_accounts(conn, book="RESEARCH" if proposal.get("research_only") else "MAIN")
     not_before = first_tradable_session(decided_at.date(), decided_at)
     ids = []
     for strat, aid in accts.items():
@@ -179,6 +183,7 @@ def fill_orders(conn: Connection, today: date) -> dict:
     rows = conn.execute(select(paper_orders).where(and_(paper_orders.c.status == "PENDING", paper_orders.c.not_before <= today))
                         .order_by(paper_orders.c.id)).mappings().all()
     for o in rows:
+        fq = None
         bars = [b for b in _bars(conn, o["ticker"], o["not_before"], today) if b.date >= o["not_before"]]
         if not bars:
             out["waiting"] += 1
@@ -198,15 +203,23 @@ def fill_orders(conn: Connection, today: date) -> dict:
                     status="CANCELLED", note="source event superseded"))
                 out["cancelled"] += 1
                 continue
-            px = b.open * (1 + bps / 1e4)
+            from app.paper.fills import quote
+            prior = _bars(conn, o["ticker"], b.date - timedelta(days=45), b.date - timedelta(days=1))
             nav = nav_of(conn, o["account_id"], b.date - timedelta(days=1))
-            notional = min(o["target_pct"] * nav, cash_of(conn, o["account_id"]) - comm)
+            want = min(o["target_pct"] * nav, cash_of(conn, o["account_id"]) - comm)
+            fq = quote(prior, b, want / b.open if b.open else 0.0, bps)
+            if fq is None:  # no volume on the fill day: never assume a fill
+                out["waiting"] += 1
+                continue
+            bps = fq.cost_bps
+            px = b.open * (1 + bps / 1e4)
+            shares = fq.shares * b.open / px
+            notional = shares * px
             if notional < 10:
                 conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(status="CANCELLED",
                                                                                                 note="insufficient paper cash"))
                 out["cancelled"] += 1
                 continue
-            shares = notional / px
             strat = acct["strategy"]
             hold = STRATEGIES[strat][1]
             sector = conn.execute(select(security_master.c.sector).where(security_master.c.cik == info.get("cik"))).scalar() \
@@ -229,6 +242,10 @@ def fill_orders(conn: Connection, today: date) -> dict:
                 out["waiting"] += 1
                 continue
             b = sb
+            from app.paper.fills import quote
+            prior = [x for x in series if x.date < b.date]
+            fq = quote(prior, b, pos["shares"], bps) if b.volume else None
+            bps = fq.cost_bps if fq else max(bps, 100.0)  # exits are never skipped; unknown volume = illiquid cost
             px = g.open(b) * (1 - bps / 1e4)
             shares = pos["shares"]
             gross = shares * px
@@ -240,7 +257,9 @@ def fill_orders(conn: Connection, today: date) -> dict:
             _move_cash(conn, o["account_id"], b.date, proceeds, "SELL", o["id"])
         conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
             status="FILLED", fill_date=b.date, fill_price=px, shares=shares, slippage_bps=bps, commission=comm,
-            position_id=pos_id))
+            position_id=pos_id, fill_model=fq.model if fq else "ILLIQUID", spread_bps=fq.spread_bps if fq else None,
+            participation=fq.participation if fq else None, adv_shares=fq.adv_shares if fq else None,
+            note=("participation cap: partial fill" if (fq and fq.capped and o["side"] == "BUY") else o.get("note"))))
         conn.execute(paper_trades.insert().values(account_id=o["account_id"], order_id=o["id"], position_id=pos_id,
                                                   ticker=o["ticker"], side=o["side"], trade_date=b.date, price=px, shares=shares,
                                                   gross=gross, commission=comm, slippage_bps=bps))
@@ -342,6 +361,7 @@ def run(engine: Engine, today: date | None = None) -> dict:
     out = {"expired": expire(engine)}
     with engine.begin() as conn:
         ensure_accounts(conn)
+        ensure_accounts(conn, book="RESEARCH")
         out["fills"] = fill_orders(conn, today)
     with engine.begin() as conn:
         out["exits"] = check_exits(conn, today)
