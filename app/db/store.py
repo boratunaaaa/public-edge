@@ -63,17 +63,35 @@ def insert_rows(conn: Connection, table, rows: list[dict], conflict_cols: list[s
 def create_event(conn: Connection, *, event_type: str, dedupe_key: str, public_date: date, title: str, payload: dict,
                  source_url: str, ticker: str | None = None, company_name: str | None = None, issuer_cik: str | None = None,
                  public_at: datetime | None = None, transaction_date: date | None = None, priority: int = 0,
-                 is_backfill: bool = False, features: dict | None = None, date_quality: str | None = None) -> int | None:
+                 is_backfill: bool = False, features: dict | None = None, date_quality: str | None = None,
+                 country: str = "US", exchange: str | None = None, security_id: str | None = None,
+                 event_family: str | None = None, accepted_at: datetime | None = None, source_accession: str | None = None,
+                 source_document_id: str | None = None, parser_version: str | None = None,
+                 identity_confidence: str | None = None, event_confidence: str | None = None, needs_review: bool = False,
+                 feature_source_event_ids: list[int] | None = None, supersedes_event_id: int | None = None,
+                 available_at_override: datetime | None = None) -> int | None:
     """Insert an event exactly once (dedupe_key). Returns the new id or None if it already existed.
 
     date_quality: exact (timestamp) | date (official date only) | first_seen (our observation) |
-    estimated (inferred - excluded from verified statistics and multi-signal)."""
+    estimated (inferred - excluded from verified statistics and multi-signal).
+    available_at (V2 event contract) is derived with app.core.provenance.available_at - never from transaction_date."""
+    from app.core.provenance import available_at as _avail
     if date_quality is None:
         date_quality = "exact" if public_at is not None else "date"
+    now = datetime.now(timezone.utc)
+    first_seen = None if is_backfill else now
+    avail = available_at_override or _avail(public_date=public_date, public_at=public_at, date_quality=date_quality,
+                                            is_backfill=is_backfill, first_seen_at=first_seen, country=country)
     res = conn.execute(pg_insert(events).values(
         event_type=event_type, dedupe_key=dedupe_key[:200], ticker=ticker, company_name=company_name, issuer_cik=issuer_cik,
         public_date=public_date, public_at=public_at, transaction_date=transaction_date, priority=priority, title=title[:500],
         payload=jsonable(payload), source_url=source_url, is_backfill=is_backfill, date_quality=date_quality,
+        country=country, exchange=exchange, security_id=security_id, issuer_id=issuer_cik, event_family=event_family,
+        accepted_at=accepted_at or (public_at if date_quality == "exact" else None), first_seen_at=first_seen,
+        available_at=avail, source_accession=source_accession, source_document_id=source_document_id,
+        parser_version=parser_version, identity_confidence=identity_confidence,
+        event_confidence=event_confidence or ("LOW" if date_quality == "estimated" else None), needs_review=needs_review,
+        feature_source_event_ids=feature_source_event_ids, supersedes_event_id=supersedes_event_id, updated_at=now,
     ).on_conflict_do_nothing(index_elements=["dedupe_key"]).returning(events.c.id)).first()
     if res is None:
         return None

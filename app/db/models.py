@@ -303,10 +303,34 @@ events = Table(
     # why a mature event has no SPY-relative return (DELISTED_BANKRUPTCY, TICKER_REUSED, NO_PRICE_DATA...)
     Column("missing_reason", String(32)),
     _created(),
+    # ---- V2 global event contract (migration 0012) ----
+    Column("country", String(2), nullable=False, server_default="US"),
+    Column("exchange", String(8)),
+    Column("security_id", String(48)),
+    Column("issuer_id", String(40)),
+    Column("event_family", String(32)),
+    _ts("accepted_at"),  # source acceptance timestamp (SEC acceptance, KAP publication)
+    _ts("first_seen_at"),  # our first observation (live) - never used as a historical entry for backfill
+    _ts("available_at"),  # first moment a strategy could know the event: the ONLY entry-time anchor
+    Column("source_document_id", Text),
+    Column("source_accession", String(25)),
+    Column("parser_version", String(32)),
+    Column("schema_version", String(8), nullable=False, server_default="1"),
+    Column("identity_confidence", String(8)),
+    Column("event_confidence", String(8)),
+    Column("needs_review", Boolean, nullable=False, server_default="false"),
+    Column("is_tradeable_at_event", Boolean),
+    _ts("next_tradeable_at"),
+    Column("supersedes_event_id", BigInteger),
+    Column("episode_id", String(64)),
+    Column("feature_source_event_ids", JSONB),  # derived events: the primary events they were built from
+    _ts("updated_at"),
 )
 Index("ix_events_type_public", events.c.event_type, events.c.public_date)
 Index("ix_events_issuer", events.c.issuer_cik)
 Index("ix_events_returns_status", events.c.returns_status)
+Index("ix_events_available_at", events.c.available_at)
+Index("ix_events_country_exchange_ticker", events.c.country, events.c.exchange, events.c.ticker, events.c.public_date)
 
 event_returns = Table(
     "event_returns", metadata,
@@ -364,6 +388,18 @@ source_health = Table(
     Column("alerted", Boolean, nullable=False, server_default="false"),
     Column("status", String(16), nullable=False, server_default="UNKNOWN"),
     Column("items_last_run", Integer, nullable=False, server_default="0"),
+    # ---- V2 (migration 0012) ----
+    Column("country", String(2)),
+    Column("dataset", String(48)),
+    Column("watermark", JSONB),
+    Column("response_status", Integer),
+    Column("schema_fingerprint", String(32)),
+    Column("expected_fingerprint", String(32)),
+    Column("parser_version", String(32)),
+    Column("latency_ms", Integer),
+    # HEALTHY | STALE | DEGRADED | BLOCKED | SCHEMA_CHANGED | AUTH_REQUIRED | DISABLED | UNKNOWN
+    Column("health_status", String(16), nullable=False, server_default="UNKNOWN"),
+    Column("license_status", String(24)),
 )
 
 processing_jobs = Table(
@@ -872,6 +908,7 @@ paper_accounts = Table(
     Column("starting_capital", Float, nullable=False),
     Column("commission_per_trade", Float, nullable=False, server_default="0"),
     Column("active", Boolean, nullable=False, server_default="true"),
+    Column("book", String(8), nullable=False, server_default="MAIN"),  # MAIN (TRUSTED families) | RESEARCH
     _created(),
 )
 
@@ -913,6 +950,9 @@ proposed_trades = Table(
     Column("decided_by", String(40)),
     Column("research_only", Boolean, nullable=False, server_default="false"),
     Column("notified", Boolean, nullable=False, server_default="false"),
+    # ---- V2 forward-validation timeline (migration 0012) ----
+    _ts("signal_time"),  # event available_at
+    _ts("eligible_market_at"),  # first market open at/after approval
 )
 Index("ix_proposed_trades_status", proposed_trades.c.approval_status, proposed_trades.c.ticker)
 
@@ -934,6 +974,11 @@ paper_orders = Table(
     Column("slippage_bps", Float),
     Column("commission", Float),
     Column("note", Text),
+    # ---- V2 fill realism (migration 0012) ----
+    Column("fill_model", String(8)),  # LIQUID | NORMAL | ILLIQUID
+    Column("spread_bps", Float),
+    Column("participation", Float),  # order shares / fill-day volume
+    Column("adv_shares", Float),
 )
 
 paper_positions = Table(
@@ -1119,4 +1164,270 @@ thirteen_d_classification = Table(
     Column("evidence", JSONB, nullable=False, server_default="{}"),
     Column("version", String(24), nullable=False),
     Column("classified_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
+
+# =====================================================================  V2 (migration 0012): global core
+
+# One canonical security per (country, exchange listing). A ticker is NOT an identity: symbols live in
+# security_symbol_periods with validity intervals, and every symbol lookup is (exchange?, symbol, date).
+global_securities = Table(
+    "global_securities", metadata,
+    Column("security_id", String(48), primary_key=True),  # e.g. US:CIK0000320193:COM | TR:ISIN:TRAASELS91H2
+    Column("country", String(2), nullable=False),
+    Column("exchange", String(8)),  # MIC when known (XNYS, XNAS, XIST, XTSE, XTSX, XCNQ, XASX)
+    Column("issuer_id", String(40), nullable=False),  # US: CIK | TR: MKK/KAP member id | CA: SEDAR+ profile
+    Column("issuer_name", Text, nullable=False),
+    Column("cik", String(10)),
+    Column("cusip", String(9)),
+    Column("figi", String(12)),
+    Column("composite_figi", String(12)),
+    Column("isin", String(12)),
+    Column("local_id", String(40)),  # MKK/BIST or SEDAR+ identifier
+    Column("security_type", String(16)),  # COMMON | ADR | PREFERRED | UNIT | WARRANT | ETF | FUND | UNKNOWN
+    Column("currency", String(3)),
+    Column("listing_date", Date),
+    Column("delisting_date", Date),
+    Column("predecessor_security_id", String(48)),
+    Column("successor_security_id", String(48)),
+    Column("adr_underlying_security_id", String(48)),
+    Column("primary_listing", Boolean),
+    Column("tradeability_status", String(16), nullable=False, server_default="UNKNOWN"),  # ACTIVE|SUSPENDED|DELISTED|UNKNOWN
+    Column("identity_confidence", String(8), nullable=False, server_default="LOW"),  # HIGH|MEDIUM|LOW
+    Column("identity_evidence", JSONB, nullable=False, server_default="[]"),
+    _ts("updated_at", server_default=func.now(), nullable=False),
+)
+Index("ix_global_securities_cik", global_securities.c.cik)
+Index("ix_global_securities_isin", global_securities.c.isin)
+Index("ix_global_securities_figi", global_securities.c.figi)
+
+security_symbol_periods = Table(
+    "security_symbol_periods", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("security_id", String(48), ForeignKey("global_securities.security_id", ondelete="CASCADE"), nullable=False),
+    Column("exchange", String(8)),
+    Column("symbol", String(16), nullable=False),
+    Column("valid_from", Date),  # NULL = unknown start (never "forever": resolution then needs other evidence)
+    Column("valid_to", Date),  # NULL = still valid
+    Column("source", String(32), nullable=False),
+    Column("confidence", String(8), nullable=False, server_default="MEDIUM"),
+    UniqueConstraint("security_id", "symbol", "valid_from", "source", name="uq_security_symbol_periods_key"),
+)
+Index("ix_security_symbol_periods_lookup", security_symbol_periods.c.symbol, security_symbol_periods.c.valid_from)
+
+# Raw data lake index: the compressed original lives on disk (content-addressed), the row is its provenance.
+raw_documents = Table(
+    "raw_documents", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("country", String(2), nullable=False),
+    Column("source", String(48), nullable=False),
+    Column("doc_key", Text, nullable=False),  # source-native id (accession, NCT id, file name, URL path)
+    Column("url", Text),
+    Column("sha256", String(64), nullable=False),
+    Column("storage_path", Text, nullable=False),
+    Column("bytes", BigInteger, nullable=False),
+    Column("stored_bytes", BigInteger, nullable=False),
+    Column("content_type", String(64)),
+    _ts("retrieved_at", nullable=False),
+    Column("parser_version", String(32)),
+    Column("retention_class", String(8), nullable=False, server_default="HOT"),  # HOT | COLD | EVIDENCE (never expires)
+    UniqueConstraint("source", "doc_key", "sha256", name="uq_raw_documents_key"),
+)
+Index("ix_raw_documents_sha", raw_documents.c.sha256)
+
+dataset_manifests = Table(
+    "dataset_manifests", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("dataset", String(64), nullable=False),
+    _ts("generated_at", nullable=False, server_default=func.now()),
+    Column("schema_version", String(16), nullable=False),
+    Column("parser_version", String(32)),
+    Column("row_count", BigInteger, nullable=False),
+    Column("first_event", DateTime(timezone=True)),
+    Column("last_event", DateTime(timezone=True)),
+    Column("watermark", JSONB, nullable=False, server_default="{}"),
+    Column("source_health", JSONB, nullable=False, server_default="{}"),
+    Column("content_hash", String(64)),  # hash of the exported rows (reproducibility check)
+    Column("export_path", Text),
+    Column("export_bytes", BigInteger),
+)
+Index("ix_dataset_manifests_dataset", dataset_manifests.c.dataset, dataset_manifests.c.generated_at)
+
+# Cross-process rate limit / quota coordination (worker, backfill and intelligence share one budget per key).
+rate_limits = Table(
+    "rate_limits", metadata,
+    Column("key", String(48), primary_key=True),
+    Column("min_interval_s", Float, nullable=False),
+    _ts("next_at", nullable=False, server_default=func.now()),
+    Column("daily_limit", Integer),
+    Column("day", Date),
+    Column("used_today", Integer, nullable=False, server_default="0"),
+    Column("hourly_limit", Integer),
+    Column("hour", DateTime(timezone=True)),
+    Column("used_hour", Integer, nullable=False, server_default="0"),
+    Column("last_429_at", DateTime(timezone=True)),
+    Column("n_429", Integer, nullable=False, server_default="0"),
+)
+
+# Source failure vs true zero: one row per source and UTC day.
+source_daily_status = Table(
+    "source_daily_status", metadata,
+    Column("source", String(48), primary_key=True),
+    Column("day", Date, primary_key=True),
+    Column("runs", Integer, nullable=False, server_default="0"),
+    Column("failures", Integer, nullable=False, server_default="0"),
+    Column("items", Integer, nullable=False, server_default="0"),
+    Column("events", Integer, nullable=False, server_default="0"),
+    # OK_EVENTS | TRUE_NO_EVENT | SOURCE_UNAVAILABLE | API_QUOTA | LICENSE_BLOCK | AUTH_REQUIRED | PARTIAL
+    Column("status", String(20), nullable=False),
+)
+
+# Market state at (or right after) available_at, captured live -> survivorship-safe forward dataset.
+event_market_snapshots = Table(
+    "event_market_snapshots", metadata,
+    Column("event_id", BigInteger, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True),
+    _ts("captured_at", nullable=False),
+    Column("symbol", String(16)),
+    Column("price", Float),
+    Column("price_time", DateTime(timezone=True)),
+    Column("bid", Float),
+    Column("ask", Float),
+    Column("volume", Float),
+    Column("avg_volume_20d", Float),
+    Column("market_cap", Float),
+    Column("shares_outstanding", Float),
+    Column("benchmark_symbol", String(8)),
+    Column("benchmark_price", Float),
+    Column("sector_symbol", String(8)),
+    Column("sector_price", Float),
+    Column("provider", String(24)),
+    Column("lag_seconds", Float),  # captured_at - available_at
+    Column("status", String(16), nullable=False),  # CAPTURED | NO_QUOTE | NOT_TRADEABLE | IDENTITY_UNRESOLVED
+)
+
+# Timestamped relationships (issuer/security/person/fund/agency/contract/grant/patent/trial/drug/subsidiary).
+entity_edges = Table(
+    "entity_edges", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("src_type", String(16), nullable=False),
+    Column("src_id", String(64), nullable=False),
+    Column("rel", String(32), nullable=False),  # SUBSIDIARY_OF | SPONSOR_OF | ASSIGNEE_OF | CLIENT_OF | RECIPIENT_OF | HOLDS ...
+    Column("dst_type", String(16), nullable=False),
+    Column("dst_id", String(64), nullable=False),
+    Column("valid_from", Date),
+    Column("valid_to", Date),
+    Column("source", String(48), nullable=False),
+    Column("confidence", String(8), nullable=False),
+    Column("evidence", JSONB, nullable=False, server_default="{}"),
+    UniqueConstraint("src_type", "src_id", "rel", "dst_type", "dst_id", "source", name="uq_entity_edges_key"),
+)
+Index("ix_entity_edges_dst", entity_edges.c.dst_type, entity_edges.c.dst_id)
+
+# Generic point-in-time records of lower-volume datasets (trials, FDA, lobbying, grants, patents, macro, COT,
+# CA / TR official datasets). High-volume series get their own tables below.
+dataset_records = Table(
+    "dataset_records", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("country", String(2), nullable=False),
+    Column("dataset", String(48), nullable=False),
+    Column("record_key", String(160), nullable=False),
+    Column("record_version", String(64), nullable=False, server_default=""),  # source's last-update stamp
+    Column("as_of_date", Date),  # the date the record is about (decision date, report date...)
+    _ts("available_at", nullable=False),  # first moment a strategy could know it
+    _ts("first_seen_at", nullable=False, server_default=func.now()),
+    Column("issuer_cik", String(10)),
+    Column("security_id", String(48)),
+    Column("entity_name", Text),
+    Column("identity_confidence", String(8)),
+    Column("payload", JSONB, nullable=False),
+    Column("source_url", Text),
+    Column("raw_document_id", BigInteger),
+    Column("parser_version", String(32), nullable=False),
+    Column("license_status", String(24), nullable=False),
+    Column("needs_review", Boolean, nullable=False, server_default="false"),
+    UniqueConstraint("dataset", "record_key", "record_version", name="uq_dataset_records_key"),
+)
+Index("ix_dataset_records_dataset_date", dataset_records.c.dataset, dataset_records.c.as_of_date)
+Index("ix_dataset_records_issuer", dataset_records.c.issuer_cik)
+
+short_volume_daily = Table(  # FINRA Reg SHO daily short-sale VOLUME (not short interest)
+    "short_volume_daily", metadata,
+    Column("trade_date", Date, primary_key=True),
+    Column("symbol", String(16), primary_key=True),
+    Column("short_volume", BigInteger, nullable=False),
+    Column("short_exempt_volume", BigInteger, nullable=False, server_default="0"),
+    Column("total_volume", BigInteger, nullable=False),
+    _ts("available_at", nullable=False),
+)
+Index("ix_short_volume_symbol", short_volume_daily.c.symbol, short_volume_daily.c.trade_date)
+
+short_interest = Table(  # short POSITIONS (FINRA equity short interest, CIRO consolidated short position report)
+    "short_interest", metadata,
+    Column("country", String(2), primary_key=True),
+    Column("settlement_date", Date, primary_key=True),
+    Column("symbol", String(16), primary_key=True),
+    Column("short_position", BigInteger, nullable=False),
+    Column("prev_short_position", BigInteger),
+    Column("avg_daily_volume", Float),
+    Column("days_to_cover", Float),
+    Column("source", String(24), nullable=False),
+    _ts("available_at", nullable=False),
+)
+
+fails_to_deliver = Table(  # SEC fails-to-deliver (published twice a month, ~2 weeks after the half-month)
+    "fails_to_deliver", metadata,
+    Column("settlement_date", Date, primary_key=True),
+    Column("cusip", String(9), primary_key=True),
+    Column("symbol", String(16)),
+    Column("quantity", BigInteger, nullable=False),
+    Column("price", Float),
+    Column("description", Text),
+    Column("source_file", String(64), nullable=False),
+    _ts("available_at", nullable=False),
+)
+Index("ix_ftd_symbol", fails_to_deliver.c.symbol, fails_to_deliver.c.settlement_date)
+
+inst_filings_13f = Table(
+    "inst_filings_13f", metadata,
+    Column("accession", String(25), primary_key=True),
+    Column("manager_cik", String(10), nullable=False),
+    Column("manager_name", Text),
+    Column("period", Date, nullable=False),  # report calendar quarter end
+    Column("filed_date", Date, nullable=False),
+    _ts("available_at", nullable=False),
+    Column("submission_type", String(12), nullable=False),  # 13F-HR | 13F-HR/A
+    Column("amendment_type", String(16)),  # RESTATEMENT | NEW HOLDINGS
+    Column("entries", Integer),
+    Column("total_value", Float),
+    Column("source", String(32), nullable=False),
+)
+Index("ix_13f_manager_period", inst_filings_13f.c.manager_cik, inst_filings_13f.c.period)
+
+inst_holdings_13f = Table(
+    "inst_holdings_13f", metadata,
+    Column("accession", String(25), ForeignKey("inst_filings_13f.accession", ondelete="CASCADE"), primary_key=True),
+    Column("line", Integer, primary_key=True),
+    Column("cusip", String(9), nullable=False),
+    Column("issuer_name", Text),
+    Column("class_title", Text),
+    Column("value", Float),  # USD (the source's thousands before 2023 are normalised to dollars)
+    Column("shares", Float),
+    Column("sh_prn", String(3)),
+    Column("put_call", String(4)),
+    Column("discretion", String(8)),
+)
+Index("ix_13f_holdings_cusip", inst_holdings_13f.c.cusip)
+
+inst_cusip_quarter_13f = Table(  # all managers aggregated per CUSIP and quarter (per-manager rows only for focused funds)
+    "inst_cusip_quarter_13f", metadata,
+    Column("cusip", String(9), primary_key=True),
+    Column("period", Date, primary_key=True),
+    Column("holders", Integer, nullable=False),
+    Column("shares", Float),
+    Column("value", Float),
+    Column("new_holders", Integer),
+    Column("exited_holders", Integer),
+    Column("increased_holders", Integer),
+    Column("decreased_holders", Integer),
+    _ts("available_at", nullable=False),  # latest original filing counted (deadline effect: 45 days after quarter end)
 )

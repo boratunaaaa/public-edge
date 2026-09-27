@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import threading
 import time
@@ -30,8 +31,29 @@ _HOST_RPS = {
     "tsx.com": 1 / 6,
     "newswire.ca": 0.5,
     "globenewswire.com": 0.5,
+    # V2 US / CA official datasets
+    "finra.org": 2.0,
+    "clinicaltrials.gov": 2.0,
+    "api.fda.gov": 3.0,
+    "lda.senate.gov": 1.0,
+    "api.openfigi.com": 0.4,
+    "publicreporting.cftc.gov": 2.0,
+    "open.canada.ca": 1.0,
+    "canadabuys.canada.ca": 1.0,
+    "bankofcanada.ca": 1.0,
+    "ciro.ca": 0.5,
+    "fred.stlouisfed.org": 1.0,
 }
 _RETRY_STATUS = {429, 500, 502, 503, 504}
+# host family -> shared cross-process budget (app.core.ratelimit), enabled with PE_SHARED_RATELIMIT=1
+_SHARED_KEY = {
+    "sec.gov": "sec", "api.tiingo.com": "tiingo", "api.usaspending.gov": "usaspending",
+    "query1.finance.yahoo.com": "yahoo", "query2.finance.yahoo.com": "yahoo", "finra.org": "finra",
+    "clinicaltrials.gov": "clinicaltrials", "api.fda.gov": "openfda", "lda.senate.gov": "lda",
+    "api.openfigi.com": "openfigi", "publicreporting.cftc.gov": "cftc", "open.canada.ca": "canada_open",
+    "canadabuys.canada.ca": "canada_open", "bankofcanada.ca": "boc_valet", "ciro.ca": "ciro",
+}
+_SHARED = os.environ.get("PE_SHARED_RATELIMIT") == "1"
 
 
 class _Bucket:
@@ -87,10 +109,17 @@ def request(method: str, url: str, *, retries: int = 4, headers: dict | None = N
     if headers:
         hdrs.update(headers)
     last: Exception | None = None
+    shared = _SHARED_KEY.get(_host_key(url)) if _SHARED else None
     for attempt in range(retries + 1):
         _bucket(url).wait()
+        if shared:
+            from app.core import ratelimit
+            ratelimit.acquire(shared)  # raises QuotaExhausted -> the source records API_QUOTA, not "no data"
         try:
             r = _client.request(method, url, headers=hdrs, **kw)
+            if r.status_code == 429 and shared:
+                from app.core import ratelimit
+                ratelimit.record_429(shared)
             if r.status_code in _RETRY_STATUS:
                 raise HttpError(url, r.status_code, "retryable status")
             if r.status_code >= 400:

@@ -48,16 +48,27 @@ def _alert_source_failure(engine, source: str, fails: int, err: str) -> None:
 
 
 def run_source(engine, src) -> None:
+    from app.core.source_state import RunOutcome, classify_exception, record_run
     t0 = time.time()
+    meta = {"country": getattr(src, "country", "US"), "dataset": getattr(src, "dataset", None),
+            "license_status": getattr(src, "license_status", None), "stale_after": getattr(src, "stale_after", None)}
     try:
         res = src.run_live(engine)
         with engine.begin() as conn:
             health_success(conn, src.name, items=res.items, had_event=bool(res.events))
+            record_run(conn, src.name, RunOutcome(ok=True, items=res.items, events=len(res.events),
+                                                  latency_ms=int((time.time() - t0) * 1000),
+                                                  fingerprint=getattr(res, "fingerprint", None),
+                                                  parser_version=getattr(src, "parser_version", None),
+                                                  watermark=getattr(res, "watermark", None)), **meta)
         log.info("source %s ok items=%s events=%s (%.1fs)", src.name, res.items, len(res.events), time.time() - t0)
     except Exception as e:
         log.exception("source %s failed", src.name)
+        kind, status = classify_exception(e)
         with engine.begin() as conn:
             fails = health_failure(conn, src.name, f"{type(e).__name__}: {e}")
+            record_run(conn, src.name, RunOutcome(ok=False, failure_kind=kind, error=str(e)[:500], response_status=status,
+                                                  latency_ms=int((time.time() - t0) * 1000)), **meta)
         if src.critical and fails >= settings.source_failure_alert_threshold:
             _alert_source_failure(engine, src.name, fails, str(e))
 
@@ -124,6 +135,7 @@ def main() -> None:
         for s in SOURCES:
             if not s.enabled:
                 health_mark(conn, s.name, "DISABLED", s.disabled_reason)
+                conn.execute(source_health.update().where(source_health.c.source == s.name).values(health_status="DISABLED"))
     log.info("registry synced: %s tickers", n)
     if telegram.configured():
         try:

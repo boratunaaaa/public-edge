@@ -308,6 +308,7 @@ def multi_signal_check(conn: Connection, ticker: str | None, public_date: date, 
         public_date=public_date, ticker=ticker, company_name=name, issuer_cik=comp[0]["issuer_cik"], priority=prio,
         title=f"${ticker}: {' + '.join(families)} within {MULTI_WINDOW_DAYS}d", payload=features, features=features,
         source_url=comp[-1]["source_url"], is_backfill=is_backfill,
+        feature_source_event_ids=sorted(r["id"] for r in comp), event_family="MULTI_SIGNAL",
     )
     if eid and episode_canonical:
         conn.execute(events.update().where(events.c.id == eid).values(
