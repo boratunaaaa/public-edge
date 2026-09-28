@@ -106,3 +106,26 @@ def test_every_registered_event_type_is_unique_to_one_family():
         for et in f.source_event_types:
             assert et not in seen, (et, seen.get(et), f.signal_id)
             seen[et] = f.signal_id
+
+
+def test_placebo_difference_uses_same_issuer_earlier_window(engine, clean):
+    from app.backtest import placebo
+    from app.db.models import event_returns, market_prices
+    d0 = date(2024, 1, 1)
+    with engine.begin() as c:
+        bars = []
+        for i in range(800):
+            d = d0 + timedelta(days=i)
+            if d.weekday() >= 5:
+                continue
+            spy = 100 * (1.0005 ** i)
+            stock = 50 * (1.001 ** i) if d >= date(2025, 8, 1) else 50 * (0.9995 ** i)
+            bars += [{"symbol": "SPY", "date": d, "open": spy, "high": spy, "low": spy, "close": spy, "adj_close": spy, "volume": 1e6},
+                     {"symbol": "TSTX", "date": d, "open": stock, "high": stock, "low": stock, "close": stock, "adj_close": stock, "volume": 1e6}]
+        c.execute(market_prices.insert(), bars)
+        c.execute(text("""INSERT INTO events (id, event_type, dedupe_key, ticker, issuer_cik, public_date, title, payload, source_url, price_symbol)
+                          VALUES (1, 'X_TEST', 'k', 'TSTX', '0000000777', '2025-09-02', 't', '{}', 'u', 'TSTX')"""))
+        c.execute(event_returns.insert().values(event_id=1, horizon_days=90, entry_date=date(2025, 9, 3), entry_price=1, exit_date=date(2025, 12, 1),
+                                                exit_price=1.1, ret=0.1, spy_ret=0.04, excess_ret=0.06))
+        out = placebo.family_vs_placebo(c, "X_TEST", 90)
+    assert out["companies"] == 1 and out["event_rate"] == 1.0 and out["placebo_rate"] == 0.0 and out["difference"] == 1.0
