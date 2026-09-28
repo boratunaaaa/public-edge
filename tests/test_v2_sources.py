@@ -259,3 +259,15 @@ def test_live_ftd_source_takes_only_the_newest_files(engine, clean, monkeypatch)
     seen.clear()
     S.SecFtdSource().run_live(engine, backfill_since="cnsfails202401a")
     assert seen == ["cnsfails202608b", "cnsfails202608a", "cnsfails202607b", "cnsfails202401a"]
+
+
+def test_13f_member_lookup_tolerates_folder_prefix_and_case(tmp_path):
+    import zipfile as zf
+    from app.sources.us import form13f as F
+    src = zf.ZipFile(str(FX / "us" / "13f_2026q2_mini.zip"))
+    out = tmp_path / "x.zip"
+    with zf.ZipFile(out, "w") as z:
+        for n in src.namelist():
+            z.writestr("FORM13F_2026/" + n.lower(), src.read(n))
+    p = F.parse_dataset(str(out))
+    assert len(p["filings"]) == 3 and p["holdings"]

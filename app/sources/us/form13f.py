@@ -46,8 +46,16 @@ def dataset_urls() -> list[str]:
     return ["https://www.sec.gov" + u for u in dict.fromkeys(re.findall(r'href="(/files/[^"]+_form13f\.zip)"', page))]
 
 
+def _member(z: zipfile.ZipFile, name: str) -> str:
+    """Data sets differ in layout (folder prefix / case): match the table by file name, case-insensitively."""
+    for n in z.namelist():
+        if n.rsplit("/", 1)[-1].upper() == name.upper():
+            return n
+    raise KeyError(f"{name} not in data set (members: {z.namelist()[:12]})")
+
+
 def _rows(z: zipfile.ZipFile, name: str):
-    with z.open(name) as f:
+    with z.open(_member(z, name)) as f:
         yield from csv.DictReader(io.TextIOWrapper(f, encoding="utf-8", errors="replace"), delimiter="\t", quoting=csv.QUOTE_NONE)
 
 

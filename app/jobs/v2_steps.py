@@ -65,7 +65,11 @@ def backfill_13f(engine: Engine, quarters: int = 9) -> dict:
         if not disk_ok():
             out.append({"url": u, "status": "PAUSED_LOW_DISK"})
             break
-        out.append(ingest_dataset(engine, u, min_period=min_period))
+        try:
+            out.append(ingest_dataset(engine, u, min_period=min_period))
+        except Exception as e:  # noqa: BLE001 - one bad archive never stops the other quarters
+            log.exception("13F data set %s failed", u)
+            out.append({"url": u, "status": "FAILED", "error": str(e)[:300]})
     new = [o for o in out if o.get("status") != "ALREADY_INGESTED"]
     ev = after_13f(engine, is_backfill=True) if new else 0
     return {"datasets": len(out), "new": len(new), "events": ev}
