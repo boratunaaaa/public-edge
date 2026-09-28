@@ -71,6 +71,8 @@ def test_13f_events_from_two_real_quarters(engine, clean):
         acc = c.execute(text("""SELECT accession FROM inst_filings_13f WHERE manager_cik = '0002055400' AND period = '2026-06-30'
                                 AND submission_type = '13F-HR'""")).scalar()
         ids = thirteen_f(c, acc, is_backfill=True)
+        from app.signals.v2_families import accumulation_events
+        ids += accumulation_events(c, date(2026, 6, 30), is_backfill=True)
         evs = c.execute(text("SELECT event_type, available_at, public_date FROM events")).mappings().all()
         filed = c.execute(text("SELECT filed_date FROM inst_filings_13f WHERE accession = :a"), {"a": acc}).scalar()
     for e in evs:
@@ -204,3 +206,24 @@ def test_matched_placebo_matches_on_prior_return_and_blocks_any_family(engine, c
                               VALUES ('OTHER', :k, '0000000010', :d, 't', '{}', 'u')"""), {"k": f"o{k}", "d": d0 + timedelta(days=k)})
         anyc = R.matched_placebo(c, "X_T", lookback=60, contamination="any")
     assert fam["companies"] == 1 and anyc["companies"] == 0
+
+
+def test_13f_accumulation_fires_at_the_third_new_holder_filing(engine, clean):
+    from app.signals.v2_families import accumulation_events
+    q1, q2 = date(2026, 3, 31), date(2026, 6, 30)
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO activist_filings (accession, issuer_cik, cusip, filed_date, form_type, is_13d, is_amendment, source_url)
+                          VALUES ('0000000000-25-999999', '0000000555', '123456789', '2025-01-01', 'SC 13D', true, false, 'u')"""))
+        for m in range(4):
+            mc = f"{m + 1:010d}"
+            for per, acc, filed in ((q1, f"A{m}-1", date(2026, 5, 10)), (q2, f"A{m}-2", date(2026, 7, 20 + m))):
+                c.execute(text("""INSERT INTO inst_filings_13f (accession, manager_cik, manager_name, period, filed_date, available_at,
+                                  submission_type, entries, source) VALUES (:a, :m, :n, :p, :f, :av, '13F-HR', 20, 't')"""),
+                          {"a": acc, "m": mc, "n": f"M{m}", "p": per, "f": filed, "av": datetime(filed.year, filed.month, filed.day, 23, tzinfo=UTC)})
+                c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES (:a, 1, 'OTHER0001', 'X', 1, 1)"),
+                          {"a": acc})
+            c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES (:a, 2, '123456789', 'TGT', 1, 1)"),
+                      {"a": f"A{m}-2"})
+        ids = accumulation_events(c, q2, is_backfill=True)
+        ev = c.execute(text("SELECT public_date, payload->>'trigger_manager' FROM events WHERE id = :i"), {"i": ids[0]}).one()
+    assert len(ids) == 1 and ev[0] == date(2026, 7, 22) and ev[1] == "M2"  # third manager's filing, not the fourth

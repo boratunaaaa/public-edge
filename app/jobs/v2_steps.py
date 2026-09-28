@@ -42,15 +42,31 @@ def after_ftd(engine: Engine, files: list[str], *, is_backfill: bool) -> int:
 
 
 def after_13f(engine: Engine, since_filed: date | None = None, *, is_backfill: bool) -> int:
-    from app.signals.v2_families import thirteen_f
+    """Per-filing position changes (NEW / EXIT / DECREASE) + one set-based accumulation pass per period.
+    Checkpointed: filings already processed are skipped on a restart."""
+    from app.signals.v2_families import accumulation_events, thirteen_f
     with engine.connect() as c:
+        st = job_state(c, "v2_13f_events")
         accs = c.execute(text("""SELECT accession FROM inst_filings_13f WHERE submission_type = '13F-HR'
                                  AND entries BETWEEN 10 AND 150 AND (CAST(:d AS date) IS NULL OR filed_date >= :d)
-                                 ORDER BY available_at"""), {"d": since_filed}).scalars().all()
+                                 ORDER BY available_at, accession"""), {"d": since_filed}).scalars().all()
+        periods = c.execute(text("SELECT DISTINCT period FROM inst_filings_13f WHERE period >= CURRENT_DATE - 900 ORDER BY 1")).scalars().all()
+    done = set(st.get("done", []))
     n = 0
-    for a in accs:
+    for k, a in enumerate(accs):
+        if a in done:
+            continue
         with engine.begin() as c:
             n += len(thirteen_f(c, a, is_backfill=is_backfill))
+        done.add(a)
+        if k % 500 == 0:
+            with engine.begin() as c:
+                save_job_state(c, "v2_13f_events", {**st, "done": sorted(done)})
+    for p in periods:
+        with engine.begin() as c:
+            n += len(accumulation_events(c, p, is_backfill=is_backfill))
+    with engine.begin() as c:
+        save_job_state(c, "v2_13f_events", {**st, "done": sorted(done)})
     return n
 
 
@@ -71,7 +87,11 @@ def backfill_13f(engine: Engine, quarters: int = 9) -> dict:
             log.exception("13F data set %s failed", u)
             out.append({"url": u, "status": "FAILED", "error": str(e)[:300]})
     new = [o for o in out if o.get("status") != "ALREADY_INGESTED"]
-    ev = after_13f(engine, is_backfill=True) if new else 0
+    with engine.connect() as c:
+        pending = not job_state(c, "v2_13f_events").get("complete")
+    ev = after_13f(engine, is_backfill=True) if (new or pending) else 0
+    with engine.begin() as c:
+        save_job_state(c, "v2_13f_events", {**job_state(c, "v2_13f_events"), "complete": True})
     return {"datasets": len(out), "new": len(new), "events": ev}
 
 
@@ -157,7 +177,9 @@ def run_historical(engine: Engine, step, order=("v2_13f", "v2_short_data", "v2_h
     fns = {"v2_13f": lambda: backfill_13f(engine), "v2_short_data": lambda: backfill_short_data(engine),
            "v2_health_gov": lambda: backfill_health_gov(engine), "v2_ca_grants": lambda: ca_grants_weekly(engine)}
     with engine.connect() as lock_conn:
-        if not lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": LOCK_ID}).scalar():
+        got = lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": LOCK_ID}).scalar()
+        lock_conn.commit()  # session lock survives the commit; never leave an idle-in-transaction connection open
+        if not got:
             log.info("V2 historical runner already active elsewhere - skipping")
             return {"skipped": "LOCKED"}
         try:

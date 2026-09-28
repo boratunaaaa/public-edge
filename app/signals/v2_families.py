@@ -151,27 +151,40 @@ def thirteen_f(conn: Connection, accession: str, *, is_backfill: bool) -> list[i
                                source_accession=accession, available_at_override=f["available_at"], date_quality="date")
             if eid:
                 out.append(eid)
-        # focused managers that hold the CUSIP this quarter but did not hold it the quarter before (new holders),
-        # counting only filings already public at this filing's available_at
-        n = conn.execute(text("""
-            SELECT count(DISTINCT f.manager_cik) FROM inst_filings_13f f JOIN inst_holdings_13f h ON h.accession = f.accession
-            WHERE h.cusip = :c AND f.period = :p AND f.submission_type = '13F-HR' AND f.entries BETWEEN 10 AND 150
-              AND f.available_at <= :t
-              AND EXISTS (SELECT 1 FROM inst_filings_13f f0 WHERE f0.manager_cik = f.manager_cik
-                          AND f0.period = CAST(date_trunc('quarter', CAST(:p AS date)) AS date) - 1 AND f0.submission_type = '13F-HR')
-              AND NOT EXISTS (SELECT 1 FROM inst_filings_13f f0 JOIN inst_holdings_13f h0 ON h0.accession = f0.accession
-                              WHERE f0.manager_cik = f.manager_cik AND h0.cusip = :c
-                                AND f0.period = CAST(date_trunc('quarter', CAST(:p AS date)) AS date) - 1)"""),
-                         {"c": ch["cusip"], "p": f["period"], "t": f["available_at"]}).scalar()
-        if n >= ACCUM_MANAGERS:
-            eid = create_event(conn, event_type="INST_13F_ACCUMULATION", dedupe_key=f"13FA:{ch['cusip']}:{f['period']}",
-                               public_date=f["filed_date"], ticker=ticker, issuer_cik=cik, company_name=ch["issuer_name"],
-                               title=f"{ch['issuer_name']}: {n} focused funds opened new positions (Q {f['period']})",
-                               payload={"period": str(f["period"]), "new_focused_holders": n, "cusip": ch["cusip"],
-                                        "trigger_manager": f["manager_name"]},
-                               source_url="https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets",
-                               is_backfill=is_backfill, event_family="US_13F_ACCUMULATION", identity_confidence=conf,
-                               available_at_override=f["available_at"], date_quality="date")
-            if eid:
-                out.append(eid)
+    return out
+
+
+def accumulation_events(conn: Connection, period, *, is_backfill: bool) -> list[int]:
+    """US_13F_ACCUMULATION, set-based for one report period: per CUSIP, focused managers (10-150 positions, with a
+    13F-HR for the previous quarter) that hold it now but did not hold it the quarter before, ordered by the time their
+    filing became public; the event is the 3rd such manager's filing (point in time: only filings public by then)."""
+    rows = conn.execute(text("""
+        WITH foc AS (SELECT accession, manager_cik, manager_name, filed_date, available_at FROM inst_filings_13f
+                     WHERE period = :p AND submission_type = '13F-HR' AND entries BETWEEN 10 AND 150),
+        prevf AS (SELECT manager_cik, accession FROM inst_filings_13f
+                  WHERE period = CAST(date_trunc('quarter', CAST(:p AS date)) AS date) - 1 AND submission_type = '13F-HR'),
+        newh AS (SELECT DISTINCT ON (f.manager_cik, h.cusip) h.cusip, f.manager_cik, f.manager_name, f.accession, f.filed_date,
+                        f.available_at, max(h.issuer_name) OVER (PARTITION BY h.cusip) issuer_name
+                 FROM foc f JOIN inst_holdings_13f h ON h.accession = f.accession
+                 WHERE EXISTS (SELECT 1 FROM prevf pf WHERE pf.manager_cik = f.manager_cik)
+                   AND NOT EXISTS (SELECT 1 FROM prevf pf JOIN inst_holdings_13f h0 ON h0.accession = pf.accession
+                                   WHERE pf.manager_cik = f.manager_cik AND h0.cusip = h.cusip)
+                 ORDER BY f.manager_cik, h.cusip, f.available_at),
+        ranked AS (SELECT *, row_number() OVER (PARTITION BY cusip ORDER BY available_at, accession) rn FROM newh)
+        SELECT cusip, manager_name, accession, filed_date, available_at, issuer_name FROM ranked WHERE rn = 3"""),
+                        {"p": period}).mappings().all()
+    out = []
+    for r in rows:
+        cik, conf, _why = cusip_to_cik(conn, r["cusip"])
+        if not cik:
+            continue
+        eid = create_event(conn, event_type="INST_13F_ACCUMULATION", dedupe_key=f"13FA:{r['cusip']}:{period}",
+                           public_date=r["filed_date"], ticker=_ticker(conn, cik), issuer_cik=cik, company_name=r["issuer_name"],
+                           title=f"{r['issuer_name']}: 3 focused funds opened new positions (Q {period})",
+                           payload={"period": str(period), "new_focused_holders": 3, "cusip": r["cusip"], "trigger_manager": r["manager_name"]},
+                           source_url="https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets", is_backfill=is_backfill,
+                           event_family="US_13F_ACCUMULATION", identity_confidence=conf, source_accession=r["accession"],
+                           available_at_override=r["available_at"], date_quality="date")
+        if eid:
+            out.append(eid)
     return out
