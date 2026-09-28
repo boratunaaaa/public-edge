@@ -227,3 +227,61 @@ def test_13f_accumulation_fires_at_the_third_new_holder_filing(engine, clean):
         ids = accumulation_events(c, q2, is_backfill=True)
         ev = c.execute(text("SELECT public_date, payload->>'trigger_manager' FROM events WHERE id = :i"), {"i": ids[0]}).one()
     assert len(ids) == 1 and ev[0] == date(2026, 7, 22) and ev[1] == "M2"  # third manager's filing, not the fourth
+
+
+def test_13f_new_data_resets_completion_and_interrupted_run_resumes(engine, clean, monkeypatch):
+    from app.db.store import job_state, save_job_state
+    from app.jobs import v2_steps
+    import app.sources.us.form13f as F
+    with engine.begin() as c:
+        save_job_state(c, "v2_13f_events", {"complete": True, "done": []})
+        save_job_state(c, "form13f_datasets", {"done": ["u_old"]})
+    monkeypatch.setattr(v2_steps, "disk_ok", lambda: True)
+    monkeypatch.setattr(F, "dataset_urls", lambda: ["u_new", "u_old"])
+
+    def ingest(engine_, u, **k):
+        with engine_.begin() as c:
+            st = job_state(c, "form13f_datasets")
+            save_job_state(c, "form13f_datasets", {"done": sorted(set(st["done"]) | {u})})
+        return {"url": u}
+    monkeypatch.setattr(F, "ingest_dataset", ingest)
+
+    def boom(*a, **k):
+        raise RuntimeError("interrupted")
+    monkeypatch.setattr(v2_steps, "after_13f", boom)
+    with pytest.raises(RuntimeError):
+        v2_steps.backfill_13f(engine)
+    with engine.connect() as c:
+        assert job_state(c, "v2_13f_events")["complete"] is False  # persisted BEFORE the new data set was loaded
+    calls = []
+    monkeypatch.setattr(v2_steps, "after_13f", lambda e, **k: calls.append(1) or 0)
+    v2_steps.backfill_13f(engine)  # every URL is ALREADY_INGESTED now, but events are still pending -> recomputed
+    assert calls == [1]
+    with engine.connect() as c:
+        assert job_state(c, "v2_13f_events")["complete"] is True
+
+
+def test_13f_filing_without_previous_quarter_is_reevaluated_after_it_arrives(engine, clean):
+    from app.db.store import job_state
+    from app.jobs import v2_steps
+    q1, q2 = date(2026, 3, 31), date(2026, 6, 30)
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO activist_filings (accession, issuer_cik, cusip, filed_date, form_type, is_13d, is_amendment, source_url)
+                          VALUES ('0000000000-25-888888', '0000000666', 'NEWCUSIP1', '2025-01-01', 'SC 13D', true, false, 'u')"""))
+        c.execute(text("""INSERT INTO inst_filings_13f (accession, manager_cik, manager_name, period, filed_date, available_at, submission_type,
+                          entries, source) VALUES ('B-2', '0000000077', 'M', :p, '2026-08-01', '2026-08-02T03:59:59Z', '13F-HR', 12, 't')"""), {"p": q2})
+        for i, cu in enumerate(["OLDCUSIP1", "NEWCUSIP1"]):
+            c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES ('B-2', :l, :c, 'X', :v, 100)"),
+                      {"l": i, "c": cu, "v": 50.0})
+    assert v2_steps.after_13f(engine, is_backfill=True) == 0
+    with engine.connect() as c:
+        assert "B-2" not in job_state(c, "v2_13f_events").get("done", [])  # previous quarter missing: not final
+    with engine.begin() as c:  # the failed previous quarter is loaded on a retry
+        c.execute(text("""INSERT INTO inst_filings_13f (accession, manager_cik, manager_name, period, filed_date, available_at, submission_type,
+                          entries, source) VALUES ('B-1', '0000000077', 'M', :p, '2026-05-01', '2026-05-02T03:59:59Z', '13F-HR', 12, 't')"""), {"p": q1})
+        c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES ('B-1', 0, 'OLDCUSIP1', 'X', 50, 100)"))
+    v2_steps.after_13f(engine, is_backfill=True)
+    with engine.connect() as c:
+        ev = c.execute(text("SELECT event_type FROM events WHERE issuer_cik = '0000000666'")).scalars().all()
+        assert "B-2" in job_state(c, "v2_13f_events")["done"]
+    assert ev == ["INST_13F_NEW_POSITION"]

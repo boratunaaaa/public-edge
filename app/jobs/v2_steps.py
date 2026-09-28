@@ -41,6 +41,13 @@ def after_ftd(engine: Engine, files: list[str], *, is_backfill: bool) -> int:
     return n
 
 
+def _has_previous_report(conn, accession: str) -> bool:
+    return bool(conn.execute(text("""
+        SELECT 1 FROM inst_filings_13f f JOIN inst_filings_13f p ON p.manager_cik = f.manager_cik
+          AND p.period = CAST(date_trunc('quarter', f.period) AS date) - 1 AND p.submission_type = '13F-HR'
+        WHERE f.accession = :a LIMIT 1"""), {"a": accession}).first())
+
+
 def after_13f(engine: Engine, since_filed: date | None = None, *, is_backfill: bool) -> int:
     """Per-filing position changes (NEW / EXIT / DECREASE) + one set-based accumulation pass per period.
     Checkpointed: filings already processed are skipped on a restart."""
@@ -58,7 +65,10 @@ def after_13f(engine: Engine, since_filed: date | None = None, *, is_backfill: b
             continue
         with engine.begin() as c:
             n += len(thirteen_f(c, a, is_backfill=is_backfill))
-        done.add(a)
+            # a filing is final only when its manager's previous-quarter report is loaded: otherwise its changes
+            # (NEW / EXIT ...) cannot be known yet and it is re-evaluated when that quarter arrives
+            if _has_previous_report(c, a):
+                done.add(a)
         if k % 500 == 0:
             with engine.begin() as c:
                 save_job_state(c, "v2_13f_events", {**st, "done": sorted(done)})
@@ -76,8 +86,14 @@ def backfill_13f(engine: Engine, quarters: int = 9) -> dict:
     if not disk_ok():
         return {"skipped": "LOW_DISK"}
     min_period = date.today() - timedelta(days=quarters * 92 + 60)
+    urls = dataset_urls()[:quarters]
+    with engine.begin() as c:
+        ingested = set(job_state(c, "v2_13f_datasets_seen").get("urls", [])) | set(job_state(c, "form13f_datasets").get("done", []))
+        if any(u not in ingested for u in urls):
+            # new data is about to arrive: event generation is incomplete until a full pass after it succeeds
+            save_job_state(c, "v2_13f_events", {**job_state(c, "v2_13f_events"), "complete": False})
     out = []
-    for u in dataset_urls()[:quarters]:
+    for u in urls:
         if not disk_ok():
             out.append({"url": u, "status": "PAUSED_LOW_DISK"})
             break
@@ -87,11 +103,13 @@ def backfill_13f(engine: Engine, quarters: int = 9) -> dict:
             log.exception("13F data set %s failed", u)
             out.append({"url": u, "status": "FAILED", "error": str(e)[:300]})
     new = [o for o in out if o.get("status") != "ALREADY_INGESTED"]
+    incomplete = any(o.get("status") in ("FAILED", "PAUSED_LOW_DISK") for o in out)
     with engine.connect() as c:
         pending = not job_state(c, "v2_13f_events").get("complete")
     ev = after_13f(engine, is_backfill=True) if (new or pending) else 0
-    with engine.begin() as c:
-        save_job_state(c, "v2_13f_events", {**job_state(c, "v2_13f_events"), "complete": True})
+    if not incomplete:  # a failed / paused quarter keeps the events pending: they are recomputed after the retry
+        with engine.begin() as c:
+            save_job_state(c, "v2_13f_events", {**job_state(c, "v2_13f_events"), "complete": True})
     return {"datasets": len(out), "new": len(new), "events": ev}
 
 
