@@ -247,3 +247,15 @@ def test_build_us_security_master_from_sec_master(engine, clean):
         assert master_db.resolve(c, "ABCD", date(2014, 1, 1)) == "US:0000000901:COM"
         assert master_db.resolve(c, "ABCD", date(2020, 1, 1)) == "US:0000000902:COM"
         assert master_db.resolve(c, "ABCD", date(2017, 1, 1)) is None
+
+
+def test_live_ftd_source_takes_only_the_newest_files(engine, clean, monkeypatch):
+    from app.sources.us import short_data as S
+    seen = []
+    monkeypatch.setattr(S, "ftd_files", lambda: ["cnsfails202608b", "cnsfails202608a", "cnsfails202607b", "cnsfails202401a"])
+    monkeypatch.setattr(S, "ingest_ftd_file", lambda e, n, **k: seen.append(n) or {"rows": 0})
+    S.SecFtdSource().run_live(engine)
+    assert seen == ["cnsfails202608b", "cnsfails202608a"]
+    seen.clear()
+    S.SecFtdSource().run_live(engine, backfill_since="cnsfails202401a")
+    assert seen == ["cnsfails202608b", "cnsfails202608a", "cnsfails202607b", "cnsfails202401a"]

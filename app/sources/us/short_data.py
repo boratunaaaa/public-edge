@@ -158,7 +158,7 @@ class FinraShortVolumeSource(Source):
                 res.items += 1
                 res.watermark["last_trade_date"] = str(d)
                 from app.jobs.v2_steps import after_finra
-                after_finra(engine, [d], is_backfill=False)
+                after_finra(engine, [d], is_backfill=d < now.date() - timedelta(days=2))
         return res
 
     def run_backfill(self, engine: Engine, start: date = date(2024, 1, 2)) -> RunResult:
@@ -186,19 +186,26 @@ class SecFtdSource(Source):
     stale_after = timedelta(days=25)  # two files a month
     live_events = True
 
-    def run_live(self, engine: Engine, backfill_since: str = "cnsfails202401a") -> RunResult:
+    def run_live(self, engine: Engine, backfill_since: str | None = None) -> RunResult:
+        """Live: only the two newest published files (history belongs to the HISTORICAL_LOW backfill, which passes
+        backfill_since). Events are live only for a file published within the last 21 days."""
         now = datetime.now(timezone.utc)
         with engine.connect() as c:
             done = {r[0] for r in c.execute(text("SELECT DISTINCT source_file FROM fails_to_deliver"))}
+        files = ftd_files()
+        if backfill_since is None:
+            files = files[:2]
+            backfill_since = ""
         res = RunResult(watermark={})
-        for name in ftd_files():
+        for name in files:
             if name in done or name < backfill_since:
                 continue
             out = ingest_ftd_file(engine, name, first_seen=now)
             res.items += 1
             res.watermark.setdefault("newest_file", name)
             log.info("ftd %s", out)
-            if out.get("rows") and self.live_events:
+            fresh = out.get("available_at") and (now - datetime.fromisoformat(out["available_at"])).days <= 21
+            if out.get("rows") and self.live_events and fresh:
                 from app.jobs.v2_steps import after_ftd
                 after_ftd(engine, [name], is_backfill=False)
         return res
