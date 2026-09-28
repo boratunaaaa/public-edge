@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.sources.base import RunResult, Source
@@ -20,8 +19,13 @@ class CanadaGrantsSource(Source):
     stale_after = timedelta(days=10)
 
     def run_live(self, engine: Engine) -> RunResult:
+        from app.db.store import job_state, save_job_state
         from app.sources.ca.official import stream_grants
         with engine.connect() as c:
-            first = c.execute(text("SELECT count(*) FROM dataset_records WHERE dataset = 'ca_grants'")).scalar() == 0
+            st = job_state(c, "v2_ca_grants_initial")
+        first = not st.get("complete")  # an interrupted initial load stays HISTORICAL until one full pass finishes
         out = stream_grants(engine, forward=not first)
+        if first:
+            with engine.begin() as c:
+                save_job_state(c, "v2_ca_grants_initial", {"complete": True, "rows": out["rows"]})
         return RunResult(items=out["stored"], watermark={"rows_scanned": out["rows"], "initial_load": first})
