@@ -1192,6 +1192,7 @@ def test_tenk_extraction_runs_isolated_and_matches_inprocess():
     assert bad.items == {} and bad.failed is None  # a broken document yields no sections, never an exception
 
 
+@pytest.mark.skipif(__import__("sys").platform != "linux", reason="RLIMIT_AS is enforced only on Linux (production)")
 def test_tenk_extraction_memory_blowup_is_contained(monkeypatch):
     """A child that exceeds its address-space cap fails alone and is reported, never silently 'no_sections'."""
     from app.tenk import engine as te
