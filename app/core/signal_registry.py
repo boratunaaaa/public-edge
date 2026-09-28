@@ -67,7 +67,7 @@ FAMILIES: tuple[SignalFamily, ...] = (
     SignalFamily("CA_GOV_CONTRACT", "CA", "1", ("CA_GOV_CONTRACT_WIN",), ("ca_canadabuys",), "federal contract award to a listed supplier (publication date)"),
     SignalFamily("CA_GRANT", "CA", "0", (), ("ca_grants",), "federal grant / contribution (forward only: no publication date in the file)", context_only=True),
     SignalFamily("CA_INSIDER_BUY", "CA", "0", (), ("sedi",), "SEDI insider purchase", notes="BLOCKED: SEDI behind a bot manager; needs an authorised feed"),
-    SignalFamily("CA_SHORT_POSITION_CHANGE", "CA", "0", (), ("ciro_short",), "CIRO consolidated short position change", notes="BLOCKED: ciro.ca answers 403 to automated clients from the tested network"),
+    SignalFamily("CA_SHORT_POSITION_CHANGE", "CA", "0", (), ("ciro_short",), "CIRO consolidated short position change", notes="BLOCKED: ciro.ca answers 403 to automated clients from both tested networks (office + Hetzner server)"),
     SignalFamily("CA_MINING_STAGE_ADVANCE", "CA", "0", ("CA_RESOURCE_ESTIMATE", "CA_FEASIBILITY"), ("newswire_ca",), "PEA->PFS->DFS / resource upgrades from issuer releases (normalized, never graded 'good')"),
 )
 BY_ID = {f.signal_id: f for f in FAMILIES}

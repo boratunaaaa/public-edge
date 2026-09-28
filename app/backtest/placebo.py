@@ -27,7 +27,9 @@ def _excess(conn, sym: str, spy, d: date, horizon: int) -> float | None:
     return res[0].excess_ret if res else None
 
 
-def family_vs_placebo(conn: Connection, event_type: str, horizon: int = 90, limit: int | None = None) -> dict:
+def family_vs_placebo(conn: Connection, event_type: str, horizon: int = 90, limit: int | None = None, offset_days: int = -OFFSET_DAYS) -> dict:
+    """offset_days < 0: control BEFORE the event (default); > 0: AFTER it (reverses the pre-event-drawdown confound,
+    adds a survival condition to the control). Report both."""
     rows = conn.execute(text(f"""
         SELECT DISTINCT ON (e.issuer_cik, date_trunc('quarter', e.public_date)) e.id, e.issuer_cik, e.public_date,
                e.price_symbol, r.excess_ret
@@ -43,7 +45,10 @@ def family_vs_placebo(conn: Connection, event_type: str, horizon: int = 90, limi
     per_co = defaultdict(lambda: [[], []])  # cik -> ([event wins], [control wins])
     skipped = 0
     for r in rows:
-        cd = r["public_date"] - timedelta(days=OFFSET_DAYS)
+        cd = r["public_date"] + timedelta(days=offset_days)
+        if cd + timedelta(days=horizon + 15) > date.today():
+            skipped += 1
+            continue
         if any(abs((cd - d).days) < 90 for d in own_dates[r["issuer_cik"]]):
             skipped += 1
             continue
@@ -61,7 +66,7 @@ def family_vs_placebo(conn: Connection, event_type: str, horizon: int = 90, limi
     pos, neg = sum(d > 0 for d in diffs), sum(d < 0 for d in diffs)
     n = pos + neg
     z = (pos - n / 2) / math.sqrt(n / 4) if n else 0.0
-    return {"event_type": event_type, "horizon": horizon, "companies": len(per_co), "skipped": skipped,
+    return {"event_type": event_type, "horizon": horizon, "offset_days": offset_days, "companies": len(per_co), "skipped": skipped,
             "event_rate": sum(ev) / len(ev), "placebo_rate": sum(ct) / len(ct), "difference": sum(diffs) / len(diffs),
             "sign_test_p": math.erfc(abs(z) / math.sqrt(2)) if n else None,
             "caveat": "controls conditioned on the issuer still trading at the later event date"}

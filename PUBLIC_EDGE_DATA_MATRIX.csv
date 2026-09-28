@@ -1,0 +1,44 @@
+country,dataset,source,official,historical,live,frequency,publication_lag,identity_quality,point_in_time_quality,cost,license,implemented,signal_candidate,context_only,blocker,priority
+US,Form 4 insider transactions,SEC EDGAR,True,2004+ (backfilled 5y),yes (~1 min),continuous,minutes (acceptance time),HIGH (CIK),HIGH (acceptance timestamp),free,OPEN,LIVE,True,False,,P0
+US,Schedule 13D/13G,SEC EDGAR,True,5y,yes,continuous,minutes,HIGH (issuer CIK; reporting persons repaired),HIGH,free,OPEN,LIVE,False,True,13D = context only (2026-09-27 decision),P0
+US,Form 144,SEC EDGAR,True,recent,yes,continuous,minutes,HIGH,HIGH,free,OPEN,LIVE,False,True,,P1
+US,10-K text changes,SEC EDGAR,True,5y (backfill paused on LOW_DISK),yes,annual per issuer,same day,HIGH,HIGH,free,OPEN,LIVE,True,False,10-K history stops when free disk < 10 GB,P1
+US,House PTR,House Clerk,True,5y,yes,daily,up to 45 days after trade (disclosure date used),MEDIUM (name -> ticker),HIGH (disclosure date),free,OPEN,LIVE,True,False,,P1
+US,Senate PTR,efdsearch.senate.gov,True,-,no,-,-,-,-,free,RESTRICTED_AUTOMATION,BLOCKED,False,False,HTTP 403 to automated clients,P2
+US,Federal contracts (USAspending),USAspending API,True,5y,yes (6 h),daily,DoD ~90 days after signing; first-seen used,MEDIUM (recipient -> parent mapping),MEDIUM (first_seen; history estimated),free,OPEN,LIVE,True,False,connection resets (now retried + checkpointed),P1
+US,"Official news (8-K, PR Newswire, Business Wire, openFDA, gov)",SEC / newswires,True,8-K 365d PIT,yes,continuous,minutes,HIGH (8-K CIK) / MEDIUM,HIGH,free,PUBLIC_WITH_TERMS,LIVE,True,False,,P1
+US,Historical delisted prices,Tiingo free / FinSABER / Yahoo,False,partial,-,-,-,identity-gated per CIK,n/a,free (Tiingo 500 symbols/month),FREE_API,LIVE,False,False,Tiingo monthly symbol quota 475/500 used in 2026-09,P0
+US,13F institutional holdings,SEC Form 13F data sets,True,2013+ (quarterly zips); 9 quarters planned (disk),quarterly data sets,quarterly,45 days after quarter end (+ data-set release),MEDIUM (CUSIP -> CIK via 13D covers / SEC registry),HIGH (filing date),free,OPEN,READY,True,False,per-manager rows only for focused managers (disk),P1
+US,Short-sale volume (Reg SHO daily),FINRA CDN,True,"2009+ (2024+ planned, disk)",daily ~17-18h ET,daily,same day,MEDIUM (symbol + date),HIGH (Last-Modified),free,OPEN,READY,True,False,,P1
+US,Short interest (positions),FINRA equity short interest,True,-,-,twice monthly,~8 business days,MEDIUM,HIGH,free,PUBLIC_WITH_TERMS,PLANNED,True,False,not yet implemented (FINRA API query form),P2
+US,Fails-to-deliver,SEC,True,2004+ (2024+ planned),twice monthly,half-monthly,~2 weeks (Last-Modified),MEDIUM (symbol + date; CUSIP kept),HIGH,free,OPEN,READY,True,False,,P1
+US,Clinical trials,ClinicalTrials.gov API v2,True,current snapshot only (registration + results dates honest),yes (6 h),continuous,posting date,MEDIUM (lead sponsor exact name),HIGH for registration/results; status changes forward-only,free,PUBLIC_WITH_TERMS,READY,True,False,no version-history API: status/phase history not reconstructable,P1
+US,FDA approvals,openFDA Drugs@FDA,True,1939+ (2018+ planned),yes (12 h),continuous,Drugs@FDA lag; action date used,MEDIUM (sponsor exact name),"MEDIUM (action date, end of day)",free (1000 req/day without key),OPEN,READY,True,False,CRLs not reliably available,P1
+US,FDA recalls (enforcement),openFDA,True,2004+,-,weekly,report date,LOW (firm name),HIGH,free,OPEN,PLANNED,False,True,"parser present, not wired",P2
+US,Lobbying (LDA),lda.gov API,True,1999+,-,quarterly,20 days after quarter,MEDIUM (client name),HIGH,free (key optional),OPEN,BLOCKED,False,True,403 (Akamai) from both tested networks (office + Hetzner server),P2
+US,Patents,USPTO ODP / PatentsView,True,1976+,-,weekly,grant date,MEDIUM (assignee),HIGH,free (API key),OPEN,AUTH_REQUIRED,False,True,API key required,P2
+US,Macro (FRED / ALFRED vintages),St. Louis Fed,True,"decades, vintages",-,daily-monthly,series-specific,n/a,HIGH only with ALFRED vintages,free (API key),OPEN,AUTH_REQUIRED,False,True,API key required,P2
+US,CFTC Commitments of Traders,CFTC Socrata,True,1986+,weekly,weekly,"Tue data, Fri release",n/a (sector),HIGH (Friday rule),free,OPEN,READY,False,True,,P2
+US,Federal grants,USAspending assistance,True,5y,-,daily,first-seen,MEDIUM,MEDIUM,free,OPEN,PLANNED,True,False,extension of the contracts adapter,P2
+US,Identifier enrichment,OpenFIGI,False,-,on demand,-,-,90 % agreement with SEC FTD symbols (200 CUSIP sample),n/a,free (25 req/min),FREE_API,PLANNED,False,False,"cross-check only, never an identity authority",P2
+TR,KAP disclosures (pages),kap.org.tr,True,page archive by id,partial,continuous,minutes,HIGH (KAP codes),HIGH (Istanbul timestamp),free,RESTRICTED_AUTOMATION,BLOCKED,True,False,list/JSON API behind WAF; sequential-id discovery fragile,P2
+TR,KAP data services (official API),MKK API Portal,True,service-specific,yes,continuous,minutes,HIGH,HIGH,free (account + approval + API key),PUBLIC_WITH_TERMS,AUTH_REQUIRED,True,False,owner must register at apiportal.mkk.com.tr,P2
+TR,BIST company list,kap.org.tr/tr/bist-sirketler (public page),True,current,daily,daily,-,HIGH (MKK member OID),first-sight periods,free,PUBLIC_WITH_TERMS,READY,False,False,,P2
+TR,SPK bulletins,spk.gov.tr (PDF),True,2000s+,yes,1-3 per week,evening of bulletin date,MEDIUM (codes / exact names),HIGH,free,PUBLIC_WITH_TERMS,READY,True,True,,P2
+TR,Pay alım satım amounts (insider),KAP form attachments,True,-,-,-,-,-,-,free,RESTRICTED_AUTOMATION,BLOCKED,True,False,values only in PDF attachments + WAF,P2
+TR,Borsa Istanbul EOD prices,Borsa Istanbul Datastore / vendors,True,full,yes,daily,EOD,HIGH,HIGH,paid,PAID_REQUIRED,LICENSE_REQUIRED,False,False,Yahoo .IS used for research only (zero-volume holiday bars filtered),P2
+TR,TCMB EVDS macro,TCMB EVDS,True,decades,yes,daily,same day,n/a,HIGH,free (API key),OPEN,AUTH_REQUIRED,False,True,API key required,P3
+TR,Public procurement (EKAP/KİK),ekap.kik.gov.tr,True,-,-,-,-,LOW (tenderer names),-,free,RESTRICTED_AUTOMATION,BLOCKED,True,False,search behind captcha / session; no bulk dataset found,P3
+TR,Investment incentives,sanayi.gov.tr teşvik lists,True,monthly lists,-,monthly,~1 month,LOW (company names),MEDIUM,free,PUBLIC_WITH_TERMS,BLOCKED,True,False,yatirimtesvik.sanayi.gov.tr did not answer from either tested network,P3
+TR,"MKK/VAP foreign flow, REKS",MKK,True,-,-,weekly,-,n/a,-,partly paid,PAID_REQUIRED,PLANNED,False,True,per-stock data is a licensed MKK product,P3
+TR,TÜRKPATENT / EPDK / MAPEG,official portals,True,-,-,-,-,LOW,-,free,RESTRICTED_AUTOMATION,PLANNED,False,True,interactive search only,P3
+CA,TSX / TSXV directory,tsx.com,True,current,daily,daily,-,"MEDIUM (symbol, first sight)",first-sight periods,free,PUBLIC_WITH_TERMS,READY,False,False,robots crawl-delay 6 s honoured,P3
+CA,News releases (mining taxonomy),Canada NewsWire sitemap,False,~2 days window,yes,continuous,minutes,MEDIUM (tickers in sitemap),HIGH,free,PUBLIC_WITH_TERMS,READY,True,False,,P3
+CA,Federal contracts,CanadaBuys contract history,True,2009+,monthly refresh,monthly,publicationDate,LOW-MEDIUM (supplier legal names; subsidiaries need reviewed edges),HIGH (publication date),free,OPEN,READY,True,False,,P3
+CA,Grants & contributions,open.canada.ca proactive disclosure,True,2005+ (2.3 GB CSV),quarterly,quarterly,unknown per record,LOW-MEDIUM (recipient names),LOW: no publication date -> forward-only,free,OPEN,FORWARD_ONLY,False,True,no per-record publication date,P3
+CA,Macro (Valet),Bank of Canada,True,decades,daily,daily,same day,n/a,HIGH,free,PUBLIC_WITH_TERMS,READY,False,True,,P3
+CA,Short positions / short sale stats,CIRO,True,-,-,twice monthly / daily,-,MEDIUM,HIGH,free,PUBLIC_WITH_TERMS,BLOCKED,True,False,403 to automated clients from both tested networks (office + Hetzner server),P3
+CA,Insider trades (SEDI),SEDI,True,-,-,continuous,5 days,HIGH,HIGH,licensed data product,RESTRICTED_AUTOMATION,BLOCKED,True,False,bot manager; needs authorised feed,P3
+CA,"SEDAR+ filings (NI 43-101, MD&A)",SEDAR+,True,-,-,continuous,-,HIGH,HIGH,free to view,RESTRICTED_AUTOMATION,BLOCKED,True,False,bot manager,P3
+CA,Federal lobbying,lobbycanada.gc.ca open data,True,1996+,-,monthly,-,LOW,HIGH,free,OPEN,BLOCKED,False,True,403 from both tested networks (office + Hetzner server),P3
+CA,Patents (CIPO),CIPO bulk,True,-,-,weekly,-,LOW,-,free,OPEN,PLANNED,False,True,,P3
