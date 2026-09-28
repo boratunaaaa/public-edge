@@ -115,9 +115,16 @@ def store(conn, b: Bulletin, url: str, *, is_backfill: bool) -> list[int]:
     ids = []
     for et, info in events_of(b):
         sid = None
+        conf = "MEDIUM"
         if et == "TR_SPK_ENFORCEMENT":
             sid = master_db.resolve(conn, info["code"], b.date, country="TR")
             label = info["code"]
+            if sid is None:
+                # the TR master starts at first sight (2026-09-28): for a bulletin of the last 365 days, the code's
+                # CURRENT unique holder is accepted with LOW identity confidence (BIST code reuse is rare, not impossible)
+                cur = master_db.resolve(conn, info["code"], date.today(), country="TR")
+                if cur and (date.today() - b.date).days <= 365:
+                    sid, conf = cur, "LOW"
         else:
             hits = names.get(normalize_company(info["company"]), set())
             sid = next(iter(hits)) if len(hits) == 1 else None
@@ -125,7 +132,7 @@ def store(conn, b: Bulletin, url: str, *, is_backfill: bool) -> list[int]:
         key = f"{b.number}:{et}:{label}"
         records.put(conn, country="TR", dataset="tr_spk_bulletin", record_key=key, as_of_date=b.date, available_at=avail,
                     payload={**info, "bulletin": b.number, "type": et}, parser_version=PARSER_VERSION, license_status="PUBLIC_WITH_TERMS",
-                    security_id=sid, entity_name=label, identity_confidence="MEDIUM" if sid else None, needs_review=sid is None,
+                    security_id=sid, entity_name=label, identity_confidence=conf if sid else None, needs_review=sid is None,
                     source_url=url)
         if not sid:
             continue
@@ -135,7 +142,7 @@ def store(conn, b: Bulletin, url: str, *, is_backfill: bool) -> list[int]:
                            source_url=url, is_backfill=is_backfill, country="TR", exchange="XIST", security_id=sid,
                            event_family={"TR_SPK_ENFORCEMENT": "TR_SPK_ENFORCEMENT", "TR_RIGHTS_ISSUE_APPROVAL": "TR_DILUTION_RISK",
                                          "TR_BONUS_ISSUE_APPROVAL": "TR_BONUS_ISSUE"}[et],
-                           identity_confidence="MEDIUM", parser_version=PARSER_VERSION, available_at_override=avail, date_quality="date")
+                           identity_confidence=conf, parser_version=PARSER_VERSION, available_at_override=avail, date_quality="date")
         if eid:
             ids.append(eid)
     return ids

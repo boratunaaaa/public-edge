@@ -58,3 +58,9 @@ def test_kap_member_list_builds_tr_master(engine, clean):
         assert master_db.resolve(c, "ACSEL", date(2026, 9, 28), country="TR") == "TR:XIST:ACSEL"
         assert master_db.resolve(c, "ACSEL", date(2026, 1, 1), country="TR") is None  # before first sight: unknown
     assert n >= 28
+
+
+def test_turkish_legal_suffix_normalises_like_the_kap_title():
+    from app.entities.names import normalize_company
+    assert normalize_company("Kiler Holding AŞ") == normalize_company("KİLER HOLDİNG A.Ş.")
+    assert normalize_company("Ayes Çelik Hasır ve Çit Sanayi AŞ") == normalize_company("AYES ÇELİK HASIR VE ÇİT SANAYİ A.Ş.")

@@ -75,9 +75,9 @@ def _file_minus(name: str, halves: int) -> str:
 
 def short_pressure(conn: Connection, trade_date: date, *, is_backfill: bool) -> list[int]:
     rows = conn.execute(text("""
-        WITH w AS (SELECT symbol, trade_date, short_volume::float / total_volume r, total_volume, available_at,
+        WITH w AS (SELECT symbol, trade_date, short_volume::float / NULLIF(total_volume, 0) r, total_volume, available_at,
                           row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) rn
-                   FROM short_volume_daily WHERE trade_date <= :d AND trade_date > :d - 110)
+                   FROM short_volume_daily WHERE trade_date <= :d AND trade_date > :d - 110 AND total_volume > 0)
         SELECT symbol, avg(r) FILTER (WHERE rn <= 5) r5, avg(r) FILTER (WHERE rn > 5 AND rn <= 65) m60,
                stddev_samp(r) FILTER (WHERE rn > 5 AND rn <= 65) s60, avg(total_volume) FILTER (WHERE rn <= 5) v5,
                count(*) FILTER (WHERE rn > 5 AND rn <= 65) n60, max(available_at) FILTER (WHERE rn = 1) avail,

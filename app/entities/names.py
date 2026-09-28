@@ -8,14 +8,18 @@ _SUFFIXES = {
     "INC", "INCORPORATED", "CORP", "CORPORATION", "CO", "COMPANY", "LLC", "L L C", "LTD", "LIMITED", "PLC",
     "LP", "L P", "LLP", "HOLDINGS", "HOLDING", "GROUP", "THE", "SA", "NV", "AG", "SE", "N A", "NA", "DE", "DEL",
     "CL A", "CLASS A", "US", "USA",
+    "AS", "A S",  # Turkish A.S. / AS (anonim sirket)
 }
 _SUFFIX_RE = re.compile(r"\b(" + "|".join(sorted((re.escape(s) for s in _SUFFIXES), key=len, reverse=True)) + r")\b")
+
+
+_TR = str.maketrans({"ı": "i", "İ": "I"})  # dotless / dotted i have no ASCII decomposition
 
 
 def normalize_company(name: str | None) -> str:
     if not name:
         return ""
-    s = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().upper()
+    s = unicodedata.normalize("NFKD", name.translate(_TR)).encode("ascii", "ignore").decode().upper()
     s = s.replace("&", " AND ")
     s = re.sub(r"/[A-Z]{2,3}/?$", " ", s)  # EDGAR state suffixes like "/DE/"
     s = re.sub(r"[^A-Z0-9 ]", " ", s)

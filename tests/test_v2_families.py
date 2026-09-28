@@ -164,7 +164,7 @@ def test_v2_historical_runner_is_exclusive(engine, clean):
         other.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": v2_steps.LOCK_ID})
         other.commit()
     v2_steps.run_historical(engine, lambda e, n, f: ran.append(n))
-    assert ran == ["v2_13f", "v2_short_data", "v2_health_gov"]
+    assert ran == ["v2_13f", "v2_short_data", "v2_health_gov", "v2_ca_grants"]
 
 
 def test_needs_review_events_are_excluded_from_quality_stats(engine, clean):

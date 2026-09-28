@@ -214,8 +214,9 @@ class CanadaBuysSource(Source):
         for x in rows:
             if f"{x['reference']}:{x['amendment']}" in known:
                 continue
+            # the fiscal-year file is refreshed ~monthly: only a notice published in the last 3 days is "live"
             with engine.begin() as c:
-                eid = store_contract(c, x, is_backfill=False)
+                eid = store_contract(c, x, is_backfill=(date.today() - x["publication_date"]).days > 3)
             if eid:
                 res.events.append(eid)
         return res

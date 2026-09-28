@@ -57,8 +57,8 @@ def parse_finra(txt: str) -> list[dict]:
         if len(p) != 6 or not re.fullmatch(r"\d{8}", p[0]):
             continue  # trailer / footer
         total = float(p[4])
-        if total <= 0:
-            continue
+        if round(total) < 1:
+            continue  # a sub-share "volume" is not a trading day for the symbol
         out.append({"trade_date": datetime.strptime(p[0], "%Y%m%d").date(), "symbol": p[1].strip().upper()[:16],
                     "short_volume": round(float(p[2])), "short_exempt_volume": round(float(p[3] or 0)),
                     "total_volume": round(total)})

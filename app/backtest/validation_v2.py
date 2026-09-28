@@ -93,7 +93,10 @@ def family_report(conn: Connection, family: str, *, horizons=HORIZONS, log: bool
                 r, nk = Q._company_equal(v)[:2]
                 reg[k] = {"companies": nk, "rate": r} if nk >= MIN_BUCKET else {"companies": nk, "rate": None, "note": "too small"}
         p = binom_p(rate, n)
+        ep_wins = [e for e in eps if e.first.outcome == "win"]
         out = {"status": st.status, "events": st.unique_events, "episodes": st.unique_episodes, "companies": st.unique_companies,
+               "event_weighted": st.event_level_rate, "episode_equal": (len(ep_wins) / len(eps)) if eps else None,
+               "company_equal": rate,
                "resolved_companies": n, "median_raw": med_raw, "median_excess": st.median_excess, "mean_excess": mean_ex,
                "spy_beat": rate, "sector_beat": st.sector_benchmark_rate, "ci95": [lo, hi], "missing_price_rate": st.unresolved_share,
                "delist_rate": (delisted / len(all_eps)) if all_eps else None, "worst_case": st.worst_case, "best_case": st.best_case,

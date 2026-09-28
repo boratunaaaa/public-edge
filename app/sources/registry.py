@@ -15,7 +15,6 @@ from app.sources.us.short_data import FinraShortVolumeSource, SecFtdSource
 from app.sources.ca.official import BankOfCanadaValetSource, CanadaBuysSource
 from app.sources.tr.spk import SpkBulletinSource
 from app.sources.keyed import keyed_sources
-from app.sources.ca.grants_source import CanadaGrantsSource
 
 SOURCES: list[Source] = [
     SecForm4Source(),
@@ -41,7 +40,6 @@ SOURCES: list[Source] = [
     CanadaBuysSource(),
     BankOfCanadaValetSource(),
     SpkBulletinSource(),
-    CanadaGrantsSource(),
     PlannedSource("senate_lda", "BLOCKED_SOURCE: lda.gov answers 403 (Akamai) from both tested networks", "BLOCKED"),
     *keyed_sources(),
     PlannedSource("ciro_short", "BLOCKED_SOURCE: ciro.ca answers 403 to automated clients from both tested networks (office + Hetzner server)", "BLOCKED", "CA"),

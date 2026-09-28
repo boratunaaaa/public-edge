@@ -123,14 +123,39 @@ def backfill_health_gov(engine: Engine) -> dict:
     return out
 
 
+def ca_grants_weekly(engine: Engine) -> dict:
+    """2.3 GB stream: HISTORICAL_LOW only (never in the live worker). Weekly; health recorded like a live source."""
+    from datetime import datetime, timezone
+
+    from app.core.source_state import RunOutcome, record_run
+    from app.sources.ca.grants_source import CanadaGrantsSource
+    with engine.connect() as c:
+        st = job_state(c, "v2_ca_grants")
+    last = st.get("last_run")
+    if last and (datetime.now(timezone.utc) - datetime.fromisoformat(last)).days < 7:
+        return {"skipped": "NOT_DUE"}
+    src = CanadaGrantsSource()
+    try:
+        res = src.run_live(engine)
+        with engine.begin() as c:
+            record_run(c, src.name, RunOutcome(ok=True, items=res.items, watermark=res.watermark), country="CA",
+                       dataset=src.dataset, license_status=src.license_status)
+            save_job_state(c, "v2_ca_grants", {"last_run": datetime.now(timezone.utc).isoformat(), **(res.watermark or {})})
+        return {"stored": res.items}
+    except Exception as e:
+        with engine.begin() as c:
+            record_run(c, src.name, RunOutcome(ok=False, failure_kind="ERROR", error=str(e)[:300]), country="CA", dataset=src.dataset)
+        raise
+
+
 LOCK_ID = 7_120_012  # pg advisory lock: one V2 historical runner at a time (13F aggregates are additive)
 
 
-def run_historical(engine: Engine, step, order=("v2_13f", "v2_short_data", "v2_health_gov")) -> dict:
+def run_historical(engine: Engine, step, order=("v2_13f", "v2_short_data", "v2_health_gov", "v2_ca_grants")) -> dict:
     """Called from app.jobs.backfill.run_once (HISTORICAL_LOW) or a one-off runner. Holds a session advisory lock so
     two runners never ingest the same data set concurrently; the second one skips."""
     fns = {"v2_13f": lambda: backfill_13f(engine), "v2_short_data": lambda: backfill_short_data(engine),
-           "v2_health_gov": lambda: backfill_health_gov(engine)}
+           "v2_health_gov": lambda: backfill_health_gov(engine), "v2_ca_grants": lambda: ca_grants_weekly(engine)}
     with engine.connect() as lock_conn:
         if not lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": LOCK_ID}).scalar():
             log.info("V2 historical runner already active elsewhere - skipping")
