@@ -25,7 +25,7 @@ _HOST_RPS = {
     "api.tiingo.com": 0.013,  # free tier: 50 requests / hour
     "extapps2.oge.gov": 0.5,
     # global markets (development): polite rates, TSX robots.txt asks for a 6 s crawl delay
-    "kap.org.tr": 0.5,
+    "kap.org.tr": 1 / 6.0,  # KAP answers 429 above ~0.5 req/s (measured 2026-09-28)
     "asx.com.au": 1.0,
     "asx.api.markitdigital.com": 1.0,
     "tsx.com": 1 / 6,
@@ -51,7 +51,7 @@ _SHARED_KEY = {
     "query1.finance.yahoo.com": "yahoo", "query2.finance.yahoo.com": "yahoo", "finra.org": "finra",
     "clinicaltrials.gov": "clinicaltrials", "api.fda.gov": "openfda", "lda.senate.gov": "lda",
     "api.openfigi.com": "openfigi", "publicreporting.cftc.gov": "cftc", "open.canada.ca": "canada_open",
-    "canadabuys.canada.ca": "canada_open", "bankofcanada.ca": "boc_valet", "ciro.ca": "ciro",
+    "canadabuys.canada.ca": "canada_open", "bankofcanada.ca": "boc_valet", "ciro.ca": "ciro", "kap.org.tr": "kap",
 }
 _SHARED = os.environ.get("PE_SHARED_RATELIMIT") == "1"
 

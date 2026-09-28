@@ -13,7 +13,7 @@ from sqlalchemy.engine import Connection
 
 HEALTH = ("HEALTHY", "STALE", "DEGRADED", "BLOCKED", "SCHEMA_CHANGED", "AUTH_REQUIRED", "DISABLED", "UNKNOWN")
 # failure kinds a run can end with
-FAILURE_KINDS = ("ERROR", "BLOCKED", "AUTH_REQUIRED", "API_QUOTA", "LICENSE_BLOCK")
+FAILURE_KINDS = ("ERROR", "BLOCKED", "AUTH_REQUIRED", "API_QUOTA", "LICENSE_BLOCK", "SCHEMA_CHANGED")
 
 
 @dataclass
@@ -39,6 +39,11 @@ def classify_exception(e: BaseException) -> tuple[str, int | None]:
     if status is None and hasattr(e, "response") and getattr(e, "response", None) is not None:
         status = getattr(e.response, "status_code", None)
     msg = str(e).lower()
+    name = type(e).__name__
+    if name in ("FormatChanged", "SchemaChanged"):
+        return "SCHEMA_CHANGED", status
+    if name in ("SourceBlocked", "KapBlocked"):
+        return "BLOCKED", status
     if status in (401,) or "api key" in msg or "unauthorized" in msg:
         return "AUTH_REQUIRED", status
     if status in (403, 666) or "captcha" in msg or "bot" in msg and "manager" in msg or "waf" in msg:
@@ -54,6 +59,8 @@ def health_status(*, failure_kind: str | None, consecutive_failures: int, expect
         return "AUTH_REQUIRED"
     if failure_kind in ("BLOCKED", "LICENSE_BLOCK"):
         return "BLOCKED"
+    if failure_kind == "SCHEMA_CHANGED":
+        return "SCHEMA_CHANGED"
     if expected_fp and fp and fp != expected_fp:
         return "SCHEMA_CHANGED"
     if consecutive_failures >= 1:

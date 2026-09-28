@@ -31,6 +31,7 @@ DEFAULTS: dict[str, tuple[float, int | None, int | None]] = {
     "canada_open": (1.0, None, None),
     "boc_valet": (1.0, None, None),
     "ciro": (2.0, None, None),
+    "kap": (6.0, None, 550),  # KAP: 429 above ~0.5 req/s; hourly cap keeps a live scan well below that
 }
 
 

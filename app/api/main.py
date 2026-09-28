@@ -694,9 +694,11 @@ def api_v2_health():
         jobs = [dict(r) for r in conn.execute(text("""SELECT name, status, last_started, last_finished, left(last_error, 200) err
                                                       FROM processing_jobs WHERE name NOT LIKE 'pit_facts:%' ORDER BY name""")).mappings()]
         db_bytes = conn.execute(text("SELECT pg_database_size(current_database())")).scalar()
+        from app.sources.tr.vbts import vbts_metrics
+        vbts = vbts_metrics(conn)
         pending = conn.execute(text("SELECT count(*) FROM events WHERE returns_status IN ('pending', 'retry')")).scalar()
     du = shutil.disk_usage("/")
-    return _jsonable({"sources": src, "quotas": quotas, "jobs": jobs, "db_bytes": db_bytes, "returns_queue": pending,
+    return _jsonable({"sources": src, "quotas": quotas, "jobs": jobs, "db_bytes": db_bytes, "returns_queue": pending, "vbts": vbts,
                       "disk": {"free_gb": round(du.free / 1024**3, 1), "used_pct": round(100 * du.used / du.total, 1)}})
 
 
