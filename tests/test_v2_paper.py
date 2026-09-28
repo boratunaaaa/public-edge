@@ -68,3 +68,27 @@ def test_morning_brief_shows_only_actionable_source_problems(engine, clean):
                           ('sedi', 'DISABLED', 'DISABLED')"""))
         s = "\n".join(morning_sections(c, datetime(2026, 9, 28, 12, tzinfo=timezone.utc)))
     assert "finra_short_volume: STALE" in s and "sec_form4" not in s and "sedi" not in s and "BIST" in s
+
+
+def test_research_auto_approve_goes_only_to_research_books(engine, clean, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import text
+    from app.paper import proposals as P
+    monkeypatch.setenv("PAPER_RESEARCH_MODE", "1")
+    now = datetime(2026, 9, 28, 14, tzinfo=timezone.utc)
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO events (id, event_type, dedupe_key, public_date, title, payload, source_url)
+                          VALUES (1, 'GOV_CONTRACT', 'k', '2026-09-27', 't', '{}', 'u')"""))
+        for i, ro in ((1, True), (2, False)):
+            c.execute(text("""INSERT INTO proposed_trades (id, code, ticker, event_id, signal_family, event_type, proposal_created_at,
+                              reference_date, entry_reference_price, suggested_position_pct, max_position_pct, thesis, data_quality,
+                              approval_status, expires_at, research_only)
+                              VALUES (:i, :c, 'TST', 1, 'GOV_CONTRACT', 'GOV_CONTRACT', :n, '2026-09-27', 10, 0.02, 0.05, 't', 'OK',
+                                      'PENDING', :x, :ro)"""), {"i": i, "c": f"PE{i}", "n": now, "x": now + timedelta(days=1), "ro": ro})
+    assert P.auto_approve_research(engine, now=now) == 1
+    with engine.connect() as c:
+        st = dict(c.execute(text("SELECT code, approval_status FROM proposed_trades")).all())
+        books = c.execute(text("""SELECT DISTINCT a.book FROM paper_orders o JOIN paper_accounts a ON a.id = o.account_id""")).scalars().all()
+    assert st == {"PE1": "APPROVED", "PE2": "PENDING"} and books == ["RESEARCH"]
+    monkeypatch.setenv("PAPER_RESEARCH_AUTO_APPROVE", "0")
+    assert P.auto_approve_research(engine, now=now) == 0

@@ -48,6 +48,24 @@ def research_mode() -> bool:
     return os.environ.get("PAPER_RESEARCH_MODE", "").strip().lower() in ("1", "true", "yes")
 
 
+def research_auto_approve() -> bool:
+    """Virtual-money RESEARCH books only: research proposals are approved by the system so forward evidence is
+    collected unattended. MAIN books and anything real-money always need a human decision."""
+    return research_mode() and os.environ.get("PAPER_RESEARCH_AUTO_APPROVE", "1").strip().lower() in ("1", "true", "yes")
+
+
+def auto_approve_research(engine: Engine, now: datetime | None = None) -> int:
+    if not research_auto_approve():
+        return 0
+    with engine.connect() as conn:
+        codes = conn.execute(select(proposed_trades.c.code).where(and_(
+            proposed_trades.c.approval_status == "PENDING", proposed_trades.c.research_only.is_(True)))).scalars().all()
+    n = 0
+    for code in codes:
+        n += bool(decide(engine, code, True, by="system:research_auto", now=now).get("ok"))
+    return n
+
+
 @dataclass
 class GateResult:
     ok: bool
@@ -323,7 +341,10 @@ def notify_pending(engine: Engine) -> int:
     url = os.environ.get("PAPER_DASHBOARD_URL") or None
     with engine.connect() as conn:
         rows = conn.execute(select(proposed_trades).where(and_(
-            proposed_trades.c.approval_status == "PENDING", proposed_trades.c.notified.is_(False)))).mappings().all()
+            proposed_trades.c.approval_status == "PENDING", proposed_trades.c.notified.is_(False),
+            # research proposals handled by the system are summarised in the daily PAPER RESEARCH report, not pinged
+            ~proposed_trades.c.research_only if research_auto_approve() else proposed_trades.c.research_only.isnot(None))
+        )).mappings().all()
     n = 0
     for p in rows:
         r = deliver(engine, f"proposal:{p['id']}", "proposal", format_proposal(dict(p), url))

@@ -123,6 +123,8 @@ def _alpha_tasks(engine, now: datetime, last_scan: list[float]) -> None:
             from app.paper.proposals import expire, notify_pending, scan_new_events
             expire(engine)
             r = scan_new_events(engine)
+            from app.paper.proposals import auto_approve_research
+            r["research_auto_approved"] = auto_approve_research(engine)
             n = notify_pending(engine)
             if r.get("rejected_ids"):  # distinct events per gate reason (a re-scan never double counts)
                 d0 = now.date().isoformat()
