@@ -41,11 +41,14 @@ def after_ftd(engine: Engine, files: list[str], *, is_backfill: bool) -> int:
     return n
 
 
-def _has_previous_report(conn, accession: str) -> bool:
-    return bool(conn.execute(text("""
-        SELECT 1 FROM inst_filings_13f f JOIN inst_filings_13f p ON p.manager_cik = f.manager_cik
+def _ready(conn, accession: str, loaded: set[str]) -> bool:
+    """A filing can be evaluated only when its own data set AND its manager's previous-quarter report's data set were
+    ingested completely (a header without all holdings would fake NEW / EXIT changes)."""
+    row = conn.execute(text("""
+        SELECT f.source, p.source prev_source FROM inst_filings_13f f LEFT JOIN inst_filings_13f p ON p.manager_cik = f.manager_cik
           AND p.period = CAST(date_trunc('quarter', f.period) AS date) - 1 AND p.submission_type = '13F-HR'
-        WHERE f.accession = :a LIMIT 1"""), {"a": accession}).first())
+        WHERE f.accession = :a"""), {"a": accession}).all()
+    return bool(row) and row[0][0] in loaded and any(r[1] in loaded for r in row if r[1])
 
 
 def after_13f(engine: Engine, since_filed: date | None = None, *, is_backfill: bool) -> int:
@@ -58,23 +61,27 @@ def after_13f(engine: Engine, since_filed: date | None = None, *, is_backfill: b
                                  AND entries BETWEEN 10 AND 150 AND (CAST(:d AS date) IS NULL OR filed_date >= :d)
                                  ORDER BY available_at, accession"""), {"d": since_filed}).scalars().all()
         periods = c.execute(text("SELECT DISTINCT period FROM inst_filings_13f WHERE period >= CURRENT_DATE - 900 ORDER BY 1")).scalars().all()
+    from app.sources.us.form13f import loaded_sources
+    with engine.connect() as c:
+        loaded = loaded_sources(c)
     done = set(st.get("done", []))
     n = 0
     for k, a in enumerate(accs):
         if a in done:
             continue
         with engine.begin() as c:
+            # evaluated (and made final) only against completely ingested current AND previous reports; otherwise it
+            # waits and is evaluated after the missing / interrupted data set is loaded
+            if not _ready(c, a, loaded):
+                continue
             n += len(thirteen_f(c, a, is_backfill=is_backfill))
-            # a filing is final only when its manager's previous-quarter report is loaded: otherwise its changes
-            # (NEW / EXIT ...) cannot be known yet and it is re-evaluated when that quarter arrives
-            if _has_previous_report(c, a):
-                done.add(a)
+            done.add(a)
         if k % 500 == 0:
             with engine.begin() as c:
                 save_job_state(c, "v2_13f_events", {**st, "done": sorted(done)})
     for p in periods:
         with engine.begin() as c:
-            n += len(accumulation_events(c, p, is_backfill=is_backfill))
+            n += len(accumulation_events(c, p, is_backfill=is_backfill, loaded=loaded))
     with engine.begin() as c:
         save_job_state(c, "v2_13f_events", {**st, "done": sorted(done)})
     return n

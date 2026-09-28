@@ -273,6 +273,9 @@ def test_13f_filing_without_previous_quarter_is_reevaluated_after_it_arrives(eng
         for i, cu in enumerate(["OLDCUSIP1", "NEWCUSIP1"]):
             c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES ('B-2', :l, :c, 'X', :v, 100)"),
                       {"l": i, "c": cu, "v": 50.0})
+    from app.db.store import save_job_state
+    with engine.begin() as c:
+        save_job_state(c, "form13f_datasets", {"done": ["https://example/t"]})  # source 't' completely ingested
     assert v2_steps.after_13f(engine, is_backfill=True) == 0
     with engine.connect() as c:
         assert "B-2" not in job_state(c, "v2_13f_events").get("done", [])  # previous quarter missing: not final
@@ -285,3 +288,52 @@ def test_13f_filing_without_previous_quarter_is_reevaluated_after_it_arrives(eng
         ev = c.execute(text("SELECT event_type FROM events WHERE issuer_cik = '0000000666'")).scalars().all()
         assert "B-2" in job_state(c, "v2_13f_events")["done"]
     assert ev == ["INST_13F_NEW_POSITION"]
+
+
+
+def _events_signature(engine):
+    with engine.connect() as c:
+        return sorted(tuple(r) for r in c.execute(text(
+            "SELECT event_type, dedupe_key, public_date, available_at FROM events WHERE event_type LIKE 'INST_13F%'")))
+
+
+def _run_13f(engine, monkeypatch, fail_q2_after_batches=None):
+    import shutil
+    from app.jobs import v2_steps
+    import app.sources.us.form13f as F
+    monkeypatch.setattr(F.http, "download", lambda url, path, **k: shutil.copy(str(FX / "us" / url.rsplit("/", 1)[-1]), path))
+    real_parse = F.parse_dataset
+    monkeypatch.setattr(F, "parse_dataset", lambda path, **k: real_parse(path, **{**k, "flush_every": 5}))
+    with engine.begin() as c:  # CUSIP identity for every held security (13D-cover style mapping)
+        for q in ("13f_2026q1_mini.zip", "13f_2026q2_mini.zip"):
+            for i, h in enumerate(real_parse(str(FX / "us" / q))["holdings"]):
+                c.execute(text("""INSERT INTO activist_filings (accession, issuer_cik, cusip, filed_date, form_type, is_13d, is_amendment, source_url)
+                                  VALUES (:a, :c, :cu, '2025-01-01', 'SC 13D', true, false, 'u') ON CONFLICT DO NOTHING"""),
+                          {"a": f"X-{h['cusip']}", "c": f"{abs(hash(h['cusip'])) % 10**9:010d}", "cu": h["cusip"]})
+    F.ingest_dataset(engine, "https://example/13f_2026q1_mini.zip")
+    if fail_q2_after_batches is not None:
+        real_upsert, calls = F.upsert_rows, []
+
+        def flaky(conn, table, rows, keys, extra):
+            if table == "inst_holdings_13f":
+                calls.append(1)
+                if len(calls) > fail_q2_after_batches:
+                    raise RuntimeError("connection reset while loading holdings")
+            return real_upsert(conn, table, rows, keys, extra)
+        monkeypatch.setattr(F, "upsert_rows", flaky)
+        with pytest.raises(RuntimeError):
+            F.ingest_dataset(engine, "https://example/13f_2026q2_mini.zip")
+        v2_steps.after_13f(engine, is_backfill=True)  # what backfill_13f does after a failed data set
+        monkeypatch.setattr(F, "upsert_rows", real_upsert)
+    F.ingest_dataset(engine, "https://example/13f_2026q2_mini.zip")
+    v2_steps.after_13f(engine, is_backfill=True)
+    return _events_signature(engine)
+
+
+def test_13f_interrupted_ingestion_retry_gives_the_same_events(engine, clean, monkeypatch):
+    uninterrupted = _run_13f(engine, monkeypatch)
+    with engine.begin() as c:
+        c.execute(text("TRUNCATE " + ", ".join(t.name for t in __import__("app.db.models", fromlist=["metadata"]).metadata.sorted_tables)
+                       + " RESTART IDENTITY CASCADE"))
+    interrupted = _run_13f(engine, monkeypatch, fail_q2_after_batches=1)
+    assert uninterrupted and interrupted == uninterrupted

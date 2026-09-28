@@ -135,19 +135,24 @@ def store(engine: Engine, parsed: dict, source: str) -> dict:
     with engine.begin() as c:
         nf = upsert_rows(c, "inst_filings_13f", fil, ("accession",), {"source": source})
         nh = upsert_rows(c, "inst_holdings_13f", parsed["holdings"], ("accession", "line"), {})
-        # a later data set can hold more filings for the same (cusip, period): holders accumulate by max
-        for i in range(0, len(parsed["aggregates"]), 5000):
-            chunk = parsed["aggregates"][i:i + 5000]
-            c.execute(text("""
-                INSERT INTO inst_cusip_quarter_13f (cusip, period, holders, shares, value, available_at)
-                SELECT * FROM unnest(CAST(:c AS text[]), CAST(:p AS date[]), CAST(:h AS int[]), CAST(:s AS float8[]),
-                                     CAST(:v AS float8[]), CAST(:a AS timestamptz[]))
-                ON CONFLICT (cusip, period) DO UPDATE SET holders = inst_cusip_quarter_13f.holders + EXCLUDED.holders,
-                  shares = inst_cusip_quarter_13f.shares + EXCLUDED.shares, value = inst_cusip_quarter_13f.value + EXCLUDED.value,
-                  available_at = GREATEST(inst_cusip_quarter_13f.available_at, EXCLUDED.available_at)"""),
-                      {"c": [x["cusip"] for x in chunk], "p": [x["period"] for x in chunk], "h": [x["holders"] for x in chunk],
-                       "s": [x["shares"] for x in chunk], "v": [x["value"] for x in chunk], "a": [x["available_at"] for x in chunk]})
+        store_aggregates(c, parsed["aggregates"])
     return {"filings_new": nf, "holdings_new": nh, "aggregates": len(parsed["aggregates"])}
+
+
+def store_aggregates(c, aggregates: list[dict]) -> None:
+    """Additive per-(CUSIP, period) totals: callers must write them in the SAME transaction that marks the data set
+    ingested, so a retry can never add a data set twice."""
+    for i in range(0, len(aggregates), 5000):
+        chunk = aggregates[i:i + 5000]
+        c.execute(text("""
+            INSERT INTO inst_cusip_quarter_13f (cusip, period, holders, shares, value, available_at)
+            SELECT * FROM unnest(CAST(:c AS text[]), CAST(:p AS date[]), CAST(:h AS int[]), CAST(:s AS float8[]),
+                                 CAST(:v AS float8[]), CAST(:a AS timestamptz[]))
+            ON CONFLICT (cusip, period) DO UPDATE SET holders = inst_cusip_quarter_13f.holders + EXCLUDED.holders,
+              shares = inst_cusip_quarter_13f.shares + EXCLUDED.shares, value = inst_cusip_quarter_13f.value + EXCLUDED.value,
+              available_at = GREATEST(inst_cusip_quarter_13f.available_at, EXCLUDED.available_at)"""),
+                  {"c": [x["cusip"] for x in chunk], "p": [x["period"] for x in chunk], "h": [x["holders"] for x in chunk],
+                   "s": [x["shares"] for x in chunk], "v": [x["value"] for x in chunk], "a": [x["available_at"] for x in chunk]})
 
 
 def position_changes(conn, manager_cik: str, period: date) -> list[dict]:
@@ -215,11 +220,17 @@ def ingest_dataset(engine: Engine, url: str, *, min_period: date | None = None, 
             with engine.begin() as c:
                 n_hold += upsert_rows(c, "inst_holdings_13f", rows, ("accession", "line"), {})
         parsed = parse_dataset(path, min_period=min_period, sink=sink)
-        out = store(engine, {"filings": [], "holdings": [], "aggregates": parsed["aggregates"]}, source=src)
-        out["holdings_new"] = n_hold
+        with engine.begin() as c:  # aggregates + "data set complete" commit together (atomic)
+            store_aggregates(c, parsed["aggregates"])
+            st = job_state(c, "form13f_datasets")
+            save_job_state(c, "form13f_datasets", {**st, "done": sorted(set(st.get("done", [])) | {url})})
+        out = {"filings_new": len(head["filings"]), "holdings_new": n_hold, "aggregates": len(parsed["aggregates"])}
     finally:
         os.unlink(path)
-    with engine.begin() as c:
-        st = job_state(c, "form13f_datasets")
-        save_job_state(c, "form13f_datasets", {**st, "done": sorted(set(st.get("done", [])) | {url})})
     return {"url": url, **out, "focused_managers": parsed["focused"]}
+
+
+def loaded_sources(conn) -> set[str]:
+    """inst_filings_13f.source values of data sets whose ingestion COMPLETED (headers, all holdings, aggregates)."""
+    from app.db.store import job_state
+    return {u.rsplit("/", 1)[-1][:32] for u in job_state(conn, "form13f_datasets").get("done", [])}

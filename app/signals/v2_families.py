@@ -154,15 +154,17 @@ def thirteen_f(conn: Connection, accession: str, *, is_backfill: bool) -> list[i
     return out
 
 
-def accumulation_events(conn: Connection, period, *, is_backfill: bool) -> list[int]:
+def accumulation_events(conn: Connection, period, *, is_backfill: bool, loaded: set[str] | None = None) -> list[int]:
     """US_13F_ACCUMULATION, set-based for one report period: per CUSIP, focused managers (10-150 positions, with a
     13F-HR for the previous quarter) that hold it now but did not hold it the quarter before, ordered by the time their
     filing became public; the event is the 3rd such manager's filing (point in time: only filings public by then)."""
     rows = conn.execute(text("""
         WITH foc AS (SELECT accession, manager_cik, manager_name, filed_date, available_at FROM inst_filings_13f
-                     WHERE period = :p AND submission_type = '13F-HR' AND entries BETWEEN 10 AND 150),
+                     WHERE period = :p AND submission_type = '13F-HR' AND entries BETWEEN 10 AND 150
+                       AND (CAST(:all_ok AS boolean) OR source = ANY(:loaded))),
         prevf AS (SELECT manager_cik, accession FROM inst_filings_13f
-                  WHERE period = CAST(date_trunc('quarter', CAST(:p AS date)) AS date) - 1 AND submission_type = '13F-HR'),
+                  WHERE period = CAST(date_trunc('quarter', CAST(:p AS date)) AS date) - 1 AND submission_type = '13F-HR'
+                    AND (CAST(:all_ok AS boolean) OR source = ANY(:loaded))),
         newh AS (SELECT DISTINCT ON (f.manager_cik, h.cusip) h.cusip, f.manager_cik, f.manager_name, f.accession, f.filed_date,
                         f.available_at, max(h.issuer_name) OVER (PARTITION BY h.cusip) issuer_name
                  FROM foc f JOIN inst_holdings_13f h ON h.accession = f.accession
@@ -172,7 +174,7 @@ def accumulation_events(conn: Connection, period, *, is_backfill: bool) -> list[
                  ORDER BY f.manager_cik, h.cusip, f.available_at),
         ranked AS (SELECT *, row_number() OVER (PARTITION BY cusip ORDER BY available_at, accession) rn FROM newh)
         SELECT cusip, manager_name, accession, filed_date, available_at, issuer_name FROM ranked WHERE rn = 3"""),
-                        {"p": period}).mappings().all()
+                        {"p": period, "all_ok": loaded is None, "loaded": sorted(loaded or [])}).mappings().all()
     out = []
     for r in rows:
         cik, conf, _why = cusip_to_cik(conn, r["cusip"])
