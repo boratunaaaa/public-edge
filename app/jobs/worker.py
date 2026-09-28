@@ -135,7 +135,8 @@ def main() -> None:
         for s in SOURCES:
             if not s.enabled:
                 health_mark(conn, s.name, "DISABLED", s.disabled_reason)
-                conn.execute(source_health.update().where(source_health.c.source == s.name).values(health_status="DISABLED"))
+                conn.execute(source_health.update().where(source_health.c.source == s.name).values(
+                    health_status=getattr(s, "health", "DISABLED"), country=getattr(s, "country", None)))
     log.info("registry synced: %s tickers", n)
     if telegram.configured():
         try:

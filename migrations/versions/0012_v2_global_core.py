@@ -132,6 +132,9 @@ def upgrade() -> None:
         sa.Column('benchmark_symbol', sa.String(8)), sa.Column('benchmark_price', sa.Float()),
         sa.Column('sector_symbol', sa.String(8)), sa.Column('sector_price', sa.Float()), sa.Column('provider', sa.String(24)),
         sa.Column('lag_seconds', sa.Float()), sa.Column('status', sa.String(16), nullable=False),
+        sa.Column('available_at', TS), sa.Column('security_id', sa.String(48)), sa.Column('exchange', sa.String(8)),
+        sa.Column('sector', sa.String(40)), sa.Column('source_event_ids', J), sa.Column('signal_family', sa.String(48)),
+        sa.Column('signal_version', sa.String(16)), sa.Column('data_quality_state', sa.String(16)),
         sa.PrimaryKeyConstraint('event_id', name=op.f('pk_event_market_snapshots')))
     op.create_table('entity_edges',
         sa.Column('id', sa.BigInteger(), primary_key=True), sa.Column('src_type', sa.String(16), nullable=False),

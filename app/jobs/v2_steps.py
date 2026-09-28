@@ -16,7 +16,7 @@ from sqlalchemy.engine import Engine
 from app.db.store import job_state, save_job_state
 
 log = logging.getLogger(__name__)
-MIN_FREE_GB = float(os.environ.get("PE_V2_MIN_FREE_GB", "9"))
+MIN_FREE_GB = float(os.environ.get("PE_V2_MIN_FREE_GB", "8"))
 
 
 def disk_ok() -> bool:
@@ -60,7 +60,12 @@ def backfill_13f(engine: Engine, quarters: int = 9) -> dict:
     if not disk_ok():
         return {"skipped": "LOW_DISK"}
     min_period = date.today() - timedelta(days=quarters * 92 + 60)
-    out = [ingest_dataset(engine, u, min_period=min_period) for u in dataset_urls()[:quarters]]
+    out = []
+    for u in dataset_urls()[:quarters]:
+        if not disk_ok():
+            out.append({"url": u, "status": "PAUSED_LOW_DISK"})
+            break
+        out.append(ingest_dataset(engine, u, min_period=min_period))
     new = [o for o in out if o.get("status") != "ALREADY_INGESTED"]
     ev = after_13f(engine, is_backfill=True) if new else 0
     return {"datasets": len(out), "new": len(new), "events": ev}

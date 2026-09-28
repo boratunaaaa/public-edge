@@ -125,7 +125,8 @@ class OpenFdaSource(Source):
     def run_backfill(self, engine: Engine, start: date = date(2018, 1, 1)) -> RunResult:
         res = RunResult()
         d = start
-        while d < date.today():
+        from app.jobs.v2_steps import disk_ok
+        while d < date.today() and disk_ok():
             e = min(d + timedelta(days=31), date.today())
             res.items += sync_approvals(engine, d, e, is_backfill=True)["approvals"]
             d = e + timedelta(days=1)

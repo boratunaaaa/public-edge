@@ -124,6 +124,14 @@ def _alpha_tasks(engine, now: datetime, last_scan: list[float]) -> None:
             expire(engine)
             r = scan_new_events(engine)
             n = notify_pending(engine)
+            if r.get("rejected_ids"):  # distinct events per gate reason (a re-scan never double counts)
+                d0 = now.date().isoformat()
+                with engine.begin() as conn:
+                    js = job_state(conn, "paper_scan_daily")
+                    ids = js.get(d0, {}).get("ids", {})
+                    for k, v in r["rejected_ids"].items():
+                        ids[k] = sorted(set(ids.get(k, [])) | set(v))
+                    save_job_state(conn, "paper_scan_daily", {d0: {"ids": ids, "rejected": {k: len(v) for k, v in ids.items()}}})
             if r.get("created") or n:
                 log.info("paper proposals %s, notified %s", r, n)
         except Exception:

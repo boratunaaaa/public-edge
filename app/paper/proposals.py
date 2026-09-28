@@ -214,7 +214,7 @@ def scan_new_events(engine: Engine, days: int = 2) -> dict:
             events.c.is_backfill.is_(False), events.c.superseded.is_(False), events.c.event_type.in_(list(EVENT_FAMILY)),
             events.c.public_date >= date.today() - timedelta(days=days),
             ~select(proposed_trades.c.id).where(proposed_trades.c.event_id == events.c.id).exists())).order_by(events.c.id)).all()]
-    out = {"checked": len(ids), "created": 0, "rejected": {}}
+    out = {"checked": len(ids), "created": 0, "rejected": {}, "rejected_ids": {}}
     for eid in ids:
         r = create_proposal(engine, eid)
         if r.get("created"):
@@ -222,6 +222,7 @@ def scan_new_events(engine: Engine, days: int = 2) -> dict:
         else:
             for f in r.get("failed", []):
                 out["rejected"][f] = out["rejected"].get(f, 0) + 1
+                out["rejected_ids"].setdefault(f, []).append(eid)
     return out
 
 

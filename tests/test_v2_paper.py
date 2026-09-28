@@ -55,7 +55,7 @@ def test_paper_report_silent_without_activity_and_books_apart(engine, clean):
             c.execute(text("""INSERT INTO paper_positions (account_id, ticker, shares, entry_date, entry_price, cost, status)
                               VALUES (:a, :t, 1, '2026-09-28', 10, 11, 'OPEN')"""), {"a": aid, "t": t})
     msg = paper_report(engine, date(2026, 9, 28))
-    assert "PUBLIC EDGE PAPER" in msg and "$MAIN1" in msg and "$RES1 B_90D @ 10.00 [araştırma]" in msg
+    assert "PUBLIC EDGE PAPER RESEARCH" in msg and "$MAIN1" in msg and "$RES1 B_90D @ 10.00 [araştırma]" in msg
 
 
 def test_morning_brief_shows_only_actionable_source_problems(engine, clean):

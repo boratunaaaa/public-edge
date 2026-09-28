@@ -25,12 +25,17 @@ x-app: &app
     # paper trading (virtual money only - there is no broker integration)
     PAPER_STARTING_CAPITAL: ${PAPER_STARTING_CAPITAL:-10000}
     PAPER_COMMISSION_USD: ${PAPER_COMMISSION_USD:-1}
-    PAPER_RESEARCH_MODE: ${PAPER_RESEARCH_MODE:-0}
+    PAPER_RESEARCH_MODE: ${PAPER_RESEARCH_MODE:-1}
     PAPER_DASHBOARD_URL: ${PAPER_DASHBOARD_URL:-}
     INSIDER_PROFILE_MIN_EPISODES: ${INSIDER_PROFILE_MIN_EPISODES:-8}
     SEC_MAX_RPS: "3"
     # V2: one shared request budget per API across worker / backfill / intelligence (app.core.ratelimit)
     PE_SHARED_RATELIMIT: ${PE_SHARED_RATELIMIT:-1}
+    PE_V2_MIN_FREE_GB: ${PE_V2_MIN_FREE_GB:-8}
+    # optional free credentials (root-only secret env file; empty = source reported AUTH_REQUIRED)
+    MKK_API_KEY: ${MKK_API_KEY:-}
+    FRED_API_KEY: ${FRED_API_KEY:-}
+    USPTO_API_KEY: ${USPTO_API_KEY:-}
     RAW_LAKE_DIR: /data/raw
     EXPORT_DIR: /data/exports
   volumes:

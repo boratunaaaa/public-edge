@@ -59,9 +59,21 @@ def paper_report(engine: Engine, day: date | None = None) -> str | None:
         perf = c.execute(text("""SELECT DISTINCT ON (a.id) a.name, a.book, pp.nav, pp.spy_nav, a.starting_capital
                                  FROM paper_accounts a JOIN paper_performance pp ON pp.account_id = a.id
                                  WHERE a.active ORDER BY a.id, pp.on_date DESC""")).mappings().all()
-    if not (props or opened or closed):
+        from app.db.store import job_state
+        rej = (job_state(c, "paper_scan_daily").get(str(day)) or {}).get("rejected", {})
+        fam = c.execute(text("""SELECT pt.signal_family, count(*) n, sum(p.realized_pnl) pnl,
+                                       count(*) FILTER (WHERE p.status = 'OPEN') open_n
+                                FROM paper_positions p JOIN paper_accounts a ON a.id = p.account_id
+                                JOIN proposed_trades pt ON pt.id = p.proposal_id
+                                WHERE a.book = 'RESEARCH' GROUP BY 1 ORDER BY 2 DESC""")).mappings().all()
+        warn = source_warnings(c)
+        new_sig = c.execute(text("""SELECT event_family, count(*) FROM events WHERE NOT is_backfill AND event_family IS NOT NULL
+                                    AND created_at::date = :d GROUP BY 1 ORDER BY 2 DESC LIMIT 8"""), {"d": day}).all()
+    if not (props or opened or closed or rej):
         return None
-    L = [f"📒 <b>PUBLIC EDGE PAPER</b> — {day:%d.%m.%Y}", "<i>sanal para; gerçek emir yok</i>", ""]
+    L = [f"📒 <b>PUBLIC EDGE PAPER RESEARCH</b> — {day:%d.%m.%Y}", "<i>sanal para; gerçek emir yok; ana portföy kapalı</i>", ""]
+    if new_sig:
+        L += ["📡 Yeni sinyaller (aile)"] + [f"• {f}: {n}" for f, n in new_sig] + [""]
     if props:
         L += ["🆕 Yeni öneriler"] + [f"• {p['code']} ${p['ticker']} ({p['signal_family']})" + (" [araştırma]" if p["research_only"] else "")
                                      for p in props] + [""]
@@ -78,4 +90,11 @@ def paper_report(engine: Engine, day: date | None = None) -> str | None:
         if rows:
             L += [title] + [f"• {escape(p['name'])}: {(p['nav'] / p['starting_capital'] - 1) * 100:+.1f}%"
                             + (f" (SPY {(p['spy_nav'] / p['starting_capital'] - 1) * 100:+.1f}%)" if p["spy_nav"] else "") for p in rows] + [""]
+    if fam:
+        L += ["🧪 Aile bazında araştırma pozisyonları"] + [
+            f"• {r['signal_family']}: {r['n']} işlem ({r['open_n']} açık), gerçekleşen {(r['pnl'] or 0):+.0f} USD" for r in fam] + [""]
+    if rej:
+        L += ["⛔ Veri-kalite kapısında elenen"] + [f"• {k}: {v}" for k, v in sorted(rej.items(), key=lambda x: -x[1])[:6]] + [""]
+    if warn:
+        L += ["⚠️ Kaynak uyarıları"] + [f"• {w}" for w in warn[:5]]
     return "\n".join(L).rstrip()

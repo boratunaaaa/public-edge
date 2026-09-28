@@ -14,6 +14,8 @@ from app.sources.us.fda import OpenFdaSource
 from app.sources.us.short_data import FinraShortVolumeSource, SecFtdSource
 from app.sources.ca.official import BankOfCanadaValetSource, CanadaBuysSource
 from app.sources.tr.spk import SpkBulletinSource
+from app.sources.keyed import keyed_sources
+from app.sources.ca.grants_source import CanadaGrantsSource
 
 SOURCES: list[Source] = [
     SecForm4Source(),
@@ -39,14 +41,12 @@ SOURCES: list[Source] = [
     CanadaBuysSource(),
     BankOfCanadaValetSource(),
     SpkBulletinSource(),
-    PlannedSource("senate_lda", "BLOCKED: lda.gov (Senate LDA API) answers 403 (Akamai) from the tested network; anonymous API otherwise allowed"),
-    PlannedSource("uspto_patents", "AUTH_REQUIRED: PatentsView / USPTO ODP API needs a (free) API key"),
-    PlannedSource("fred_alfred", "AUTH_REQUIRED: FRED/ALFRED vintages need a (free) API key"),
-    PlannedSource("ciro_short", "BLOCKED: ciro.ca answers 403 to automated clients from both tested networks (office + Hetzner server)"),
-    PlannedSource("ca_lobbying", "BLOCKED: lobbycanada.gc.ca answers 403 to automated clients from both tested networks (office + Hetzner server)"),
-    PlannedSource("sedi", "BLOCKED: SEDI / SEDAR+ behind a bot manager; needs an authorised feed"),
-    PlannedSource("kap_live", "BLOCKED: KAP list API behind WAF; official route = MKK API Portal (account + service approval)"),
-    PlannedSource("ca_grants", "FORWARD_ONLY: file has no per-record publication date; stream job in the backfill container"),
+    CanadaGrantsSource(),
+    PlannedSource("senate_lda", "BLOCKED_SOURCE: lda.gov answers 403 (Akamai) from both tested networks", "BLOCKED"),
+    *keyed_sources(),
+    PlannedSource("ciro_short", "BLOCKED_SOURCE: ciro.ca answers 403 to automated clients from both tested networks (office + Hetzner server)", "BLOCKED", "CA"),
+    PlannedSource("ca_lobbying", "BLOCKED_SOURCE: lobbycanada.gc.ca answers 403 to automated clients from both tested networks (office + Hetzner server)", "BLOCKED", "CA"),
+    PlannedSource("sedi", "BLOCKED_SOURCE: SEDI / SEDAR+ behind a bot manager; needs an authorised feed", "BLOCKED", "CA"),
     # Phase 2 - architecture slots
     PlannedSource("doj_antitrust", "phase 2: DOJ Antitrust actions"),
     PlannedSource("merger_arb", "phase 2: M&A merger arbitrage (8-K / DEFM14A)"),

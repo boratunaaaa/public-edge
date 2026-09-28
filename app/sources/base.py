@@ -38,12 +38,15 @@ class Source(ABC):
 
 
 class PlannedSource(Source):
-    """Phase-2 placeholder: registered so the architecture/health view knows about it."""
+    """Phase-2 placeholder: registered so the architecture/health view knows about it.
+    health: DISABLED | BLOCKED (access wall, never bypassed) | AUTH_REQUIRED (credential missing)."""
     enabled = False
 
-    def __init__(self, name: str, reason: str):
+    def __init__(self, name: str, reason: str, health: str = "DISABLED", country: str = "US"):
         self.name = name
         self.disabled_reason = reason
+        self.health = health
+        self.country = country
 
     def run_live(self, engine: Engine) -> RunResult:
         return RunResult()

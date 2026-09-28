@@ -166,8 +166,12 @@ class FinraShortVolumeSource(Source):
             have = {r[0] for r in c.execute(text("SELECT DISTINCT trade_date FROM short_volume_daily"))}
         res = RunResult()
         d = start
+        from app.jobs.v2_steps import disk_ok
         while d < date.today():
             if is_trading_day(d) and d not in have:
+                if not disk_ok():  # historical work pauses; live ingestion is unaffected
+                    res.watermark = {"paused": "LOW_DISK", "at": str(d)}
+                    break
                 res.items += bool(ingest_finra_day(engine, d).get("rows"))
             d += timedelta(days=1)
         return res

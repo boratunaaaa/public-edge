@@ -93,11 +93,24 @@ def all_families(conn: Connection, use_cache: bool = True) -> list[dict]:
     return [family_report(conn, f, use_cache) for f in FAMILIES]
 
 
+# V2 policy (2026-09-28) until the new validation standard (placebo + forward) is passed. MAIN books stay closed to
+# every family; RESEARCH_ONLY families may feed the separate RESEARCH books; CONTEXT / RISK_RESEARCH never trade.
+POLICY = {"INSIDER_BUY": "RESEARCH_ONLY", "INSIDER_CLUSTER": "RESEARCH_ONLY", "MULTI_SIGNAL": "CONTEXT",
+          "HOUSE_BUY": "CONTEXT", "13D": "CONTEXT", "ACTIVIST_CROWDING": "CONTEXT", "10K_CHANGE": "RISK_RESEARCH",
+          "GOV_CONTRACT": "RESEARCH_ONLY", "NEWS": "CONTEXT", "DISCOVERY": "CONTEXT"}
+
+
 def proposal_allowed(conn: Connection, event_type: str, research_mode: bool = False) -> tuple[bool, str]:
-    """Is this family allowed to feed automatic paper-trade proposals?"""
+    """Is this family allowed to feed automatic paper-trade proposals? (True only ever means the RESEARCH book while
+    the V2 policy holds: the reason is never FAMILY_OUTPERFORMING, so research_only is always set.)"""
     fam = EVENT_FAMILY.get(event_type)
     if fam is None:
         return False, "UNKNOWN_FAMILY"
+    pol = POLICY.get(fam, "RESEARCH_ONLY")
+    if pol in ("CONTEXT", "RISK_RESEARCH"):
+        return False, f"POLICY_{pol}"
+    if pol == "RESEARCH_ONLY":
+        return research_mode, "POLICY_RESEARCH_ONLY"
     rep = family_report(conn, fam)
     if rep["verdict"] == "UNDERPERFORMING":
         return (research_mode, "FAMILY_UNDERPERFORMING")

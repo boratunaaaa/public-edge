@@ -1303,6 +1303,15 @@ event_market_snapshots = Table(
     Column("provider", String(24)),
     Column("lag_seconds", Float),  # captured_at - available_at
     Column("status", String(16), nullable=False),  # CAPTURED | NO_QUOTE | NOT_TRADEABLE | IDENTITY_UNRESOLVED
+    # forward gold dataset (V2 #22)
+    _ts("available_at"),
+    Column("security_id", String(48)),
+    Column("exchange", String(8)),
+    Column("sector", String(40)),
+    Column("source_event_ids", JSONB),
+    Column("signal_family", String(48)),
+    Column("signal_version", String(16)),
+    Column("data_quality_state", String(16)),
 )
 
 # Timestamped relationships (issuer/security/person/fund/agency/contract/grant/patent/trial/drug/subsidiary).
