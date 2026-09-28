@@ -76,11 +76,12 @@ def after_13f(engine: Engine, since_filed: date | None = None, *, is_backfill: b
         for i in range(0, len(todo), 500):
             chunk = todo[i:i + 500]
             with engine.begin() as c:
-                # evaluated (and made final) only against completely ingested current AND previous reports
+                # evaluated (and made final) only against completely ingested current AND previous reports; events and
+                # the checkpoint commit in ONE transaction, and only real inserts are counted (a retry reports 0)
                 ready = [a for a in chunk if _ready(c, a, loaded)]
-                n += len(thirteen_f_period(c, p, ready, is_backfill=is_backfill))
+                specs = thirteen_f_period(c, p, ready, is_backfill=is_backfill)
+                n += sum(1 for s_ in specs if s_.get("event_id"))
                 done.update(ready)
-            with engine.begin() as c:
                 save_job_state(c, "v2_13f_events", {**st, "done": sorted(done)})
     for p in periods:
         with engine.begin() as c:

@@ -364,3 +364,28 @@ def test_thirteen_f_period_equals_per_filing(engine, clean):
         e = ev[s["dedupe_key"]]
         assert (s["event_type"], s["public_date"], s["issuer_cik"], s["available_at"], s["title"]) == tuple(e[1:6])
         assert json.loads(json.dumps(s["payload"])) == e[6]
+
+
+def test_after_13f_counts_only_new_inserts_after_a_lost_checkpoint(engine, clean):
+    from app.db.store import job_state, save_job_state
+    from app.jobs import v2_steps
+    from app.sources.us import form13f as F
+    for q in ("13f_2026q1_mini.zip", "13f_2026q2_mini.zip"):
+        F.store(engine, F.parse_dataset(str(FX / "us" / q)), source=q)
+    with engine.begin() as c:
+        save_job_state(c, "form13f_datasets", {"done": ["https://x/13f_2026q1_mini.zip", "https://x/13f_2026q2_mini.zip"]})
+        for q in ("13f_2026q1_mini.zip", "13f_2026q2_mini.zip"):
+            for h in F.parse_dataset(str(FX / "us" / q))["holdings"]:
+                c.execute(text("""INSERT INTO activist_filings (accession, issuer_cik, cusip, filed_date, form_type, is_13d, is_amendment, source_url)
+                                  VALUES (:a, :c, :cu, '2025-01-01', 'SC 13D', true, false, 'u') ON CONFLICT DO NOTHING"""),
+                          {"a": f"X-{h['cusip']}", "c": f"{abs(hash(h['cusip'])) % 10**9:010d}", "cu": h["cusip"]})
+    first = v2_steps.after_13f(engine, is_backfill=True)
+    with engine.connect() as c:
+        n_events = c.execute(text("SELECT count(*) FROM events WHERE event_type LIKE 'INST_13F%'")).scalar()
+    assert first == n_events > 0
+    with engine.begin() as c:  # crash after the events committed but before the checkpoint was kept
+        save_job_state(c, "v2_13f_events", {"done": []})
+    assert v2_steps.after_13f(engine, is_backfill=True) == 0
+    with engine.connect() as c:
+        assert c.execute(text("SELECT count(*) FROM events WHERE event_type LIKE 'INST_13F%'")).scalar() == n_events
+        assert job_state(c, "v2_13f_events")["done"]

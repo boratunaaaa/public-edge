@@ -197,7 +197,8 @@ def thirteen_f_period(conn: Connection, period, originals: list[str], *, is_back
     period instead of one position_changes() per filing. Classification is the same Python code path (NEW / EXIT /
     DECREASE / INCREASE / HOLD on the same effective reports), so the events are identical - verified by
     test_thirteen_f_period_equals_per_filing and by a dry-run comparison on production before use.
-    Returns event specs (dedupe_key, event_type, fields); dry_run=True writes nothing."""
+    Returns event specs (dedupe_key, event_type, fields); dry_run=True writes nothing. When writing, spec["event_id"] is the
+    NEW event id or None when the event already existed (callers count only real inserts)."""
     if not originals:
         return []
     fil = {r["accession"]: dict(r) for r in conn.execute(text("""
@@ -279,7 +280,7 @@ def thirteen_f_period(conn: Connection, period, originals: list[str], *, is_back
                     "identity_confidence": conf, "source_accession": acc, "available_at": f["available_at"]}
             specs.append(spec)
             if not dry_run:
-                create_event(conn, event_type=et, dedupe_key=key, public_date=f["filed_date"], ticker=spec["ticker"], issuer_cik=cik,
+                spec["event_id"] = create_event(conn, event_type=et, dedupe_key=key, public_date=f["filed_date"], ticker=spec["ticker"], issuer_cik=cik,
                              company_name=name, title=title, payload=payload, source_url=url, is_backfill=is_backfill, event_family=fam,
                              identity_confidence=conf, source_accession=acc, available_at_override=f["available_at"], date_quality="date")
     return specs
