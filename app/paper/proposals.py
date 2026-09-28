@@ -80,8 +80,9 @@ def evaluate_gate(conn: Connection, ev: dict, *, family_ok: tuple[bool, str], pr
     else:
         g.passed.append("DATA_QUALITY")
     g.data_quality = "OK" if ev.get("date_quality") == "exact" else "DATE_ONLY"
-    # 2. ticker / security identity
-    if not ticker or price_basis not in VERIFIED_BASES:
+    # 2. ticker / security identity (V2: an event flagged needs_review - e.g. its ticker belonged to another issuer at
+    # the event date - never feeds a proposal)
+    if not ticker or price_basis not in VERIFIED_BASES or ev.get("needs_review"):
         g.failed.append("UNRESOLVED_SECURITY_MAPPING")
         g.data_quality = "BLOCKED"
     else:

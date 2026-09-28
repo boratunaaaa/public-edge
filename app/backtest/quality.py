@@ -154,7 +154,7 @@ def load_rows(conn: Connection, event_type: str, cond: str, params: dict, horizo
         FROM events e
         LEFT JOIN event_returns r ON r.event_id = e.id AND r.horizon_days = :h
         LEFT JOIN security_master sm ON sm.cik = e.issuer_cik
-        WHERE e.event_type = :et AND NOT e.superseded AND e.date_quality <> 'estimated'
+        WHERE e.event_type = :et AND NOT e.superseded AND e.date_quality <> 'estimated' AND NOT e.needs_review
           AND COALESCE(e.payload->>'universe_quality', '') <> 'current_universe_survivorship_biased'
           AND COALESCE(e.payload->>'tradeability', '') NOT IN ('NOT_TRADEABLE', 'PRE_LISTING')
           AND COALESCE(e.payload->>'timestamp_confidence', '') <> 'LOW'

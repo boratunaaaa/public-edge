@@ -164,3 +164,13 @@ def test_v2_historical_runner_is_exclusive(engine, clean):
         other.commit()
     v2_steps.run_historical(engine, lambda e, n, f: ran.append(n))
     assert ran == ["v2_13f", "v2_short_data", "v2_health_gov"]
+
+
+def test_needs_review_events_are_excluded_from_quality_stats(engine, clean):
+    from app.backtest import quality as Q
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO events (event_type, dedupe_key, ticker, issuer_cik, public_date, title, payload, source_url, needs_review)
+                          VALUES ('X_T', 'a', 'AAA', '0000000001', '2020-01-02', 't', '{}', 'u', false),
+                                 ('X_T', 'b', 'BBB', '0000000002', '2020-01-02', 't', '{}', 'u', true)"""))
+        rows = Q.load_rows(c, "X_T", "TRUE", {}, 30)
+    assert [r.issuer for r in rows] == ["0000000001"]
