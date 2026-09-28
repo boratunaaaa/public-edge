@@ -101,20 +101,40 @@ def backfill_health_gov(engine: Engine) -> dict:
         return {"skipped": "LOW_DISK"}
     with engine.connect() as c:
         st = job_state(c, "v2_health_gov")
-    out = {}
-    if not st.get("openfda_done"):
-        out["openfda"] = OpenFdaSource().run_backfill(engine).items
-    if not st.get("cftc_done"):
-        out["cftc"] = CftcCotSource().run_backfill(engine).items
-    if not st.get("trials_done"):
-        out["trials"] = ClinicalTrialsSource().run_live(engine, since=date(2000, 1, 1), max_pages=400).items
-    with engine.begin() as c:
-        save_job_state(c, "v2_health_gov", {"openfda_done": True, "cftc_done": True, "trials_done": True})
+    out, done = {}, dict(st)
+    jobs = (("trials_done", "trials", lambda: ClinicalTrialsSource().run_live(engine, since=date(2000, 1, 1), max_pages=400).items),
+            ("openfda_done", "openfda", lambda: OpenFdaSource().run_backfill(engine).items),
+            ("cftc_done", "cftc", lambda: CftcCotSource().run_backfill(engine).items))
+    for flag, name, fn in jobs:
+        if done.get(flag):
+            continue
+        if not disk_ok():
+            out["paused"] = "LOW_DISK"
+            break
+        out[name] = fn()
+        if disk_ok():  # a run that stopped on the disk guard is not complete: it resumes next time
+            done[flag] = True
+            with engine.begin() as c:
+                save_job_state(c, "v2_health_gov", done)
     return out
 
 
-def run_historical(engine: Engine, step) -> None:
-    """Called from app.jobs.backfill.run_once (HISTORICAL_LOW)."""
-    step(engine, "v2_short_data", lambda: backfill_short_data(engine))
-    step(engine, "v2_health_gov", lambda: backfill_health_gov(engine))
-    step(engine, "v2_13f", lambda: backfill_13f(engine))
+LOCK_ID = 7_120_012  # pg advisory lock: one V2 historical runner at a time (13F aggregates are additive)
+
+
+def run_historical(engine: Engine, step, order=("v2_13f", "v2_short_data", "v2_health_gov")) -> dict:
+    """Called from app.jobs.backfill.run_once (HISTORICAL_LOW) or a one-off runner. Holds a session advisory lock so
+    two runners never ingest the same data set concurrently; the second one skips."""
+    fns = {"v2_13f": lambda: backfill_13f(engine), "v2_short_data": lambda: backfill_short_data(engine),
+           "v2_health_gov": lambda: backfill_health_gov(engine)}
+    with engine.connect() as lock_conn:
+        if not lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": LOCK_ID}).scalar():
+            log.info("V2 historical runner already active elsewhere - skipping")
+            return {"skipped": "LOCKED"}
+        try:
+            for name in order:
+                step(engine, name, fns[name])
+        finally:
+            lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": LOCK_ID})
+            lock_conn.commit()
+    return {"ok": True}

@@ -152,3 +152,15 @@ def test_placebo_excludes_controls_overlapping_unsampled_events(engine, clean):
                                                 exit_price=1.1, ret=0.1, spy_ret=0.0, excess_ret=0.1))
         out = placebo.family_vs_placebo(c, "X_TEST", 90)
     assert out["companies"] == 0 and out["skipped"] == 1  # control 2025-03-04 is 6 days from the unpriced event 2
+
+
+def test_v2_historical_runner_is_exclusive(engine, clean):
+    from app.jobs import v2_steps
+    ran = []
+    with engine.connect() as other:
+        other.execute(text("SELECT pg_advisory_lock(:k)"), {"k": v2_steps.LOCK_ID})
+        assert v2_steps.run_historical(engine, lambda e, n, f: ran.append(n)) == {"skipped": "LOCKED"}
+        other.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": v2_steps.LOCK_ID})
+        other.commit()
+    v2_steps.run_historical(engine, lambda e, n, f: ran.append(n))
+    assert ran == ["v2_13f", "v2_short_data", "v2_health_gov"]
