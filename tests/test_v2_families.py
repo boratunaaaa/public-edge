@@ -1,4 +1,5 @@
 """V2 candidate families: point-in-time event generation, identity gates, validation standard, multiple testing."""
+import math
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -174,3 +175,31 @@ def test_needs_review_events_are_excluded_from_quality_stats(engine, clean):
                                  ('X_T', 'b', 'BBB', '0000000002', '2020-01-02', 't', '{}', 'u', true)"""))
         rows = Q.load_rows(c, "X_T", "TRUE", {}, 30)
     assert [r.issuer for r in rows] == ["0000000001"]
+
+
+def test_matched_placebo_matches_on_prior_return_and_blocks_any_family(engine, clean):
+    from app.backtest import research_v2 as R
+    from app.db.models import event_returns, market_prices
+    d0 = date(2019, 1, 1)
+    with engine.begin() as c:
+        bars = []
+        for i in range(2400):
+            d = d0 + timedelta(days=i)
+            if d.weekday() >= 5:
+                continue
+            spy = 100.0 * (1.0002 ** i)
+            stock = 50.0 * (1 + 0.3 * math.sin(i / 60.0))  # cycles: many dates share a prior-60d return
+            bars += [{"symbol": "SPY", "date": d, "open": spy, "high": spy, "low": spy, "close": spy, "adj_close": spy, "volume": 1e6},
+                     {"symbol": "CYC", "date": d, "open": stock, "high": stock, "low": stock, "close": stock, "adj_close": stock, "volume": 1e6}]
+        c.execute(market_prices.insert(), bars)
+        c.execute(text("""INSERT INTO events (id, event_type, dedupe_key, ticker, issuer_cik, public_date, title, payload, source_url, price_symbol)
+                          VALUES (900001, 'X_T', 'a', 'CYC', '0000000010', '2023-03-01', 't', '{}', 'u', 'CYC')"""))
+        c.execute(event_returns.insert().values(event_id=900001, horizon_days=90, entry_date=date(2023, 3, 2), entry_price=1, exit_date=date(2023, 6, 1),
+                                                exit_price=1, ret=0.0, spy_ret=0.0, excess_ret=0.01))
+        fam = R.matched_placebo(c, "X_T", lookback=60)
+        # a different-family event on every week blocks all controls under contamination='any'
+        for k in range(0, 2300, 7):
+            c.execute(text("""INSERT INTO events (event_type, dedupe_key, issuer_cik, public_date, title, payload, source_url)
+                              VALUES ('OTHER', :k, '0000000010', :d, 't', '{}', 'u')"""), {"k": f"o{k}", "d": d0 + timedelta(days=k)})
+        anyc = R.matched_placebo(c, "X_T", lookback=60, contamination="any")
+    assert fam["companies"] == 1 and anyc["companies"] == 0
