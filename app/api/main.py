@@ -687,6 +687,10 @@ def api_v2_health():
             FROM source_health h LEFT JOIN source_daily_status d ON d.source = h.source AND d.day = CURRENT_DATE
             ORDER BY h.source""")).mappings()]
         quotas = ratelimit.status(conn)
+        # Tiingo free tier: 500 unique symbols per calendar month (tracked per first use in provider_usage)
+        used = conn.execute(text("SELECT count(*) FROM provider_usage WHERE provider = 'tiingo' "
+                                 "AND month = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM')")).scalar()
+        quotas.append({"key": "tiingo_monthly_symbols", "limit": 500, "used": used, "remaining": max(0, 500 - used)})
         jobs = [dict(r) for r in conn.execute(text("""SELECT name, status, last_started, last_finished, left(last_error, 200) err
                                                       FROM processing_jobs WHERE name NOT LIKE 'pit_facts:%' ORDER BY name""")).mappings()]
         db_bytes = conn.execute(text("SELECT pg_database_size(current_database())")).scalar()

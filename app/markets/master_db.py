@@ -74,7 +74,7 @@ def build_us(conn: Connection) -> dict:
     n = conn.execute(text("""
         INSERT INTO global_securities (security_id, country, issuer_id, issuer_name, cik, security_type, delisting_date,
                                        tradeability_status, identity_confidence, identity_evidence)
-        SELECT 'US:' || cik || ':COM', 'US', cik, COALESCE(name, cik), cik, 'COMMON', delisting_date,
+        SELECT 'US:' || cik || '\:COM', 'US', cik, COALESCE(name, cik), cik, 'COMMON', delisting_date,
                CASE status WHEN 'ACTIVE' THEN 'ACTIVE' WHEN 'DELISTED' THEN 'DELISTED' ELSE 'UNKNOWN' END, 'HIGH',
                '[{"source": "sec_submissions", "field": "cik"}]'::jsonb
         FROM security_master
@@ -82,7 +82,7 @@ def build_us(conn: Connection) -> dict:
           tradeability_status = EXCLUDED.tradeability_status, updated_at = now()""")).rowcount
     p = conn.execute(text("""
         INSERT INTO security_symbol_periods (security_id, exchange, symbol, valid_from, valid_to, source, confidence)
-        SELECT 'US:' || s.cik || ':COM', NULL, s.symbol, s.first_seen, s.last_seen + 1, s.source,
+        SELECT 'US:' || s.cik || '\:COM', NULL, s.symbol, s.first_seen, s.last_seen + 1, s.source,
                CASE WHEN s.n_obs >= 3 THEN 'HIGH' ELSE 'MEDIUM' END
         FROM security_symbols s JOIN security_master m ON m.cik = s.cik
         ON CONFLICT (security_id, symbol, valid_from, source) DO UPDATE SET valid_to = EXCLUDED.valid_to""")).rowcount

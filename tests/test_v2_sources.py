@@ -233,3 +233,17 @@ def test_usaspending_resumes_from_page_checkpoint_after_disconnect(engine, clean
     calls.clear()
     A.ingest_range(engine, today, today, is_backfill=True, start_page=3)
     assert calls == [3, 4]
+
+
+def test_build_us_security_master_from_sec_master(engine, clean):
+    from app.markets import master_db
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO security_master (cik, name, status) VALUES ('0000000901', 'OLD CO', 'DELISTED'), ('0000000902', 'NEW CO', 'ACTIVE')"))
+        c.execute(text("""INSERT INTO security_symbols (cik, symbol, first_seen, last_seen, n_obs, source) VALUES
+                          ('0000000901', 'ABCD', '2012-01-01', '2015-06-01', 5, 'form345_filing'),
+                          ('0000000902', 'ABCD', '2019-01-01', '2026-09-01', 5, 'form345_filing')"""))
+        out = master_db.build_us(c)
+        assert out["securities"] == 2
+        assert master_db.resolve(c, "ABCD", date(2014, 1, 1)) == "US:0000000901:COM"
+        assert master_db.resolve(c, "ABCD", date(2020, 1, 1)) == "US:0000000902:COM"
+        assert master_db.resolve(c, "ABCD", date(2017, 1, 1)) is None

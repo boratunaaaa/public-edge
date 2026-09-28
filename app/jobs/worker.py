@@ -137,6 +137,11 @@ def main() -> None:
                 health_mark(conn, s.name, "DISABLED", s.disabled_reason)
                 conn.execute(source_health.update().where(source_health.c.source == s.name).values(
                     health_status=getattr(s, "health", "DISABLED"), country=getattr(s, "country", None)))
+        # rows of sources no longer registered (renamed V1 placeholders) are marked RETIRED, never left UNKNOWN
+        names = [s.name for s in SOURCES]
+        conn.execute(source_health.update().where(
+            source_health.c.source.notin_(names), ~source_health.c.source.like("alpha:%"), ~source_health.c.source.like("canary:%"),
+            source_health.c.source.notin_(["telegram", "discovery_engine"])).values(health_status="RETIRED", status="DISABLED"))
     log.info("registry synced: %s tickers", n)
     if telegram.configured():
         try:
