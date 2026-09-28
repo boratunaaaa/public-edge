@@ -116,7 +116,24 @@ def thirteen_f(conn: Connection, accession: str, *, is_backfill: bool) -> list[i
     if not f or f["submission_type"] != "13F-HR" or not f["entries"] or not (10 <= f["entries"] <= 150):
         return []
     out = []
-    for ch in position_changes(conn, f["manager_cik"], f["period"]):
+    changes = position_changes(conn, f["manager_cik"], f["period"])
+    for ch in changes:
+        if ch["change"] in ("EXIT", "DECREASE"):
+            # context only (not a candidate family): a focused manager leaving / cutting a position it held
+            cik, conf, _why = cusip_to_cik(conn, ch["cusip"])
+            if cik and ch["prev_shares"]:
+                et = "INST_13F_EXIT" if ch["change"] == "EXIT" else "INST_13F_DECREASE"
+                eid = create_event(conn, event_type=et, dedupe_key=f"13F{et[-4:]}:{accession}:{ch['cusip']}", public_date=f["filed_date"],
+                                   ticker=_ticker(conn, cik), issuer_cik=cik, company_name=ch["issuer_name"],
+                                   title=f"{f['manager_name']} {'exited' if et.endswith('EXIT') else 'cut'} {ch['issuer_name']} (Q {f['period']})",
+                                   payload={"manager_cik": f["manager_cik"], "manager": f["manager_name"], "period": str(f["period"]),
+                                            "shares": ch["shares"], "prev_shares": ch["prev_shares"], "cusip": ch["cusip"]},
+                                   source_url="https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets", is_backfill=is_backfill,
+                                   event_family="US_13F_CONTEXT", identity_confidence=conf, source_accession=accession,
+                                   available_at_override=f["available_at"], date_quality="date")
+                if eid:
+                    out.append(eid)
+            continue
         if ch["change"] not in ("NEW", "INCREASE"):
             continue
         cik, conf, _why = cusip_to_cik(conn, ch["cusip"])

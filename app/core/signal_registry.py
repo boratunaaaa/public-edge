@@ -45,6 +45,9 @@ FAMILIES: tuple[SignalFamily, ...] = (
     # ---- V2 US candidates
     SignalFamily("US_13F_NEW_POSITION", "US", "1", ("INST_13F_NEW_POSITION",), ("sec_13f",), "focused manager (10-150 positions) opens a >= 3 % position; known at the 13F filing date, 45+ days after the quarter"),
     SignalFamily("US_13F_ACCUMULATION", "US", "1", ("INST_13F_ACCUMULATION",), ("sec_13f",), "3rd focused manager opening a new position in the same CUSIP for one quarter (point in time)"),
+    SignalFamily("US_13F_CONTEXT", "US", "1", ("INST_13F_EXIT", "INST_13F_DECREASE"), ("sec_13f",), "focused manager exits / cuts (>10 %) a position (context, never a candidate)", context_only=True),
+    SignalFamily("10K_NEGATIVE_CHANGE", "US", "1", (), ("sec_10k",), "TENK_CHANGE with direction NEGATIVE (risk research only; no short orders)", context_only=True,
+                 notes="measured by app.backtest.research_v2.tenk_negative (drawdown, delisting, bankruptcy, dilution, sector-adjusted)"),
     SignalFamily("US_SHORT_PRESSURE", "US", "1", ("SHORT_PRESSURE",), ("finra_short_volume",), "5d FINRA short-VOLUME ratio >= 60 % and z >= 2.5 vs 60 sessions (volume, not short interest)"),
     SignalFamily("US_FTD_SPIKE", "US", "1", ("FTD_SPIKE",), ("sec_ftd",), "half-month max daily FTD value >= $1M and >= 5x the prior 6 half-months' median"),
     SignalFamily("US_TRIAL_CATALYST", "US", "1", ("RESULTS_POSTED", "TRIAL_TERMINATED", "TRIAL_PHASE_CHANGE", "TRIAL_START", "TRIAL_COMPLETION", "TRIAL_SUSPENDED"),
@@ -62,7 +65,7 @@ FAMILIES: tuple[SignalFamily, ...] = (
     SignalFamily("TR_CAPACITY_INVESTMENT", "TR", "0", ("TR_CAPACITY_INVESTMENT",), ("kap",), "kapasite / fabrika / yatırım disclosures"),
     SignalFamily("TR_DILUTION_RISK", "TR", "1", ("TR_RIGHTS_ISSUE_APPROVAL",), ("tr_spk_bulletin",), "SPK-approved bedelli share issue (dilution %)", context_only=True),
     SignalFamily("TR_BONUS_ISSUE", "TR", "1", ("TR_BONUS_ISSUE_APPROVAL",), ("tr_spk_bulletin",), "SPK-approved bedelsiz (bonus) share issue, % of current capital"),
-    SignalFamily("TR_SPK_ENFORCEMENT", "TR", "1", ("TR_SPK_ENFORCEMENT",), ("tr_spk_bulletin",), "SPK criminal complaint / trading ban / fine concerning trading in the stock", context_only=True),
+    SignalFamily("TR_SPK_SANCTION", "TR", "1", ("TR_SPK_ENFORCEMENT",), ("tr_spk_bulletin",), "SPK criminal complaint / trading ban / fine concerning trading in the stock", context_only=True),
     # ---- CA candidates
     SignalFamily("CA_GOV_CONTRACT", "CA", "1", ("CA_GOV_CONTRACT_WIN",), ("ca_canadabuys",), "federal contract award to a listed supplier (publication date)"),
     SignalFamily("CA_GRANT", "CA", "0", (), ("ca_grants",), "federal grant / contribution (forward only: no publication date in the file)", context_only=True),

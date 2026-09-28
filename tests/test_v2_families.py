@@ -77,6 +77,7 @@ def test_13f_events_from_two_real_quarters(engine, clean):
         assert e["available_at"] == end_of_local_day(filed) and e["public_date"] == filed  # never the quarter end
     assert len(ids) == len(evs)
     assert any(e["event_type"] == "INST_13F_NEW_POSITION" for e in evs)
+    assert {e["event_type"] for e in evs} <= {"INST_13F_NEW_POSITION", "INST_13F_ACCUMULATION", "INST_13F_EXIT", "INST_13F_DECREASE"}
 
 
 def test_validation_report_and_bh_ledger(engine, clean):

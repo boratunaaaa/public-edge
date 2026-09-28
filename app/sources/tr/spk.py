@@ -140,7 +140,7 @@ def store(conn, b: Bulletin, url: str, *, is_backfill: bool) -> list[int]:
         eid = create_event(conn, event_type=et, dedupe_key=f"SPK:{key}", public_date=b.date, ticker=ticker, company_name=label,
                            title=f"SPK {b.number}: {label} - {et.replace('TR_', '').replace('_', ' ').lower()}", payload=info,
                            source_url=url, is_backfill=is_backfill, country="TR", exchange="XIST", security_id=sid,
-                           event_family={"TR_SPK_ENFORCEMENT": "TR_SPK_ENFORCEMENT", "TR_RIGHTS_ISSUE_APPROVAL": "TR_DILUTION_RISK",
+                           event_family={"TR_SPK_ENFORCEMENT": "TR_SPK_SANCTION", "TR_RIGHTS_ISSUE_APPROVAL": "TR_DILUTION_RISK",
                                          "TR_BONUS_ISSUE_APPROVAL": "TR_BONUS_ISSUE"}[et],
                            identity_confidence=conf, parser_version=PARSER_VERSION, available_at_override=avail, date_quality="date")
         if eid:

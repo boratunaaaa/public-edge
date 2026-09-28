@@ -213,3 +213,15 @@ def cluster_actor_audit(conn: Connection) -> dict:
             "strict_clusters": len(strict), "strict_spy": spy_beat(conn, "CLUSTER_INSIDER_BUY", w),
             "strict_placebo_60": matched_placebo(conn, "CLUSTER_INSIDER_BUY", lookback=60, where=w),
             "all_spy": spy_beat(conn, "CLUSTER_INSIDER_BUY")}
+
+
+def manager_profiles(conn: Connection, min_events: int = 8) -> list[dict]:
+    """Per focused manager: how its NEW positions did (company-equal within the manager, 90d SPY-beat). A profile is
+    a description, not a weight: managers below min_events are listed as INSUFFICIENT and never ranked."""
+    rows = conn.execute(text("""
+        SELECT e.payload->>'manager_cik' m, max(e.payload->>'manager') name, count(*) n,
+               avg((r.excess_ret > 0)::int) beat, percentile_cont(0.5) WITHIN GROUP (ORDER BY r.excess_ret) med
+        FROM events e JOIN event_returns r ON r.event_id = e.id AND r.horizon_days = 90
+        WHERE e.event_type = 'INST_13F_NEW_POSITION' AND NOT e.superseded AND NOT e.needs_review AND r.excess_ret IS NOT NULL
+        GROUP BY 1 ORDER BY 3 DESC""")).mappings().all()
+    return [{**dict(r), "status": "PROFILE" if r["n"] >= min_events else "INSUFFICIENT"} for r in rows]
