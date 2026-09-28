@@ -13,6 +13,7 @@ class RunResult:
     events: list[int] = field(default_factory=list)  # new event ids
     fingerprint: str | None = None  # structure hash of the parsed response (schema-change detection)
     watermark: dict | None = None  # incremental-sync position after this run
+    skipped: bool = False  # nothing was attempted (e.g. rate-limit backoff): no health observation is recorded
 
 
 class Source(ABC):

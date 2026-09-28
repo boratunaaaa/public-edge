@@ -54,6 +54,9 @@ def run_source(engine, src) -> None:
             "license_status": getattr(src, "license_status", None), "stale_after": getattr(src, "stale_after", None)}
     try:
         res = src.run_live(engine)
+        if getattr(res, "skipped", False):  # e.g. backing off after a 429: neither a success nor a failure observation
+            log.info("source %s skipped: %s", src.name, res.watermark)
+            return
         with engine.begin() as conn:
             health_success(conn, src.name, items=res.items, had_event=bool(res.events))
             record_run(conn, src.name, RunOutcome(ok=True, items=res.items, events=len(res.events),

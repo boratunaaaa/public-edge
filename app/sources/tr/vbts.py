@@ -256,7 +256,7 @@ def collect_range(engine, start: int, end: int, fetch, *, first_seen_at: datetim
     Raises SourceBlocked / FormatChanged (the caller records BLOCKED / SCHEMA_CHANGED - never 'no VBTS today').
     A few individually broken pages are tolerated and counted; a run where most pages lack the structure raises."""
     st = {"scanned": 0, "missing": 0, "unparseable": 0, "documents": 0, "events": 0, "stored": 0, "duplicates": 0,
-          "review_required": 0, "last_index": start - 1, "fingerprint": None}
+          "review_required": 0, "last_index": start - 1, "fingerprint": None, "missing_indexes": [], "unparseable_indexes": []}
     for i in range(start, end + 1):
         if max_pages is not None and st["scanned"] >= max_pages:
             break
@@ -265,11 +265,13 @@ def collect_range(engine, start: int, end: int, fetch, *, first_seen_at: datetim
         st["last_index"] = i
         if not page:
             st["missing"] += 1
+            st["missing_indexes"].append(i)
             continue
         try:
             d = parse_page(page, i)
         except FormatChanged:
             st["unparseable"] += 1
+            st["unparseable_indexes"].append(i)
             if st["scanned"] >= 20 and st["unparseable"] > 0.5 * st["scanned"]:
                 raise
             continue
@@ -347,7 +349,11 @@ class VbtsSource:
         if o == "SOURCE_SCHEMA_CHANGED":
             raise FormatChanged("KAP disclosure structure changed")
         if o == "SOURCE_GAP":
-            raise Unavailable(f"live gap {out.get('gap')} indexes > live_max_gap: run the HISTORICAL mode explicitly")
+            raise Unavailable(f"live gap {out.get('gap')} indexes > live_max_gap: run recover_live_gap() explicitly")
+        if o == "SOURCE_PARSE_ERROR":  # pages were read but could not be parsed: never a quiet "0 events" day
+            raise SourceParseError(f"{out.get('parse_errors')} disclosure page(s) could not be parsed (kept for re-probe)")
+        if o == "BACKING_OFF":  # no request was made: no source observation is recorded at all
+            return RunResult(items=0, events=[], skipped=True, watermark={"outcome": o, "until": out.get("until")})
         # events carries the COUNT of newly stored measure records (the worker only uses its length)
         return RunResult(items=out.get("scanned", 0), events=[0] * out.get("events", 0), watermark={"outcome": o, **out})
 
@@ -397,6 +403,10 @@ class LiveConfig:
 
 class RateLimited(RuntimeError):
     status = 429
+
+
+class SourceParseError(RuntimeError):
+    """Some pages were read but could not be parsed (worker health: DEGRADED, never TRUE_NO_EVENT)."""
 
 
 class Unavailable(RuntimeError):
@@ -500,6 +510,14 @@ class LiveVbtsCollector:
                 return out
             # late / out-of-order: re-probe recently missing or unparsed indexes below the watermark
             retry = sorted(set(map(int, (st.get("pending_missing") or {}).keys())) | set(map(int, (st.get("pending_parse") or {}).keys())))
+            # re-probes never starve new indexes: at most a third of the page budget per poll (oldest first)
+            k = max(1, self.cfg.max_pages_per_poll // 3)
+            if len(retry) > k:  # round-robin, so every pending index gets its turn (and can expire)
+                cur = int(st.get("retry_cursor") or 0) % len(retry)
+                retry = (retry[cur:] + retry[:cur])[:k]
+                st["retry_cursor"] = cur + k
+            else:
+                st["retry_cursor"] = 0
             todo = retry + list(range(nxt, top + 1))
             for i in todo[: self.cfg.max_pages_per_poll]:
                 self._one(i, st, m, out, now, is_retry=i < nxt)
@@ -550,11 +568,11 @@ class LiveVbtsCollector:
         pp = dict(st.get("pending_parse") or {})
         key = str(i)
         if not page:
-            if not is_retry:
-                pm[key] = now.isoformat()
-            elif now - datetime.fromisoformat(pm.get(key, now.isoformat())) > timedelta(hours=self.cfg.late_window_hours):
+            pp.pop(key, None)  # an unparseable page that is now missing becomes a timestamped missing entry
+            first = pm.setdefault(key, now.isoformat())
+            if now - datetime.fromisoformat(first) > timedelta(hours=self.cfg.late_window_hours):
                 pm.pop(key, None)  # missing for longer than the late window: given up (never a guessed event)
-            st["pending_missing"] = pm
+            st["pending_missing"], st["pending_parse"] = pm, pp
             with self.engine.begin() as c:
                 self._advance(st, i, is_retry, None)
                 self._save(c, st)
@@ -627,3 +645,36 @@ def vbts_metrics(conn) -> dict:
             "vbts_parse_errors_today": g("parse_errors"), "vbts_source_status": st.get("source_status"),
             "vbts_consecutive_failures": st.get("consecutive_failures", 0), "vbts_next_index": st.get("next_index"),
             "vbts_pending_reprobes": len(st.get("pending_missing") or {}) + len(st.get("pending_parse") or {})}
+
+
+def recover_live_gap(engine, fetch=None, *, latest_index: int | None = None, clock=None) -> dict:
+    """Explicit operator step for SOURCE_GAP (never called by the live poll): scan the gap [live next_index, latest] in
+    HISTORICAL mode, verify it was covered completely (every index read, no schema change, last index reached), then -
+    and only then - move the live checkpoint to latest + 1. Missing / unparseable indexes of the gap are handed to the
+    live re-probe sets (with the recovery time), so a late document inside the gap is still picked up."""
+    from app.db.store import job_state, save_job_state
+    now = (clock or (lambda: datetime.now(timezone.utc)))()
+    if fetch is None:  # the same spaced, error-mapped fetch as the live collector (6 s, 429 -> RateLimited)
+        fetch = LiveVbtsCollector(engine).fetch
+    with engine.connect() as c:
+        st = job_state(c, LIVE_JOB)
+    start = st.get("next_index")
+    if start is None:
+        raise ValueError("no live checkpoint yet: nothing to recover")
+    end = latest_index if latest_index is not None else VbtsSource().latest_index()
+    rep = collect_range(engine, start, end, fetch, first_seen_at=now)  # HISTORICAL: raises on block / schema change
+    covered = rep["last_index"] == end and rep["scanned"] == end - start + 1
+    if not covered:
+        return {"recovered": False, "reason": "gap not fully scanned", **rep}
+    with engine.begin() as c:
+        cur = job_state(c, LIVE_JOB)
+        if cur.get("next_index") != start:  # the live poll moved meanwhile: do not overwrite it
+            return {"recovered": False, "reason": "live checkpoint changed during recovery", **rep}
+        pm = dict(cur.get("pending_missing") or {})
+        pm.update({str(i): now.isoformat() for i in rep["missing_indexes"]})
+        pp = dict(cur.get("pending_parse") or {})
+        pp.update({str(i): 1 for i in rep["unparseable_indexes"]})
+        cur.update(next_index=end + 1, pending_missing=pm, pending_parse=pp, source_status="RECOVERED_GAP",
+                   last_gap_recovery={"from": start, "to": end, "at": now.isoformat(), "stored": rep["stored"]})
+        save_job_state(c, LIVE_JOB, cur)
+    return {"recovered": True, "from": start, "to": end, **rep}

@@ -236,3 +236,98 @@ def test_historical_mode_is_explicit_and_separate(engine, clean):
     with engine.connect() as c:
         from app.db.store import job_state
         assert job_state(c, V.LIVE_JOB) == {}  # the historical run never touches the live checkpoint
+
+
+# ---------------------------------------------------------------- review fixes: worker outcomes, gap recovery, retries
+
+def _health(engine, name):
+    with engine.connect() as c:
+        h = c.execute(text("SELECT health_status, consecutive_failures, status FROM source_health WHERE source = :s"), {"s": name}).first()
+        d = c.execute(text("SELECT status FROM source_daily_status WHERE source = :s"), {"s": name}).scalar()
+    return h, d
+
+
+def test_worker_records_parse_errors_as_failure_not_quiet_day(engine, clean, monkeypatch):
+    from app.jobs import worker
+    monkeypatch.setenv("PE_VBTS_MIN_SPACING_S", "0")
+    kap = FakeKap({i: "<html>broken</html>" if i == 995 else other(i) for i in range(1, 1001)}, top=1000)
+    worker.run_source(engine, V.VbtsSource(fetch=kap.fetch, latest_index=kap.latest))
+    h, d = _health(engine, "tr_vbts")
+    assert h[1] == 1 and h[0] == "DEGRADED" and d == "SOURCE_UNAVAILABLE"  # never TRUE_NO_EVENT
+
+
+def test_worker_records_nothing_while_backing_off(engine, clean, monkeypatch):
+    from app.jobs import worker
+    from app.db.store import save_job_state
+    monkeypatch.setenv("PE_VBTS_MIN_SPACING_S", "0")
+    with engine.begin() as c:
+        save_job_state(c, V.LIVE_JOB, {"next_index": 1, "backoff_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat()})
+    kap = FakeKap({}, top=10)
+    worker.run_source(engine, V.VbtsSource(fetch=kap.fetch, latest_index=kap.latest))
+    assert _health(engine, "tr_vbts") == (None, None) and kap.calls == []  # no success, no failure, no request
+
+
+def test_gap_is_detected_recovered_explicitly_and_live_resumes(engine, clean, cfg):
+    _setup(engine)
+    pages = {i: other(i) for i in range(1, 1400)} | {1150: vb(1150, "ESKLT"), 1310: vb(1310, "LATEA")}
+    pages.pop(1200)  # missing inside the gap -> handed to the live re-probe set
+    kap = FakeKap(pages, top=1000)
+    clock = Clock()
+    col = _col(engine, kap, cfg, clock)
+    col.poll()
+    kap.top = 1300  # 300 new indexes > live_max_gap (100)
+    assert col.poll()["outcome"] == "SOURCE_GAP" and col.poll()["outcome"] == "SOURCE_GAP"
+    V.collect_range(engine, 1001, 1100, kap.fetch)  # a plain HISTORICAL scan never moves the live checkpoint
+    assert col.poll()["outcome"] == "SOURCE_GAP"
+    rec = V.recover_live_gap(engine, kap.fetch, latest_index=1300, clock=clock)
+    assert rec["recovered"] and rec["from"] == 1001 and rec["to"] == 1300
+    from app.db.store import job_state
+    with engine.connect() as c:
+        st = job_state(c, V.LIVE_JOB)
+    assert st["next_index"] == 1301 and "1200" in st["pending_missing"]
+    kap.top = 1320
+    kap.pages[1200] = vb(1200, "DMRGD")  # the missing page appears later: the overlap picks it up
+    kap.calls.clear()
+    r = col.poll()
+    assert r["outcome"] == "NEW_EVENTS" and min(i for i in kap.calls if i != 1200) == 1301
+    keys = _events(engine)
+    assert len(keys) == len(set(keys)) == 6 and any("KAP:1150" in k for k in keys) and any("KAP:1200" in k for k in keys)
+
+
+def test_recovery_refuses_an_incomplete_scan(engine, clean, cfg):
+    kap = FakeKap({i: other(i) for i in range(1, 1001)}, top=1000)
+    col = _col(engine, kap, cfg)
+    col.poll()
+    kap.top = 1300
+    kap.fail[1100] = "timeout"
+    with pytest.raises(V.Unavailable):
+        V.recover_live_gap(engine, kap.fetch, latest_index=1300)
+    from app.db.store import job_state
+    with engine.connect() as c:
+        assert job_state(c, V.LIVE_JOB)["next_index"] == 1001  # checkpoint untouched
+
+
+def test_malformed_page_that_turns_404_expires_and_retries_never_starve_new_indexes(engine, clean):
+    cfg = V.LiveConfig(min_spacing_s=0, first_lookback=30, live_max_gap=1000, max_pages_per_poll=9, late_window_hours=6,
+                       max_parse_retries=50)
+    pages = {i: other(i) for i in range(1, 1200)}
+    for i in range(971, 1001):
+        pages[i] = "<html>broken</html>"  # 30 unparseable pages -> 30 pending re-probes
+    kap = FakeKap(pages, top=1000)
+    clock = Clock()
+    col = _col(engine, kap, cfg, clock)
+    for _ in range(4):
+        col.poll()
+    for i in range(971, 1001):
+        kap.pages.pop(i)  # later they answer 404 / empty
+    kap.top = 1010
+    kap.calls.clear()
+    col.poll()
+    assert any(i >= 1001 for i in kap.calls)  # new indexes are scanned despite 30 pending re-probes (budget 9, retries <= 3)
+    from app.db.store import job_state
+    for _ in range(40):
+        clock.t += timedelta(minutes=30)  # > late window (6 h) in total
+        col.poll()
+    with engine.connect() as c:
+        st = job_state(c, V.LIVE_JOB)
+    assert not st.get("pending_parse") and not st.get("pending_missing") and st["next_index"] == 1011
