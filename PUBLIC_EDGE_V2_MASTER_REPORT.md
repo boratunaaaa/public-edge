@@ -147,17 +147,28 @@ missing-price and delisting rates, 60/40 walk-forward, p-value, BH over the whol
 companies per bucket) plus the placebo control. Status per family: `PUBLIC_EDGE_SIGNAL_REGISTRY.csv`.
 
 ## EXISTING SIGNAL FAMILIES (revalidated on production, read-only)
-90-day horizon, company-equal share of episodes beating SPY. The placebo is the same issuer's own stock entered
-182 days **before** (pre) or **after** (post) the event, with no own event within 90 days.
+90-day horizon, company-equal share of episodes beating SPY.
+
+**Placebo control:** the same issuer's own stock, entered 182 days **before** (pre) or **after** (post) the event.
+The sample is one priced event per issuer per quarter. A control is dropped when **any** non-superseded event of the
+**same type** for that issuer (priced or not, sampled or not) lies within 90 days of the control date. This is tested
+in `test_placebo_excludes_controls_overlapping_unsampled_events`.
+
+Limitations (not yet controlled):
+* Events of **other** families may still overlap a control window.
+* Controls are conditioned on the issuer still trading at the later date.
+* The pre-event window can contain the drawdown that insiders buy into.
+
+Results were regenerated after the exclusion fix (`docs/v2_placebo_results_2026-09-28.jsonl`).
 
 | family | data quality | SPY beat 90d | median excess | vs own placebo (pre / post) | verdict |
 |---|---|---|---|---|---|
-| INSIDER_BUY | BLOCKED (12 % unresolved) | 41.9 % (4,460 cos) | -3.0 % | **+6.9 pp (p 9e-13) / +2.7 pp (p 0.002)** | below SPY; small positive residual vs same stock |
-| INSIDER_CLUSTER | BLOCKED (11 %) | 41.6 % | -3.1 % | +10.2 pp (p 4e-13) / +2.0 pp (p 0.049) | residual does not survive multiple testing |
+| INSIDER_BUY | BLOCKED (12 % unresolved) | 41.9 % (4,460 cos) | -3.0 % | **+7.0 pp (p 5e-13, 3,142 cos) / +3.3 pp (p 5e-5, 3,652 cos)** | below SPY; small positive residual vs same stock |
+| INSIDER_CLUSTER | BLOCKED (11 %) | 41.6 % | -3.1 % | +10.1 pp (p 5e-13) / +2.4 pp (p 0.019) | post residual is weak; needs the momentum-matched control and ledger adjustment |
 | MULTI_SIGNAL | PARTIAL | 36.9 % | -8.0 % | +8.1 pp (p 0.01) / +1.5 pp (ns) | timing effect only |
-| HOUSE_BUY | PARTIAL | 42.4 % | -1.9 % | -4.9 pp / +2.8 pp (ns) | no edge |
-| 10K_CHANGE | BLOCKED (23 %) | 34.7 % | -7.5 % | **-3.8 pp (p 0.004) / -3.6 pp (p 0.0005)** | consistently negative → **risk / avoid feature candidate** |
-| 13D | BLOCKED (28 %) | 36.3 % | -6.7 % | +1.9 pp (ns) | context only (decision kept) |
+| HOUSE_BUY | PARTIAL | 42.4 % | -1.9 % | -4.3 pp (p 0.055) / +2.8 pp (ns) | no edge |
+| 10K_CHANGE | BLOCKED (23 %) | 34.7 % | -7.5 % | **-3.7 pp (p 0.004) / -3.6 pp (p 0.0005)** | consistently negative → **risk / avoid feature candidate** |
+| 13D | BLOCKED (28 %) | 36.3 % | -6.7 % | +1.8 pp (ns) / +0.1 pp (ns) | context only (decision kept) |
 | ACTIVIST_CROWDING | PARTIAL | 27.2 % | -19.7 % | - | all 858 packs superseded |
 | NEWS | BLOCKED (21 %) | 33.0 % | -8.3 % | not run | underperforming |
 
@@ -247,10 +258,10 @@ books, reports and snapshots; IBKR interface (disabled).
 ## MOST IMPORTANT FINDINGS
 1. **The "below 50 % vs SPY" picture was mostly a universe effect.** The same small and micro caps beat SPY only
    ~31-45 % of the time in their own placebo windows. Measured against their own stock:
-   * insider buys still keep a small, statistically solid edge: +2.7 pp in the conservative post-event control,
-     3,676 companies;
-   * most of the +6.9 pp pre-event gap is buy-after-decline timing;
-   * cluster buys and multi-signal lose significance after the correction.
+   * insider buys keep a small, statistically solid edge: +3.3 pp in the post-event control, 3,652 companies;
+   * most of the +7.0 pp pre-event gap is buy-after-decline timing;
+   * cluster buys weaken to +2.4 pp and multi-signal loses significance;
+   * limitation: events of other families can still overlap a control window.
 2. **10-K material changes are consistently negative** against the same stock (-3.6 to -3.8 pp, both directions
    significant). This is a risk-feature candidate, not a buy signal.
 3. **Access, not parsing, limits TR and CA.** The legitimate TR route is free: the MKK API Portal (account + key).

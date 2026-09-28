@@ -39,9 +39,12 @@ def family_vs_placebo(conn: Connection, event_type: str, horizon: int = 90, limi
         ORDER BY e.issuer_cik, date_trunc('quarter', e.public_date), e.public_date
         {'LIMIT :lim' if limit else ''}"""), {"h": horizon, "et": event_type, "lim": limit}).mappings().all()
     spy = load_bars(conn, "SPY", date(2000, 1, 1), date.today())
+    # exclusion calendar: EVERY non-superseded event of this type for the issuer (also those without returns or
+    # not sampled by the one-per-quarter query above), so a control window never overlaps an own event
     own_dates = defaultdict(list)
-    for r in rows:
-        own_dates[r["issuer_cik"]].append(r["public_date"])
+    for cik, d in conn.execute(text("""SELECT issuer_cik, public_date FROM events WHERE event_type = :et
+                                        AND NOT superseded AND issuer_cik IS NOT NULL"""), {"et": event_type}):
+        own_dates[cik].append(d)
     per_co = defaultdict(lambda: [[], []])  # cik -> ([event wins], [control wins])
     skipped = 0
     for r in rows:

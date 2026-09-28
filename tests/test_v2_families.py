@@ -129,3 +129,26 @@ def test_placebo_difference_uses_same_issuer_earlier_window(engine, clean):
                                                 exit_price=1.1, ret=0.1, spy_ret=0.04, excess_ret=0.06))
         out = placebo.family_vs_placebo(c, "X_TEST", 90)
     assert out["companies"] == 1 and out["event_rate"] == 1.0 and out["placebo_rate"] == 0.0 and out["difference"] == 1.0
+
+
+
+def test_placebo_excludes_controls_overlapping_unsampled_events(engine, clean):
+    """A second event without returns (not in the sampling query) near the control date must block the control."""
+    from app.backtest import placebo
+    from app.db.models import event_returns, market_prices
+    d0 = date(2024, 1, 1)
+    with engine.begin() as c:
+        bars = []
+        for i in range(800):
+            d = d0 + timedelta(days=i)
+            if d.weekday() < 5:
+                bars += [{"symbol": s, "date": d, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "adj_close": 10.0, "volume": 1e6}
+                         for s in ("SPY", "TSTY")]
+        c.execute(market_prices.insert(), bars)
+        c.execute(text("""INSERT INTO events (id, event_type, dedupe_key, ticker, issuer_cik, public_date, title, payload, source_url, price_symbol)
+                          VALUES (1, 'X_TEST', 'k1', 'TSTY', '0000000778', '2025-09-02', 't', '{}', 'u', 'TSTY'),
+                                 (2, 'X_TEST', 'k2', 'TSTY', '0000000778', '2025-03-10', 't', '{}', 'u', 'TSTY')"""))
+        c.execute(event_returns.insert().values(event_id=1, horizon_days=90, entry_date=date(2025, 9, 3), entry_price=1, exit_date=date(2025, 12, 1),
+                                                exit_price=1.1, ret=0.1, spy_ret=0.0, excess_ret=0.1))
+        out = placebo.family_vs_placebo(c, "X_TEST", 90)
+    assert out["companies"] == 0 and out["skipped"] == 1  # control 2025-03-04 is 6 days from the unpriced event 2
