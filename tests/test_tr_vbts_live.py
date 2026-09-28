@@ -331,3 +331,67 @@ def test_malformed_page_that_turns_404_expires_and_retries_never_starve_new_inde
     with engine.connect() as c:
         st = job_state(c, V.LIVE_JOB)
     assert not st.get("pending_parse") and not st.get("pending_missing") and st["next_index"] == 1011
+
+
+def test_recovery_longer_than_late_window_starts_retry_windows_at_completion(engine, clean, cfg):
+    _setup(engine)
+    pages = {i: other(i) for i in range(1, 1400)}
+    pages.pop(1005)  # checked early in a long recovery
+    kap = FakeKap(pages, top=1000)
+    clock = Clock()
+    col = _col(engine, kap, cfg, clock)
+    col.poll()
+    kap.top = 1300
+
+    def slow_fetch(i):
+        clock.t += timedelta(minutes=5)  # 300 pages x 5 min = 25 h >> 6 h late window
+        return kap.fetch(i)
+    rec = V.recover_live_gap(engine, slow_fetch, latest_index=1300, clock=clock)
+    from app.db.store import job_state
+    with engine.connect() as c:
+        st = job_state(c, V.LIVE_JOB)
+    assert rec["recovered"] and st["pending_missing"]["1005"] == clock.t.isoformat()  # completion time, not start
+    kap.pages[1005] = vb(1005, "LATEA")  # published late, found on the next live poll
+    clock.t += timedelta(minutes=10)
+    r = col.poll()
+    assert r["events"] == 2 and any("KAP:1005" in k for k in _events(engine))
+
+
+def test_poll_and_recovery_are_serialised(engine, clean, cfg):
+    _setup(engine)
+    kap = FakeKap({i: other(i) for i in range(1, 1400)}, top=1000)
+    clock = Clock()
+    col = _col(engine, kap, cfg, clock)
+    col.poll()
+    kap.top = 1300
+    # (1) the shared lock: a recovery attempted while a poll holds the lock refuses to run
+    inner = {}
+
+    def latest_with_recovery():
+        inner["rec"] = V.recover_live_gap(engine, kap.fetch, latest_index=1300, clock=clock)
+        return kap.top
+    col_a = V.LiveVbtsCollector(engine, fetch=kap.fetch, latest_index=latest_with_recovery, cfg=cfg, clock=clock, sleep=lambda s: None)
+    assert col_a.poll()["outcome"] == "SOURCE_GAP" and inner["rec"] == {"recovered": False, "reason": "live poll running: retry recovery"}
+    # (2) versioned writes: a poll that read the checkpoint BEFORE a recovery committed cannot overwrite it afterwards
+    col_b = V.LiveVbtsCollector(engine, fetch=kap.fetch, latest_index=latest_with_recovery, cfg=cfg, clock=clock, sleep=lambda s: None)
+    with pytest.raises(V.CheckpointConflict):
+        col_b._poll()  # bypasses the lock on purpose: load -> (recovery commits) -> save SOURCE_GAP => conflict
+    assert inner["rec"]["recovered"]
+    from app.db.store import job_state
+    with engine.connect() as c:
+        st = job_state(c, V.LIVE_JOB)
+    assert st["next_index"] == 1301 and st["source_status"] == "RECOVERED_GAP"  # the recovery survived
+    assert col.poll()["outcome"] == "NO_NEW_EVENT"  # live resumes normally after the recovery
+
+
+def test_worker_records_nothing_on_lock_or_conflict(engine, clean, monkeypatch):
+    from app.jobs import worker
+    monkeypatch.setenv("PE_VBTS_MIN_SPACING_S", "0")
+    kap = FakeKap({i: other(i) for i in range(1, 100)}, top=50)
+    with engine.connect() as holder:
+        holder.execute(text("SELECT pg_advisory_lock(:k)"), {"k": V.LIVE_LOCK})
+        holder.commit()
+        worker.run_source(engine, V.VbtsSource(fetch=kap.fetch, latest_index=kap.latest))
+        holder.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": V.LIVE_LOCK})
+        holder.commit()
+    assert _health(engine, "tr_vbts") == (None, None) and kap.calls == []

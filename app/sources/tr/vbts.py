@@ -352,7 +352,7 @@ class VbtsSource:
             raise Unavailable(f"live gap {out.get('gap')} indexes > live_max_gap: run recover_live_gap() explicitly")
         if o == "SOURCE_PARSE_ERROR":  # pages were read but could not be parsed: never a quiet "0 events" day
             raise SourceParseError(f"{out.get('parse_errors')} disclosure page(s) could not be parsed (kept for re-probe)")
-        if o == "BACKING_OFF":  # no request was made: no source observation is recorded at all
+        if o in ("BACKING_OFF", "LOCKED", "CHECKPOINT_CONFLICT"):  # nothing observed: no health record at all
             return RunResult(items=0, events=[], skipped=True, watermark={"outcome": o, "until": out.get("until")})
         # events carries the COUNT of newly stored measure records (the worker only uses its length)
         return RunResult(items=out.get("scanned", 0), events=[0] * out.get("events", 0), watermark={"outcome": o, **out})
@@ -374,6 +374,23 @@ import os as _os
 import time as _time
 
 LIVE_JOB = "tr_vbts_live"
+LIVE_LOCK = 7_120_101  # pg advisory lock shared by the live poll and recover_live_gap
+
+
+class CheckpointConflict(RuntimeError):
+    """The live checkpoint changed since it was read (another writer committed first): nothing is overwritten."""
+
+
+def save_checkpoint(c, st: dict) -> None:
+    """Versioned conditional write: commits only when the stored version is the one this writer read (row lock),
+    then bumps it. Every writer of the live checkpoint (poll, recovery) goes through here."""
+    from app.db.store import save_job_state
+    row = c.execute(text("SELECT state FROM processing_jobs WHERE name = :n FOR UPDATE"), {"n": LIVE_JOB}).scalar()
+    stored = int((row or {}).get("version") or 0)
+    if stored != int(st.get("version") or 0):
+        raise CheckpointConflict(f"live checkpoint version {stored} != {st.get('version')}")
+    st["version"] = stored + 1
+    save_job_state(c, LIVE_JOB, st)
 OUTCOMES = ("NEW_EVENTS", "NO_NEW_EVENT", "SOURCE_RATE_LIMITED", "SOURCE_UNAVAILABLE", "SOURCE_PARSE_ERROR",
             "SOURCE_SCHEMA_CHANGED", "SOURCE_GAP", "BACKING_OFF")
 
@@ -483,11 +500,26 @@ class LiveVbtsCollector:
 
     @staticmethod
     def _save(c, st: dict) -> None:
-        from app.db.store import save_job_state
-        save_job_state(c, LIVE_JOB, st)
+        save_checkpoint(c, st)
 
     # ---------------------------------------------------------------- one poll
     def poll(self) -> dict:
+        """One poll under the live-checkpoint lock (a running gap recovery makes it skip; a concurrent writer makes its
+        conditional checkpoint write fail -> CHECKPOINT_CONFLICT, nothing overwritten)."""
+        with self.engine.connect() as lock_conn:
+            if not lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": LIVE_LOCK}).scalar():
+                lock_conn.commit()
+                return {"outcome": "LOCKED"}
+            lock_conn.commit()
+            try:
+                return self._poll()
+            except CheckpointConflict:
+                return {"outcome": "CHECKPOINT_CONFLICT"}
+            finally:
+                lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": LIVE_LOCK})
+                lock_conn.commit()
+
+    def _poll(self) -> dict:
         now = self.clock()
         st = self.load()
         m = _day_metrics(st, now)
@@ -653,28 +685,41 @@ def recover_live_gap(engine, fetch=None, *, latest_index: int | None = None, clo
     and only then - move the live checkpoint to latest + 1. Missing / unparseable indexes of the gap are handed to the
     live re-probe sets (with the recovery time), so a late document inside the gap is still picked up."""
     from app.db.store import job_state, save_job_state
-    now = (clock or (lambda: datetime.now(timezone.utc)))()
+    clock = clock or (lambda: datetime.now(timezone.utc))
+    now = clock()
     if fetch is None:  # the same spaced, error-mapped fetch as the live collector (6 s, 429 -> RateLimited)
         fetch = LiveVbtsCollector(engine).fetch
-    with engine.connect() as c:
-        st = job_state(c, LIVE_JOB)
-    start = st.get("next_index")
-    if start is None:
-        raise ValueError("no live checkpoint yet: nothing to recover")
-    end = latest_index if latest_index is not None else VbtsSource().latest_index()
-    rep = collect_range(engine, start, end, fetch, first_seen_at=now)  # HISTORICAL: raises on block / schema change
-    covered = rep["last_index"] == end and rep["scanned"] == end - start + 1
-    if not covered:
-        return {"recovered": False, "reason": "gap not fully scanned", **rep}
-    with engine.begin() as c:
-        cur = job_state(c, LIVE_JOB)
-        if cur.get("next_index") != start:  # the live poll moved meanwhile: do not overwrite it
-            return {"recovered": False, "reason": "live checkpoint changed during recovery", **rep}
-        pm = dict(cur.get("pending_missing") or {})
-        pm.update({str(i): now.isoformat() for i in rep["missing_indexes"]})
-        pp = dict(cur.get("pending_parse") or {})
-        pp.update({str(i): 1 for i in rep["unparseable_indexes"]})
-        cur.update(next_index=end + 1, pending_missing=pm, pending_parse=pp, source_status="RECOVERED_GAP",
-                   last_gap_recovery={"from": start, "to": end, "at": now.isoformat(), "stored": rep["stored"]})
-        save_job_state(c, LIVE_JOB, cur)
-    return {"recovered": True, "from": start, "to": end, **rep}
+    with engine.connect() as lock_conn:
+        # mutual exclusion with the live poll for the whole recovery (the poll skips while it runs)
+        if not lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": LIVE_LOCK}).scalar():
+            lock_conn.commit()
+            return {"recovered": False, "reason": "live poll running: retry recovery"}
+        lock_conn.commit()
+        try:
+            with engine.connect() as c:
+                st = job_state(c, LIVE_JOB)
+            start = st.get("next_index")
+            if start is None:
+                raise ValueError("no live checkpoint yet: nothing to recover")
+            end = latest_index if latest_index is not None else VbtsSource().latest_index()
+            rep = collect_range(engine, start, end, fetch, first_seen_at=now)  # HISTORICAL: raises on block / schema change
+            covered = rep["last_index"] == end and rep["scanned"] == end - start + 1
+            if not covered:
+                return {"recovered": False, "reason": "gap not fully scanned", **rep}
+            done_at = clock()  # late windows start when the recovery hands the gap over, not when it started
+            with engine.begin() as c:
+                cur = job_state(c, LIVE_JOB)
+                if cur.get("next_index") != start:
+                    return {"recovered": False, "reason": "live checkpoint changed during recovery", **rep}
+                pm = dict(cur.get("pending_missing") or {})
+                pm.update({str(i): done_at.isoformat() for i in rep["missing_indexes"]})
+                pp = dict(cur.get("pending_parse") or {})
+                pp.update({str(i): 1 for i in rep["unparseable_indexes"]})
+                cur.update(next_index=end + 1, pending_missing=pm, pending_parse=pp, source_status="RECOVERED_GAP",
+                           last_gap_recovery={"from": start, "to": end, "started": now.isoformat(), "finished": done_at.isoformat(),
+                                              "stored": rep["stored"]})
+                save_checkpoint(c, cur)  # conditional on the version read in this same transaction
+            return {"recovered": True, "from": start, "to": end, **rep}
+        finally:
+            lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": LIVE_LOCK})
+            lock_conn.commit()
