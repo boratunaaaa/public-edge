@@ -1,4 +1,5 @@
 """V2 candidate families: point-in-time event generation, identity gates, validation standard, multiple testing."""
+import json
 import math
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -337,3 +338,29 @@ def test_13f_interrupted_ingestion_retry_gives_the_same_events(engine, clean, mo
                        + " RESTART IDENTITY CASCADE"))
     interrupted = _run_13f(engine, monkeypatch, fail_q2_after_batches=1)
     assert uninterrupted and interrupted == uninterrupted
+
+
+def test_thirteen_f_period_equals_per_filing(engine, clean):
+    """The set-based path must produce exactly the events of the per-filing path (same keys, types, fields)."""
+    from app.signals.v2_families import thirteen_f, thirteen_f_period
+    from app.sources.us import form13f as F
+    for q in ("13f_2026q1_mini.zip", "13f_2026q2_mini.zip"):
+        F.store(engine, F.parse_dataset(str(FX / "us" / q)), source=q)
+    with engine.begin() as c:
+        for q in ("13f_2026q1_mini.zip", "13f_2026q2_mini.zip"):
+            for h in F.parse_dataset(str(FX / "us" / q))["holdings"]:
+                c.execute(text("""INSERT INTO activist_filings (accession, issuer_cik, cusip, filed_date, form_type, is_13d, is_amendment, source_url)
+                                  VALUES (:a, :c, :cu, '2025-01-01', 'SC 13D', true, false, 'u') ON CONFLICT DO NOTHING"""),
+                          {"a": f"X-{h['cusip']}", "c": f"{abs(hash(h['cusip'])) % 10**9:010d}", "cu": h["cusip"]})
+        accs = c.execute(text("SELECT accession FROM inst_filings_13f WHERE period = '2026-06-30' AND submission_type = '13F-HR'")).scalars().all()
+        specs = thirteen_f_period(c, date(2026, 6, 30), accs, is_backfill=True, dry_run=True)
+        assert c.execute(text("SELECT count(*) FROM events")).scalar() == 0  # dry run writes nothing
+        for a in accs:
+            thirteen_f(c, a, is_backfill=True)
+        ev = {r[0]: r for r in c.execute(text("""SELECT dedupe_key, event_type, public_date, issuer_cik, available_at, title, payload
+                                                   FROM events""")).all()}
+    assert specs and {s["dedupe_key"] for s in specs} == set(ev)
+    for s in specs:
+        e = ev[s["dedupe_key"]]
+        assert (s["event_type"], s["public_date"], s["issuer_cik"], s["available_at"], s["title"]) == tuple(e[1:6])
+        assert json.loads(json.dumps(s["payload"])) == e[6]

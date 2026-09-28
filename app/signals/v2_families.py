@@ -190,3 +190,96 @@ def accumulation_events(conn: Connection, period, *, is_backfill: bool, loaded: 
         if eid:
             out.append(eid)
     return out
+
+
+def thirteen_f_period(conn: Connection, period, originals: list[str], *, is_backfill: bool, dry_run: bool = False) -> list[dict]:
+    """Set-based equivalent of thirteen_f() for many original filings of ONE report period: two queries for the whole
+    period instead of one position_changes() per filing. Classification is the same Python code path (NEW / EXIT /
+    DECREASE / INCREASE / HOLD on the same effective reports), so the events are identical - verified by
+    test_thirteen_f_period_equals_per_filing and by a dry-run comparison on production before use.
+    Returns event specs (dedupe_key, event_type, fields); dry_run=True writes nothing."""
+    if not originals:
+        return []
+    fil = {r["accession"]: dict(r) for r in conn.execute(text("""
+        SELECT accession, manager_cik, manager_name, period, filed_date, available_at, entries, submission_type
+        FROM inst_filings_13f WHERE accession = ANY(:a)"""), {"a": originals}).mappings()}
+    managers = sorted({f["manager_cik"] for f in fil.values() if f["period"] == period and f["submission_type"] == "13F-HR"
+                       and f["entries"] and 10 <= f["entries"] <= 150})
+    rows = conn.execute(text("""
+        WITH f AS (SELECT manager_cik, accession, period, filed_date, submission_type, amendment_type FROM inst_filings_13f
+                   WHERE manager_cik = ANY(:m) AND period <= :p AND period >= CAST(:p AS date) - 120),
+        eff AS (SELECT DISTINCT ON (manager_cik, period) manager_cik, period, accession, filed_date FROM f
+                WHERE submission_type = '13F-HR' OR amendment_type = 'RESTATEMENT'
+                ORDER BY manager_cik, period, filed_date DESC, accession DESC),
+        two AS (SELECT * FROM (SELECT eff.*, row_number() OVER (PARTITION BY manager_cik ORDER BY period DESC) rn FROM eff) x
+                WHERE rn <= 2)
+        SELECT e.manager_cik, e.period, e.filed_date, h.cusip, max(h.issuer_name) issuer_name, sum(h.shares) shares, sum(h.value) value
+        FROM two e JOIN inst_holdings_13f h ON h.accession = e.accession
+        GROUP BY 1, 2, 3, 4"""), {"m": managers, "p": period}).mappings().all()
+    by_m: dict[str, list] = {}
+    for r in rows:
+        by_m.setdefault(r["manager_cik"], []).append(r)
+    cik_cache: dict[str, tuple] = {}
+    tick_cache: dict[str, str | None] = {}
+    specs = []
+    for acc in originals:
+        f = fil.get(acc)
+        if not f or f["submission_type"] != "13F-HR" or not f["entries"] or not (10 <= f["entries"] <= 150) or f["period"] != period:
+            continue
+        mrows = by_m.get(f["manager_cik"], [])
+        periods = sorted({r["period"] for r in mrows})
+        if not periods or periods[-1] != period:
+            continue
+        cur = {r["cusip"]: r for r in mrows if r["period"] == period}
+        prev = {r["cusip"]: r for r in mrows if len(periods) > 1 and r["period"] == periods[0]}
+        if not prev:
+            continue  # FIRST_REPORT: no event
+        tot = sum(r["value"] or 0 for r in cur.values()) or None
+        for cu in set(cur) | set(prev):
+            a, b = cur.get(cu), prev.get(cu)
+            if a and not b:
+                kind = "NEW"
+            elif b and not a:
+                kind = "EXIT"
+            elif a["shares"] > b["shares"] * 1.1:
+                kind = "INCREASE"
+            elif a["shares"] < b["shares"] * 0.9:
+                kind = "DECREASE"
+            else:
+                kind = "HOLD"
+            shares, prev_shares = (a["shares"] if a else 0), (b["shares"] if b else 0)
+            weight = (a["value"] / tot) if (a and tot) else 0.0
+            name = (a or b)["issuer_name"]
+            if kind not in ("NEW", "EXIT", "DECREASE") or (kind == "NEW" and weight < NEWPOS_WEIGHT) or (kind != "NEW" and not prev_shares):
+                continue
+            if cu not in cik_cache:
+                cik_cache[cu] = cusip_to_cik(conn, cu)
+            cik, conf, _why = cik_cache[cu]
+            if not cik:
+                continue
+            if cik not in tick_cache:
+                tick_cache[cik] = _ticker(conn, cik)
+            if kind == "NEW":
+                et, key = "INST_13F_NEW_POSITION", f"13FN:{acc}:{cu}"
+                title = f"{f['manager_name']} opened {weight:.1%} position in {name} (Q {f['period']})"
+                payload = {"manager_cik": f["manager_cik"], "manager": f["manager_name"], "period": str(f["period"]),
+                           "weight": weight, "shares": shares, "cusip": cu, "entries": f["entries"]}
+                url = f"https://www.sec.gov/Archives/edgar/data/{int(f['manager_cik'])}/{acc.replace('-', '')}/"
+                fam = "US_13F_NEW_POSITION"
+            else:
+                et = "INST_13F_EXIT" if kind == "EXIT" else "INST_13F_DECREASE"
+                key = f"13F{et[-4:]}:{acc}:{cu}"
+                title = f"{f['manager_name']} {'exited' if kind == 'EXIT' else 'cut'} {name} (Q {f['period']})"
+                payload = {"manager_cik": f["manager_cik"], "manager": f["manager_name"], "period": str(f["period"]),
+                           "shares": shares, "prev_shares": prev_shares, "cusip": cu}
+                url = "https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets"
+                fam = "US_13F_CONTEXT"
+            spec = {"event_type": et, "dedupe_key": key, "public_date": f["filed_date"], "issuer_cik": cik, "ticker": tick_cache[cik],
+                    "company_name": name, "title": title, "payload": payload, "source_url": url, "event_family": fam,
+                    "identity_confidence": conf, "source_accession": acc, "available_at": f["available_at"]}
+            specs.append(spec)
+            if not dry_run:
+                create_event(conn, event_type=et, dedupe_key=key, public_date=f["filed_date"], ticker=spec["ticker"], issuer_cik=cik,
+                             company_name=name, title=title, payload=payload, source_url=url, is_backfill=is_backfill, event_family=fam,
+                             identity_confidence=conf, source_accession=acc, available_at_override=f["available_at"], date_quality="date")
+    return specs
