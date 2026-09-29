@@ -25,7 +25,7 @@ import os
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
