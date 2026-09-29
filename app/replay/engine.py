@@ -28,11 +28,32 @@ from app.replay.config import ReplayConfig, code_commit
 from app.replay.errors import ReplayLeakage
 from app.replay.source import SourceData
 from app.replay.store import ReplayStore
-from app.replay.visibility import Guards, ReplayPriceProvider, Stager, Visibility, check_state, identity_check
+from app.replay.visibility import (Guards, PriceIndex, ReplayPriceProvider, Stager, Visibility, check_state,
+                                   identity_check)
 
 PRE_OPEN, OPEN_T = time(9, 0), time(9, 30)
 EOD_LAG = timedelta(hours=2)
 RESEARCH_APPROVER = "replay:research_auto"
+RISK_COMPLETE, RISK_PARTIAL, RISK_UNAVAILABLE = "RISK_HISTORY_COMPLETE", "RISK_HISTORY_PARTIAL", "RISK_HISTORY_UNAVAILABLE"
+# production decisions that read risk-label history (discovery_risks / thesis_changes); without that history they
+# silently see "no risk" - the run is then not comparable with a live verdict
+RISK_DEPENDENT_GATES = ("gate:SEVERE_FINANCING_RISK", "gate:LOW_LIQUIDITY(risk label LOW_LIQUIDITY=HIGH)",
+                        "sizing:HIGH_FINANCING_RISK cap", "exit:D_THESIS thesis invalidation")
+
+
+def risk_history(cfg: ReplayConfig, src: SourceData) -> dict:
+    """Explicit coverage of the risk-label history over the run's window (the replay never invents past labels)."""
+    s, e = cfg.start.astimezone(NY).date(), cfg.end.astimezone(NY).date()
+    starts = {k: src.risk_coverage.get(k) for k in ("discovery_risks", "thesis_changes")}
+    if all(v is not None and v <= s for v in starts.values()):
+        flag = RISK_COMPLETE
+    elif any(v is not None and v <= e for v in starts.values()):
+        flag = RISK_PARTIAL
+    else:
+        flag = RISK_UNAVAILABLE
+    return {"flag": flag, "history_starts": starts,
+            "gates_not_applied": [] if flag == RISK_COMPLETE else list(RISK_DEPENDENT_GATES),
+            "comparability": "FULL" if flag == RISK_COMPLETE else "LIMITED"}
 
 
 def sessions(start: date, end: date) -> list[date]:
@@ -91,8 +112,10 @@ class ReplayRun:
         self.store = ReplayStore(database_url, config.schema)
         self.guards = Guards()
         self.vis = Visibility()
-        self.stager = Stager(source, self.guards)
-        self.provider = ReplayPriceProvider(source, self.vis, self.guards)
+        self.index = PriceIndex(source)
+        self.stager = Stager(source, self.guards, self.index)
+        self.provider = ReplayPriceProvider(source, self.vis, self.guards, self.index)
+        self.risk = risk_history(config, source)
         self.clock = ReplayClock(_at(config.start.astimezone(NY).date(), PRE_OPEN) - timedelta(minutes=1))
         self.result = RunResult(config.replay_id, "CREATED")
 
@@ -110,6 +133,7 @@ class ReplayRun:
         from app.entities.registry import resolver
         with self.store.engine.begin() as c:
             self.stager.stage_reference(c, today)
+            self.stager.stage_risks(c, self.clock.now())
             ciks = set(c.execute(select(events.c.issuer_cik).where(events.c.id.in_(new_ids))).scalars()) if new_ids else set()
             if ciks and cap is not None:
                 self.stager.build_universe(c, today, ciks, cap)
@@ -143,11 +167,13 @@ class ReplayRun:
         from app.paper.proposals import expire
         cfg = self.cfg
         prov = {"config": cfg.as_dict(), "config_hash": cfg.config_hash(), "code_commit": code_commit(),
-                "data_snapshot": self.src.snapshot_id(), "data_label": self.src.label, "strategies": list(STRATEGIES)}
+                "data_snapshot": self.src.snapshot_id(), "data_label": self.src.label, "strategies": list(STRATEGIES),
+                "risk_history": self.risk}
         self.result.provenance = prov
         self.store.create()
         self.store.record(replay_id=cfg.replay_id, status="RUNNING", period_role=cfg.period_role, config=prov["config"],
-                          config_hash=prov["config_hash"], code_commit=prov["code_commit"], data_snapshot=prov["data_snapshot"])
+                          config_hash=prov["config_hash"], code_commit=prov["code_commit"], data_snapshot=prov["data_snapshot"],
+                          comparability=self.risk["comparability"])
         days = sessions(cfg.start.astimezone(NY).date(), cfg.end.astimezone(NY).date())
         try:
             with use_clock(self.clock), _patched(self.provider, cfg.seed):
@@ -188,10 +214,11 @@ class ReplayRun:
         self.store.record(replay_id=cfg.replay_id, status=self.result.status, period_role=cfg.period_role,
                           config=prov["config"], config_hash=prov["config_hash"], code_commit=prov["code_commit"],
                           data_snapshot=prov["data_snapshot"], result=self.summary(), leakage={"log": self.result.leakage},
-                          finished=True)
+                          finished=True, comparability=self.risk["comparability"])
         return self.result
 
     def summary(self) -> dict:
         r = self.result
         return {"status": r.status, "steps": r.steps, "events_seen": r.events_seen, "proposals": r.proposals,
-                "rejected": r.rejected, "reviews": len(r.reviews), "metrics": r.metrics, "provenance": r.provenance}
+                "rejected": r.rejected, "reviews": len(r.reviews), "risk_history": self.risk,
+                "reference_writes": self.stager.writes, "metrics": r.metrics, "provenance": r.provenance}

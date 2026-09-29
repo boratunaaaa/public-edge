@@ -11,8 +11,8 @@ from pathlib import Path
 
 PERIOD_ROLES = ("development", "validation", "holdout")
 STEP_MODELS = ("SESSION_3STEP",)  # PRE_OPEN 09:00 ET signal | OPEN 09:30 execution | CLOSE 16:00 ET + EOD lag
-EXECUTION_MODEL_VERSION = "paper.fills.v2+ledger.open_next_session"
-SIGNAL_VERSION = "paper.proposals.gate.v2"
+EXECUTION_MODEL_VERSION = "paper.fills.v3-prior-session-adv+ledger.retry-within-validity"
+SIGNAL_VERSION = "paper.proposals.gate.v2.1-adv-any-cap"
 _ID = re.compile(r"^[a-z0-9_]{1,40}$")
 
 

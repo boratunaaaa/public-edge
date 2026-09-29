@@ -43,6 +43,19 @@ STRATEGIES = {
     "E_STOP_TIME": ("PUBLIC EDGE PAPER E-STOP", 90, "STOP"),
 }
 STOP_PCT = 0.15
+# a BUY order that found no fillable session (no opening trade / no prior-volume estimate) within this many NYSE
+# sessions from its first eligible one is cancelled - it never stays PENDING forever. Exits never expire.
+ORDER_VALID_SESSIONS = int(_f("PAPER_ORDER_VALID_SESSIONS", 5))
+
+
+def sessions_since(first: date, today: date) -> int:
+    """NYSE sessions in [first, today] (a halted / bar-less session still counts: the order was live on it)."""
+    from app.marketdata.calendar import is_trading_day
+    n, d = 0, first
+    while d <= today:
+        n += is_trading_day(d)
+        d += timedelta(days=1)
+    return n
 
 
 def slippage_bps(market_cap: float | None, bucket: str | None) -> float:
@@ -183,11 +196,19 @@ def fill_orders(conn: Connection, today: date) -> dict:
     out = {"filled": 0, "cancelled": 0, "waiting": 0}
     rows = conn.execute(select(paper_orders).where(and_(paper_orders.c.status == "PENDING", paper_orders.c.not_before <= today))
                         .order_by(paper_orders.c.id)).mappings().all()
+    from app.paper.fills import quote
     for o in rows:
         fq = None
         bars = [b for b in _bars(conn, o["ticker"], o["not_before"], today) if b.date >= o["not_before"]]
+        if o["side"] == "BUY":  # only sessions inside the order's validity may fill it
+            bars = [b for b in bars if sessions_since(o["not_before"], b.date) <= ORDER_VALID_SESSIONS]
         if not bars:
-            out["waiting"] += 1
+            if o["side"] == "BUY" and sessions_since(o["not_before"], today) > ORDER_VALID_SESSIONS:
+                conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
+                    status="CANCELLED", note=f"expired: no fillable session within {ORDER_VALID_SESSIONS} sessions"))
+                out["cancelled"] += 1
+            else:
+                out["waiting"] += 1
             continue
         b = bars[0]
         acct = conn.execute(select(paper_accounts).where(paper_accounts.c.id == o["account_id"])).mappings().first()
@@ -204,13 +225,24 @@ def fill_orders(conn: Connection, today: date) -> dict:
                     status="CANCELLED", note="source event superseded"))
                 out["cancelled"] += 1
                 continue
-            from app.paper.fills import quote
-            prior = _bars(conn, o["ticker"], b.date - timedelta(days=45), b.date - timedelta(days=1))
-            nav = nav_of(conn, o["account_id"], b.date - timedelta(days=1))
-            want = min(o["target_pct"] * nav, cash_of(conn, o["account_id"]) - comm)
-            fq = quote(prior, b, want / b.open if b.open else 0.0, bps)
-            if fq is None:  # no volume on the fill day: never assume a fill
-                out["waiting"] += 1
+            # first session (within validity) with an opening trade and a prior-session liquidity estimate; the
+            # sizing uses only what was known at that open (fills.v3). A session without one is skipped, not fatal.
+            hist = _bars(conn, o["ticker"], o["not_before"] - timedelta(days=45), today)
+            for cand in bars:
+                prior = [x for x in hist if cand.date - timedelta(days=45) <= x.date < cand.date]
+                nav = nav_of(conn, o["account_id"], cand.date - timedelta(days=1))
+                want = min(o["target_pct"] * nav, cash_of(conn, o["account_id"]) - comm)
+                fq = quote(prior, cand, want / cand.open if cand.open else 0.0, bps)
+                if fq is not None:
+                    b = cand
+                    break
+            if fq is None:  # no fillable session yet: never assume a fill
+                if sessions_since(o["not_before"], today) > ORDER_VALID_SESSIONS:
+                    conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
+                        status="CANCELLED", note=f"expired: no fillable session within {ORDER_VALID_SESSIONS} sessions"))
+                    out["cancelled"] += 1
+                else:
+                    out["waiting"] += 1
                 continue
             bps = fq.cost_bps
             px = b.open * (1 + bps / 1e4)
@@ -238,14 +270,14 @@ def fill_orders(conn: Connection, today: date) -> dict:
             pos = dict(conn.execute(select(paper_positions).where(paper_positions.c.id == o["position_id"])).mappings().first())
             series = fresh_bars(conn, o["ticker"], pos["entry_date"], today) or []
             g = Growth(series, pos["entry_date"], _entry_open(conn, pos))
-            sb = next((x for x in series if x.date >= o["not_before"]), None) if g.ok else None
+            # exits never expire, but a session without an opening trade cannot sell either: first one that has it
+            sb = next((x for x in series if x.date >= o["not_before"] and x.open and x.volume), None) if g.ok else None
             if sb is None:  # no consistent series yet: the sale waits, it is never priced from the cache
                 out["waiting"] += 1
                 continue
             b = sb
-            from app.paper.fills import quote
             prior = [x for x in series if x.date < b.date]
-            fq = quote(prior, b, pos["shares"], bps) if b.volume else None
+            fq = quote(prior, b, pos["shares"], bps)
             bps = fq.cost_bps if fq else max(bps, 100.0)  # exits are never skipped; unknown volume = illiquid cost
             px = g.open(b) * (1 - bps / 1e4)
             shares = pos["shares"]

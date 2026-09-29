@@ -64,6 +64,9 @@ class ReplayStore:
                 config JSONB NOT NULL, config_hash TEXT NOT NULL, code_commit TEXT NOT NULL, data_snapshot TEXT NOT NULL,
                 result JSONB, leakage JSONB, sealed BOOLEAN NOT NULL DEFAULT false,
                 started_at TIMESTAMPTZ NOT NULL, finished_at TIMESTAMPTZ)"""))
+            # FULL only when the risk-label history covers the window (engine.risk_history); LIMITED runs never feed a
+            # holdout verdict as "fully comparable" (campaign.holdout_verdict_inputs)
+            c.execute(text(f"ALTER TABLE {META_SCHEMA}.replay_runs ADD COLUMN IF NOT EXISTS comparability TEXT"))
         metadata.create_all(self.engine)
         with self.engine.connect() as c:  # belt and braces: every table really is in the run's schema
             where = c.execute(text("""SELECT DISTINCT table_schema FROM information_schema.tables
@@ -73,18 +76,21 @@ class ReplayStore:
                 raise ReplayIsolationError(f"replay tables resolved to {where}, expected [{self.schema}]")
 
     def record(self, *, replay_id: str, status: str, period_role: str, config: dict, config_hash: str, code_commit: str,
-               data_snapshot: str, result: dict | None = None, leakage: dict | None = None, finished: bool = False) -> None:
+               data_snapshot: str, result: dict | None = None, leakage: dict | None = None, finished: bool = False,
+               comparability: str = "LIMITED") -> None:
         now = datetime.now(timezone.utc)  # wall clock on purpose: bookkeeping of the run, never an input
         with self.admin.begin() as c:
             c.execute(text(f"""INSERT INTO {META_SCHEMA}.replay_runs (replay_id, schema_name, status, period_role, config,
-                                   config_hash, code_commit, data_snapshot, result, leakage, sealed, started_at, finished_at)
+                                   config_hash, code_commit, data_snapshot, result, leakage, sealed, started_at, finished_at,
+                                   comparability)
                                VALUES (:i, :s, :st, :r, CAST(:c AS jsonb), :h, :cc, :d, CAST(:res AS jsonb), CAST(:lk AS jsonb),
-                                       :sealed, :now, :fin)
+                                       :sealed, :now, :fin, :cmp)
                                ON CONFLICT (replay_id) DO UPDATE SET status = :st, result = CAST(:res AS jsonb),
-                                   leakage = CAST(:lk AS jsonb), finished_at = :fin, sealed = :sealed"""),
+                                   leakage = CAST(:lk AS jsonb), finished_at = :fin, sealed = :sealed, comparability = :cmp"""),
                       {"i": replay_id, "s": self.schema, "st": status, "r": period_role, "c": json.dumps(config),
                        "h": config_hash, "cc": code_commit, "d": data_snapshot,
                        "res": json.dumps(result, default=str) if result is not None else None,
                        "lk": json.dumps(leakage, default=str) if leakage is not None else None,
                        # a holdout run is sealed: its results are never tuning input (campaign.tuning_results)
-                       "sealed": period_role == "holdout", "now": now, "fin": now if finished else None})
+                       "sealed": period_role == "holdout", "now": now, "fin": now if finished else None,
+                       "cmp": comparability})

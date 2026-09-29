@@ -3,6 +3,7 @@ point-in-time identity check and the leakage guards."""
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -12,12 +13,12 @@ from sqlalchemy.engine import Connection
 
 from app import http
 from app.core import clock
-from app.db.models import (companies, corporate_actions, events, security_master, security_symbols,
+from app.db.models import (companies, corporate_actions, discovery_risks, events, security_master, security_symbols,
                            tickers, universe_snapshots)
 from app.entities.names import normalize_company
 from app.marketdata.provider import Bar, MarketDataProvider, shares_as_of
 from app.replay.errors import ReplayLeakage
-from app.replay.source import SourceData
+from app.replay.source import BENCHMARK_SERIES, SourceData
 
 SYMBOL_GRACE_DAYS = 120  # same grace the security master uses for a filing-observed symbol
 UNIVERSE_STALE_DAYS = 400  # production build_universe: an older cover page is not a market-cap basis
@@ -50,24 +51,73 @@ class Guards:
         self.reviews.append({"event_id": event_id, "reason": reason, "at": clock.now().isoformat()})
 
 
+class PriceIndex:
+    """price identity = issuer + valid symbol period + date. A requested symbol is resolved to the issuer that used it
+    on the request's anchor date (symbol periods observed up to the simulated date only), then served from ONE stored
+    series of that issuer (catalog: SourceData.series), restricted to that symbol period. So a renamed security
+    (SSNT in 2021, stored by the vendor under today's QXO) is found, and a reused ticker never splices two issuers."""
+
+    def __init__(self, src: SourceData):
+        self.src = src
+        self.periods: dict[str, list[dict]] = defaultdict(list)
+        for r in src.symbols:
+            if r.get("source") != "sec_registry":
+                self.periods[r["symbol"]].append(r)
+        from app.replay.source import derive_series
+        self.catalog: dict[str, list[dict]] = defaultdict(list)
+        explicit = {(x["cik"], x["series"]) for x in src.series}
+        for x in list(src.series) + [d for d in derive_series(src.symbols, src.bars) if (d["cik"], d["series"]) not in explicit]:
+            self.catalog[x["cik"]].append(x)
+
+    def owner(self, symbol: str, on: date, today: date) -> tuple[str | None, list[dict]]:
+        g = timedelta(days=SYMBOL_GRACE_DAYS)
+        rows = [r for r in self.periods.get(symbol, []) if r["first_seen"] <= today]
+        hits = {r["cik"] for r in rows if r["first_seen"] - g <= on <= min(r["last_seen"], today) + g}
+        if len(hits) != 1:
+            return None, []  # unknown or ambiguous owner: no price rather than a guess
+        cik = next(iter(hits))
+        return cik, [r for r in rows if r["cik"] == cik]
+
+    def bars(self, symbol: str, start: date, end: date, today: date) -> list[Bar] | None:
+        if symbol in BENCHMARK_SERIES:
+            b = self.src.bars.get(symbol)
+            return None if b is None else [x for x in b if start <= x.date <= end]
+        cik, rows = self.owner(symbol, min(end, today), today)
+        if cik is None:
+            return None
+        g = timedelta(days=SYMBOL_GRACE_DAYS)
+        lo = min(r["first_seen"] for r in rows) - g
+        hi = max(min(r["last_seen"], today) for r in rows) + g
+        # the symbol's own series first, then the issuer's other series (e.g. the vendor's current symbol)
+        for x in sorted(self.catalog.get(cik, []), key=lambda x: (x["series"] != symbol, x["series"])):
+            got = [b for b in self.src.bars.get(x["series"], [])
+                   if start <= b.date <= end and lo <= b.date <= hi
+                   and (x.get("valid_from") is None or b.date >= x["valid_from"])
+                   and (x.get("valid_to") is None or b.date <= x["valid_to"])]
+            if got:
+                return got  # ONE series: never a mix of adjustment bases
+        return []
+
+
 class ReplayPriceProvider(MarketDataProvider):
-    """Serves the input snapshot's bars. Never returns a bar after the visibility cap; a request that reaches past the
-    simulated DATE is itself a leak (no production path asks for tomorrow) and fails the run."""
+    """Serves the input snapshot through the PriceIndex. Never returns a bar after the visibility cap; a request that
+    reaches past the simulated DATE is itself a leak (no production path asks for tomorrow) and fails the run."""
     name = "replay"
 
-    def __init__(self, src: SourceData, vis: Visibility, guards: Guards):
+    def __init__(self, src: SourceData, vis: Visibility, guards: Guards, index: PriceIndex | None = None):
         self.src, self.vis, self.guards = src, vis, guards
+        self.index = index or PriceIndex(src)
         self.requests = 0
 
     def get_historical_prices(self, symbol: str, start: date, end: date) -> list[Bar]:
         self.requests += 1
         if end > clock.today():
             self.guards.fail("FUTURE_PRICE_REQUEST", f"{symbol}: requested up to {end}, simulated date {clock.today()}")
-        bars = self.src.bars.get(symbol)
+        bars = self.index.bars(symbol, start, end, clock.today())
         if bars is None:
-            raise http.HttpError(f"replay://{symbol}", 404, "symbol not in the replay snapshot")
+            raise http.HttpError(f"replay://{symbol}", 404, "no issuer / series for this symbol at this date")
         cap = self.vis.cap
-        return [b for b in bars if start <= b.date <= end and (cap is None or b.date <= cap)]
+        return [b for b in bars if cap is None or b.date <= cap]
 
 
 def _row(e: dict) -> dict:
@@ -81,10 +131,24 @@ def _row(e: dict) -> dict:
 
 
 class Stager:
-    def __init__(self, src: SourceData, guards: Guards):
+    """Stages what became knowable. Reference data is INCREMENTAL: it changes only when the simulated date changes, and
+    only the rows whose point-in-time value changed are written (a newly observed symbol period, a period's last
+    observation moving forward, a registry entry that changed owner, a delisting that became public, a dated corporate
+    action) - the result equals a full rebuild at that date (tested)."""
+
+    def __init__(self, src: SourceData, guards: Guards, index: PriceIndex | None = None):
         self.src, self.guards = src, guards
+        self.index = index or PriceIndex(src)
         self.staged: set[int] = set()
         self.by_time = sorted(src.events, key=lambda e: (e["available_at"], e["id"]))
+        self.ref_day: date | None = None
+        self._sym: dict[tuple, date] = {}  # (cik, symbol, source) -> staged last_seen
+        self._reg: dict[str, str] = {}  # symbol -> cik
+        self._cos: set[str] = set()
+        self._sm: dict[str, date | None] = {}  # cik -> staged delisting_date
+        self._acts: set[tuple] = set()
+        self._risks: set[tuple] = set()
+        self.writes = 0
 
     def stage_events(self, conn: Connection, now: datetime, event_types: tuple[str, ...] | None = None) -> list[int]:
         new = [e for e in self.by_time if e["id"] not in self.staged and e["available_at"] <= now]
@@ -93,57 +157,111 @@ class Stager:
             self.staged.add(e["id"])
         return [e["id"] for e in new if event_types is None or e["event_type"] in event_types]
 
-    def stage_reference(self, conn: Connection, today: date) -> None:
-        """Symbol periods, the SEC-style ticker registry, security master and corporate actions AS KNOWN ON `today`:
-        a period ends at its last observation up to today, the registry maps each issuer to the symbol it used most
-        recently up to today (never today's real ticker file), delistings / actions appear only once dated."""
-        for t in (tickers, companies, security_symbols, security_master, corporate_actions):
-            conn.execute(t.delete())
-        rows = []
+    def stage_risks(self, conn: Connection, now: datetime) -> int:
+        """Risk labels exist only where the source has their history (risk_coverage); each appears at detected_at."""
+        n = 0
+        for r in self.src.discovery_risks:
+            key = (r["cik"], r["risk"], r["detected_at"])
+            if key in self._risks or r["detected_at"] > now:
+                continue
+            vals = {"severity": r["severity"], "value": r.get("value"), "detected_at": r["detected_at"]}
+            conn.execute(pg_insert(discovery_risks).values(cik=r["cik"], risk=r["risk"], **vals)
+                         .on_conflict_do_update(index_elements=["cik", "risk"], set_=vals))
+            self._risks.add(key)
+            n += 1
+        return n
+
+    def desired_reference(self, today: date) -> dict:
+        """The point-in-time reference state on `today` (pure; used by the incremental stager and by the tests)."""
+        sym = {}
         for s in self.src.symbols:
             if s["first_seen"] <= today:
-                rows.append({**s, "last_seen": min(s["last_seen"], today), "n_obs": 1})
-        if rows:
-            conn.execute(security_symbols.insert(), rows)
-        # registry: latest observed symbol per issuer, if still observed within the grace window; a symbol maps to
-        # the issuer that used it most recently
-        latest: dict[str, dict] = {}
-        for r in rows:
-            if r["last_seen"] >= today - timedelta(days=SYMBOL_GRACE_DAYS):
-                cur = latest.get(r["cik"])
-                if cur is None or r["last_seen"] > cur["last_seen"]:
-                    latest[r["cik"]] = r
-        by_symbol: dict[str, dict] = {}
-        for r in latest.values():
-            if r["symbol"] not in by_symbol or r["last_seen"] > by_symbol[r["symbol"]]["last_seen"]:
-                by_symbol[r["symbol"]] = r
-        for cik in sorted({r["cik"] for r in rows}):
+                sym[(s["cik"], s["symbol"], s["source"])] = (s["first_seen"], min(s["last_seen"], today))
+        latest: dict[str, tuple] = {}
+        for (cik, symbol, _src), (_fs, last) in sym.items():
+            if last >= today - timedelta(days=SYMBOL_GRACE_DAYS) and (cik not in latest or last > latest[cik][1]):
+                latest[cik] = (symbol, last)
+        reg: dict[str, tuple] = {}
+        for cik, (symbol, last) in latest.items():
+            if symbol not in reg or last > reg[symbol][1]:
+                reg[symbol] = (cik, last)
+        return {"symbols": sym, "registry": {k: v[0] for k, v in reg.items()}, "companies": {k[0] for k in sym},
+                "delistings": {m["cik"]: (m["delisting_date"] if m.get("delisting_date") and m["delisting_date"] <= today
+                                          else None) for m in self.src.security_master},
+                "actions": {(a["cik"], a["action"], a.get("accession") or "", a["action_date"])
+                            for a in self.src.corporate_actions if a["action_date"] <= today}}
+
+    def stage_reference(self, conn: Connection, today: date) -> int:
+        if self.ref_day == today:
+            return 0
+        if self.ref_day is not None and today < self.ref_day:
+            raise ValueError("reference data cannot move backwards")
+        want = self.desired_reference(today)
+        w = 0
+        for key, (fs, last) in want["symbols"].items():
+            cik, symbol, src = key
+            if key not in self._sym:
+                conn.execute(security_symbols.insert().values(cik=cik, symbol=symbol, source=src, first_seen=fs,
+                                                              last_seen=last, n_obs=1))
+            elif self._sym[key] != last:
+                conn.execute(text("""UPDATE security_symbols SET last_seen = :l WHERE cik = :c AND symbol = :s
+                                     AND source = :src"""), {"l": last, "c": cik, "s": symbol, "src": src})
+            else:
+                continue
+            self._sym[key] = last
+            w += 1
+        for cik in sorted(want["companies"] - self._cos):
             name = self.src.companies.get(cik, cik)
             conn.execute(companies.insert().values(cik=cik, name=name, name_norm=normalize_company(name) or cik))
-        for sym, r in sorted(by_symbol.items()):
-            cid = conn.execute(text("SELECT id FROM companies WHERE cik = :c"), {"c": r["cik"]}).scalar()
-            conn.execute(tickers.insert().values(symbol=sym, company_id=cid))
+            self._cos.add(cik)
+            w += 1
+        for symbol in sorted(set(self._reg) | set(want["registry"])):
+            new = want["registry"].get(symbol)
+            if self._reg.get(symbol) == new:
+                continue
+            conn.execute(tickers.delete().where(tickers.c.symbol == symbol))
+            if new is not None:
+                cid = conn.execute(text("SELECT id FROM companies WHERE cik = :c"), {"c": new}).scalar()
+                conn.execute(tickers.insert().values(symbol=symbol, company_id=cid))
+                self._reg[symbol] = new
+            else:
+                self._reg.pop(symbol, None)
+            w += 1
         for m in self.src.security_master:
-            known = m.get("delisting_date") is not None and m["delisting_date"] <= today
-            conn.execute(security_master.insert().values(
-                cik=m["cik"], name=m.get("name"), sector=m.get("sector"), status="DELISTED" if known else "UNKNOWN",
-                delisting_date=m["delisting_date"] if known else None,
-                delisting_reason=m.get("delisting_reason") if known else None))
-        acts = [a for a in self.src.corporate_actions if a["action_date"] <= today]
-        if acts:
-            conn.execute(corporate_actions.insert(), [{**a, "details": a.get("details") or {}} for a in acts])
+            known = want["delistings"].get(m["cik"])
+            if m["cik"] in self._sm and self._sm[m["cik"]] == known:
+                continue
+            vals = {"name": m.get("name"), "sector": m.get("sector"), "status": "DELISTED" if known else "UNKNOWN",
+                    "delisting_date": known, "delisting_reason": m.get("delisting_reason") if known else None}
+            conn.execute(pg_insert(security_master).values(cik=m["cik"], **vals)
+                         .on_conflict_do_update(index_elements=["cik"], set_=vals))
+            self._sm[m["cik"]] = known
+            w += 1
+        for a in self.src.corporate_actions:
+            key = (a["cik"], a["action"], a.get("accession") or "", a["action_date"])
+            if key in want["actions"] and key not in self._acts:
+                conn.execute(corporate_actions.insert().values(cik=a["cik"], action=a["action"], action_date=a["action_date"],
+                                                               accession=a.get("accession") or "", source=a.get("source") or "",
+                                                               details=a.get("details") or {}))
+                self._acts.add(key)
+                w += 1
+        self.ref_day = today
+        self.writes += w
+        return w
 
     def build_universe(self, conn: Connection, today: date, ciks: set[str], price_cap: date) -> int:
         """Point-in-time universe_snapshots row per issuer (what the production gate reads): production formulas -
-        shares_as_of (facts FILED on/before today), mcap_bucket, 30-day mean $ volume for MICRO / EARLY_SMALL only -
-        on the snapshot's bars up to price_cap."""
+        shares_as_of (facts FILED on/before today), mcap_bucket, 30-day mean $ volume for MICRO / EARLY_SMALL like
+        build_universe (the gate measures every other class itself from prior sessions) - on the issuer's own price
+        series (PriceIndex) up to price_cap."""
         from app.news.classify import mcap_bucket
         n = 0
         reg = dict(conn.execute(text("SELECT c.cik, t.symbol FROM tickers t JOIN companies c ON c.id = t.company_id")).all())
         for cik in sorted(c for c in ciks if c):
             sym = reg.get(cik)
             facts = self.src.share_facts.get(cik) or []
-            bars = [b for b in self.src.bars.get(sym or "", []) if b.date <= price_cap and b.close]
+            got = self.index.bars(sym, price_cap - timedelta(days=60), price_cap, today) if sym else None
+            bars = [b for b in (got or []) if b.close]
             sh = shares_as_of(facts, today)
             if not sym or not bars or sh is None or (today - sh[1].end).days > UNIVERSE_STALE_DAYS:
                 continue

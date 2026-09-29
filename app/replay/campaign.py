@@ -110,3 +110,13 @@ def tuning_results(conn) -> list[dict]:
                                  WHERE NOT sealed AND period_role <> 'holdout' AND status = 'COMPLETED'
                                  ORDER BY replay_id""")).mappings().all()
     return [dict(r) for r in rows]
+
+
+def holdout_verdict_inputs(conn) -> dict:
+    """Sealed holdout runs for a FINAL verdict: only FULL comparability (risk-label history covers the window).
+    LIMITED runs are returned separately and must never be pooled with them as "fully comparable"."""
+    rows = conn.execute(text(f"""SELECT replay_id, comparability, status, result FROM {META_SCHEMA}.replay_runs
+                                 WHERE sealed AND period_role = 'holdout' AND status = 'COMPLETED'
+                                 ORDER BY replay_id""")).mappings().all()
+    return {"full": [dict(r) for r in rows if r["comparability"] == "FULL"],
+            "limited_excluded": [dict(r) for r in rows if r["comparability"] != "FULL"]}

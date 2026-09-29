@@ -42,7 +42,11 @@ def main() -> int:
                                  WHERE source <> 'sec_registry' AND (cik = ANY(:c) OR symbol IN
                                    (SELECT symbol FROM security_symbols WHERE cik = ANY(:c)))"""), {"c": ciks}).mappings().all()
         out["symbols"] = [dict(r) for r in syms]
-        symbols = sorted({r["symbol"] for r in syms if r["cik"] in ciks} | {"SPY"})
+        # the vendor keeps a renamed security's history under its CURRENT symbol: that series belongs to the issuer
+        # for all dates (catalog entry without bounds); other stored symbols only for their own period (derived)
+        current = dict(c.execute(text("""SELECT c.cik, t.symbol FROM tickers t JOIN companies c ON c.id = t.company_id
+                                         WHERE c.cik = ANY(:c) ORDER BY t.id DESC"""), {"c": ciks}).all())
+        symbols = sorted({r["symbol"] for r in syms if r["cik"] in ciks} | set(current.values()) | {"SPY"})
         bars: dict[str, list] = {}
         for s, d, o, h, lo, cl, ac, v in c.execute(text("""SELECT symbol, date, open, high, low, close, adj_close, volume
                                                            FROM market_prices WHERE symbol = ANY(:s) AND date BETWEEN :a AND :b
@@ -50,6 +54,22 @@ def main() -> int:
                                                     {"s": symbols, "a": start - timedelta(days=120), "b": end + timedelta(days=200)}):
             bars.setdefault(s, []).append([d, o, h, lo, cl, ac, v])
         out["bars"] = bars
+        from app.replay.source import derive_series
+        from datetime import date as _date
+        per = [{**r, "first_seen": r["first_seen"] if isinstance(r["first_seen"], _date) else _date.fromisoformat(str(r["first_seen"])),
+                "last_seen": r["last_seen"] if isinstance(r["last_seen"], _date) else _date.fromisoformat(str(r["last_seen"]))}
+               for r in syms]
+        out["series"] = [{"series": sym, "cik": cik, "valid_from": None, "valid_to": None, "basis": "vendor_current_symbol"}
+                         for cik, sym in sorted(current.items()) if sym in bars]
+        out["series"] += [{**x, "basis": "symbol_period"} for x in derive_series(per, bars)
+                          if (x["cik"], x["series"]) not in {(c2, s2) for c2, s2 in current.items()}]
+        out["risk_coverage"] = {
+            "discovery_risks": c.execute(text("SELECT min(detected_at)::date FROM discovery_risks")).scalar(),
+            "thesis_changes": c.execute(text("SELECT min(created_at)::date FROM thesis_changes")).scalar()}
+        out["discovery_risks"] = [dict(r) for r in c.execute(text("""SELECT cik, risk, severity, value, detected_at
+                                                                     FROM discovery_risks WHERE cik = ANY(:c)
+                                                                       AND detected_at <= :e"""),
+                                                             {"c": ciks, "e": end + timedelta(days=1)}).mappings()]
         out["share_facts"] = {}
         for cik, acc, e, f, form, val in c.execute(text("""SELECT cik, accession, end_date, filed, form, val
                                                           FROM shares_outstanding_facts WHERE cik = ANY(:c)
