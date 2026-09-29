@@ -41,3 +41,28 @@ def test_incremental_effect_and_cluster_bootstrap():
     r = incremental(with_d, without_d, random.Random(3))
     assert r["incremental"] == pytest.approx(-0.07) and r["with_companies"] == 150 and r["without_companies"] == 300
     assert r["boot_ci95"][0] <= -0.07 <= r["boot_ci95"][1]
+
+
+def test_derived_flags_use_only_earlier_events():
+    from datetime import date
+    from app.backtest.research_scoring import derive_flags
+    rows = [
+        {"id": 1, "issuer_cik": "A", "public_date": date(2020, 1, 1), "payload": {"owner_cik": "o1", "value": 1e5}, "excess_ret": 0.2},
+        {"id": 2, "issuer_cik": "B", "public_date": date(2020, 3, 1), "payload": {"owner_cik": "o1"}, "excess_ret": 0.1},
+        {"id": 3, "issuer_cik": "A", "public_date": date(2020, 9, 1), "payload": {"owner_cik": "o1", "value": 3e5,
+                                                                                   "direct_indirect": ["D"]}, "excess_ret": -0.5},
+        {"id": 4, "issuer_cik": "A", "public_date": date(2020, 9, 15), "payload": {"owner_cik": "o2"}, "excess_ret": None},
+    ]
+    f = derive_flags(rows)
+    assert "first_buy_same_issuer_5y" in f[1] and "repeat_same_issuer_365d" not in f[1]
+    assert {"repeat_same_issuer_365d", "owner_history_positive", "direct_only", "value_ge_250k"} <= f[3]
+    assert "owner_history_positive" not in f[2]  # only one prior buy, and it matured too late
+    assert "cluster_context_30d" in f[4] and "cluster_context_30d" not in f[3]  # o2 bought AFTER o1's 2020-09-01 buy
+
+
+def test_per_quarter_thinning_keeps_the_first_event():
+    from datetime import date
+    from app.backtest.research_scoring import per_quarter
+    rows = [{"id": i, "issuer_cik": "A", "public_date": d} for i, d in
+            ((1, date(2020, 2, 1)), (2, date(2020, 1, 5)), (3, date(2020, 4, 1)))]
+    assert [r["id"] for r in per_quarter(rows)] == [2, 3]

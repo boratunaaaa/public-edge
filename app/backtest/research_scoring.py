@@ -183,3 +183,159 @@ def run(conn: Connection, lookback: int = 60) -> dict:
     out["tenk_incremental"] = inc
     out["matched_events_cached"] = len(m.cache)
     return out
+
+
+# ================================================================== night run 2026-09-30: expansion + V2 families
+# (read-only; pre-registered below; no weight is produced here)
+
+from datetime import date as _date  # noqa: E402
+
+from sqlalchemy import text as _text  # noqa: E402
+
+DERIVED = ("repeat_same_issuer_365d", "first_buy_same_issuer_5y", "serial_3plus_issuers_2y", "owner_history_positive",
+           "owner_history_negative", "cluster_context_30d", "direct_only", "indirect_only", "value_ge_250k")
+V2_TYPES = ("INST_13F_NEW_POSITION", "INST_13F_ACCUMULATION", "INST_13F_EXIT", "INST_13F_DECREASE", "FDA_APPROVAL",
+            "FDA_EFFICACY_SUPPLEMENT", "RESULTS_POSTED", "TRIAL_REGISTERED", "FTD_SPIKE", "SHORT_PRESSURE", "GOV_CONTRACT",
+            "CA_GOV_CONTRACT_WIN")
+MIN_COMPANIES_90D = 100
+
+
+def _all_rows(conn: Connection, event_type: str) -> list[dict]:
+    """Every priced, reviewed-clean event of a type (no per-quarter thinning), with its 90-day excess."""
+    return [dict(r) for r in conn.execute(_text("""
+        SELECT e.id, e.issuer_cik, e.public_date, e.available_at, e.price_symbol, e.payload, r.excess_ret
+        FROM events e JOIN event_returns r ON r.event_id = e.id AND r.horizon_days = :h
+        WHERE e.event_type = :et AND NOT e.superseded AND NOT e.needs_review AND e.issuer_cik IS NOT NULL
+          AND e.price_symbol IS NOT NULL AND r.excess_ret IS NOT NULL
+        ORDER BY e.issuer_cik, e.public_date, e.id"""), {"h": H, "et": event_type}).mappings()]
+
+
+def per_quarter(rows: list[dict]) -> list[dict]:
+    """research_v2._events thinning in Python: the first event per issuer and calendar quarter."""
+    seen, out = set(), []
+    for r in sorted(rows, key=lambda r: (r["issuer_cik"], r["public_date"], r["id"])):
+        k = (r["issuer_cik"], r["public_date"].year, (r["public_date"].month - 1) // 3)
+        if k not in seen:
+            seen.add(k)
+            out.append(r)
+    return out
+
+
+def derive_flags(rows: list[dict]) -> dict[int, set[str]]:
+    """Point-in-time flags from EARLIER events only (owner / issuer history strictly before the buy's public date;
+    an owner's past outcome only from buys whose 90-day window ended >= 30 days before it: public_date <= d - 120)."""
+    by_owner, by_issuer = defaultdict(list), defaultdict(list)
+    for r in rows:
+        own = (r["payload"] or {}).get("owner_cik")
+        if own:
+            by_owner[own].append(r)
+        by_issuer[r["issuer_cik"]].append(r)
+    flags: dict[int, set[str]] = defaultdict(set)
+    for r in rows:
+        p, d = r["payload"] or {}, r["public_date"]
+        own = p.get("owner_cik")
+        prior = [x for x in by_owner.get(own, []) if x["public_date"] < d] if own else []
+        same = [x for x in prior if x["issuer_cik"] == r["issuer_cik"]]
+        if any(x["public_date"] >= d - timedelta(days=365) for x in same):
+            flags[r["id"]].add("repeat_same_issuer_365d")
+        if own and not any(x["public_date"] >= d - timedelta(days=1826) for x in same):
+            flags[r["id"]].add("first_buy_same_issuer_5y")
+        if len({x["issuer_cik"] for x in prior if x["public_date"] >= d - timedelta(days=730)}) >= 3:
+            flags[r["id"]].add("serial_3plus_issuers_2y")
+        hist = [x["excess_ret"] for x in prior if d - timedelta(days=1826) <= x["public_date"] <= d - timedelta(days=120)
+                and x["excess_ret"] is not None]
+        if len(hist) >= 2:
+            flags[r["id"]].add("owner_history_positive" if statistics.fmean(hist) > 0 else "owner_history_negative")
+        if any(x["public_date"] < d and x["public_date"] >= d - timedelta(days=30)
+               and (x["payload"] or {}).get("owner_cik") != own for x in by_issuer[r["issuer_cik"]]):
+            flags[r["id"]].add("cluster_context_30d")
+        di = p.get("direct_indirect")
+        if di == ["D"]:
+            flags[r["id"]].add("direct_only")
+        if di == ["I"]:
+            flags[r["id"]].add("indirect_only")
+        try:
+            if float(p.get("value")) >= 250_000:
+                flags[r["id"]].add("value_ge_250k")
+        except (TypeError, ValueError):
+            pass
+    return flags
+
+
+def run_expansion(conn: Connection) -> dict:
+    """INSIDER_BUY: primary + every research_v2 / extra / derived bucket, on the per-quarter sample (as before) and on
+    the FULL sample (every buy, company-equal); lookback / contamination sensitivity of the primary. BH per sample."""
+    from app.scoring.engine import BUCKETS, _discretionary
+    rng = random.Random(SEED + 1)
+    et = "INSIDER_OPEN_MARKET_BUY"
+    rows = _all_rows(conn, et)
+    flags = derive_flags(rows)
+    disc = [r for r in rows if _discretionary(r["payload"] or {})]
+    preds = {k: (lambda r, f=f: f(r["payload"] or {}) is True) for k, f in BUCKETS.items()}
+    preds["planned_10b5_1"] = None  # handled on the non-discretionary set
+    preds["ten_pct_any"] = lambda r: (r["payload"] or {}).get("is_ten_pct") is True
+    for k in DERIVED:
+        preds[k] = lambda r, k=k: k in flags.get(r["id"], ())
+    out: dict = {"events_priced": len(rows), "discretionary": len(disc)}
+    for sample, thin in (("per_quarter", per_quarter), ("all_events", lambda x: x)):
+        m = Matcher(conn, et, 60)
+        res = {"primary": summarize(company_diffs(m, thin(disc)), rng)}
+        fam = {}
+        for k, pr in preds.items():
+            sel = [r for r in rows if not _discretionary(r["payload"] or {})] if pr is None else [r for r in disc if pr(r)]
+            fam[k] = summarize(company_diffs(m, thin(sel)), rng)
+        adj = bh({k: v.get("t_p") for k, v in fam.items()})
+        for k, v in fam.items():
+            v["bh_p"] = adj.get(k)
+        res["buckets"] = fam
+        out[sample] = res
+    sens = {}
+    for lb, cont in ((20, "family"), (90, "family"), (60, "any")):
+        sens[f"lookback{lb}_{cont}"] = summarize(company_diffs(Matcher(conn, et, lb, cont), per_quarter(disc)), rng)
+    out["primary_sensitivity"] = sens
+    return out
+
+
+def coverage(conn: Connection) -> dict:
+    rows = conn.execute(_text("""
+        SELECT event_type, returns_status, count(*) FROM events WHERE NOT superseded GROUP BY 1, 2""")).all()
+    cos = dict(conn.execute(_text("""
+        SELECT e.event_type, count(DISTINCT e.issuer_cik) FROM events e
+        JOIN event_returns r ON r.event_id = e.id AND r.horizon_days = 90
+        WHERE NOT e.superseded AND NOT e.needs_review AND r.excess_ret IS NOT NULL GROUP BY 1""")).all())
+    out: dict = defaultdict(lambda: {"statuses": {}})
+    for et, st, n in rows:
+        out[et]["statuses"][st] = n
+    for et, v in out.items():
+        v["companies_90d"] = cos.get(et, 0)
+        v["ready_for_validation"] = cos.get(et, 0) >= MIN_COMPANIES_90D
+    tot = defaultdict(int)
+    for _et, _st, n in rows:
+        tot[_st] += n
+    return {"as_of": str(_date.today()), "totals": dict(tot), "by_type": dict(out)}
+
+
+def run_families(conn: Connection) -> dict:
+    """V2 families with enough 90-day coverage: raw company-equal SPY-beat + matched same-stock control (60d lookback,
+    same-type contamination), company bootstrap; BH across the families actually tested. Others: reason only."""
+    rng = random.Random(SEED + 2)
+    cov = coverage(conn)["by_type"]
+    out, tested = {}, {}
+    for et in V2_TYPES:
+        c = cov.get(et, {"companies_90d": 0, "statuses": {}})
+        if c["companies_90d"] < MIN_COMPANIES_90D:
+            out[et] = {"status": "INSUFFICIENT_COVERAGE", "companies_90d": c["companies_90d"], "statuses": c["statuses"]}
+            continue
+        rows = _all_rows(conn, et)
+        per = defaultdict(list)
+        for r in rows:
+            per[r["issuer_cik"]].append(1.0 if r["excess_ret"] > 0 else 0.0)
+        raw = statistics.fmean(statistics.fmean(v) for v in per.values())
+        m = Matcher(conn, et, 60, "family")
+        s = summarize(company_diffs(m, per_quarter(rows)), rng)
+        out[et] = {"status": "TESTED", "companies_90d": c["companies_90d"], "raw_spy_beat_company_equal": raw, **s}
+        tested[et] = s.get("t_p")
+    adj = bh(tested)
+    for et, p in adj.items():
+        out[et]["bh_p"] = p
+    return out
