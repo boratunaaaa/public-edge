@@ -42,7 +42,9 @@ its test family (the 11 insider buckets are one family). Everything else weighs 
 
 ## Missing scores
 A score is written after the gate. If that write fails (or the process dies in between), the next scan retries it for
-events whose proposal already exists, at the proposal's creation time and with no vetoes (the gate passed then).
+events whose proposal already exists, at the proposal's creation time and with no vetoes (the gate passed then). A
+retry does not rebuild the 10-K context (supersession carries no timestamp, so the decision's state is not
+reconstructable); its component records that instead of today's view.
 
 ## Point in time
 Only events with `available_at <= scoring moment` count; the 10-K adjustment uses changes public in the 90 days

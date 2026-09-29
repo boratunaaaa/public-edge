@@ -257,11 +257,30 @@ def test_one_failing_retry_does_not_block_the_others(engine, monkeypatch):
                 research_only=True))
     real = se.record
 
-    def flaky(engine_, event_id, vetoes=None, now=None):
+    def flaky(engine_, event_id, vetoes=None, now=None, context=True):
         if event_id == ids[0]:
             raise RuntimeError("boom")
-        return real(engine_, event_id, vetoes, now)
+        return real(engine_, event_id, vetoes, now, context)
     monkeypatch.setattr(se, "record", flaky)
     assert se.retry_missing(engine, ["INSIDER_OPEN_MARKET_BUY"], NOW - timedelta(days=1)) == 1  # the second still recovers
     with engine.connect() as c:
         assert [r[0] for r in c.execute(select(signal_scores.c.event_id))] == [ids[1]]
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_a_retry_does_not_rebuild_context_from_todays_supersession_state(engine):
+    """A 10-K change valid at the decision but superseded before the retry: the retry must not record today's view as
+    the decision's context."""
+    from app.db.models import signal_scores
+    from app.scoring.engine import record
+    with engine.begin() as c:
+        tid = _event(c, et="TENK_CHANGE", d=(NOW - timedelta(days=10)).date(), key="tk", payload={"direction": "NEGATIVE"})
+        c.execute(text("UPDATE events SET available_at = :a WHERE id = :i"), {"a": NOW - timedelta(days=10), "i": tid})
+        eid = _event(c, key="buy", payload={"is_ceo": True, "value": 5e4})
+        c.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": tid})  # after the decision
+    record(engine, eid, [], now=NOW, context=False)
+    with engine.connect() as c:
+        comps = c.execute(select(signal_scores.c.components)).scalar()
+    tk = next(x for x in comps if x["component"] == "TENK_CHANGE_RECENT")
+    assert tk["evidence_event"] is None and "not rebuilt" in tk["why"]

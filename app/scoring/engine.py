@@ -139,7 +139,9 @@ def _evidence_status(family: str, reg: dict) -> tuple[str, str]:
     return NOT_MEASURED, (e if isinstance(e, str) else "no matched-control result")
 
 
-def score_event(conn: Connection, ev: dict, now: datetime | None = None) -> dict:
+def score_event(conn: Connection, ev: dict, now: datetime | None = None, context: bool = True) -> dict:
+    """context=False (a retry at an earlier decision moment): the 10-K context is not rebuilt - supersession has no
+    timestamp, so today's state could differ from the decision's; the component says so instead of guessing."""
     now = now or datetime.now(timezone.utc)
     reg = registry()
     public = ev.get("available_at") or ev.get("public_at")
@@ -152,6 +154,13 @@ def score_event(conn: Connection, ev: dict, now: datetime | None = None) -> dict
     cell, cell_name, comps = _edge_cell(ev, reg)
     parts = [cell] if cell else []
     tk = reg["TENK_CHANGE_RECENT"]
+    if not context:
+        comps.append({**_comp("TENK_CHANGE_RECENT", tk, False, "context not rebuilt on a retry: supersession state at the "
+                                                               "decision moment is not reconstructable"),
+                      "evidence_event": None})
+        score = sum(e.effect for e in parts)
+        return {"model_version": MODEL_VERSION, "evidence_version": reg["version"], "scored_at": now,
+                "score_pp": round(100 * score, 3), "cell": cell_name, "components": comps}
     recent = conn.execute(text("""SELECT id FROM events WHERE issuer_cik = :c AND event_type = 'TENK_CHANGE' AND NOT superseded
                                   AND coalesce(available_at, public_at) <= :now AND coalesce(available_at, public_at) > :lo
                                   ORDER BY coalesce(available_at, public_at) DESC LIMIT 1"""),
@@ -167,7 +176,8 @@ def score_event(conn: Connection, ev: dict, now: datetime | None = None) -> dict
             "score_pp": round(100 * score, 3), "cell": cell_name, "components": comps}
 
 
-def record(engine: Engine, event_id: int, vetoes: list[str] | None = None, now: datetime | None = None) -> dict | None:
+def record(engine: Engine, event_id: int, vetoes: list[str] | None = None, now: datetime | None = None,
+           context: bool = True) -> dict | None:
     """Score one event and store it (research record; idempotent per event + model version)."""
     import json
 
@@ -177,7 +187,7 @@ def record(engine: Engine, event_id: int, vetoes: list[str] | None = None, now: 
         ev = conn.execute(select(events).where(events.c.id == event_id)).mappings().first()
         if ev is None:
             return None
-        s = score_event(conn, dict(ev), now)
+        s = score_event(conn, dict(ev), now, context=context)
         conn.execute(text("""INSERT INTO signal_scores (event_id, model_version, evidence_version, scored_at, score_pp,
                                                         cell, components, vetoes, research_only)
                              VALUES (:e, :mv, :ev, :at, :s, :cell, CAST(:comp AS jsonb), CAST(:veto AS jsonb), true)
@@ -204,7 +214,7 @@ def retry_missing(engine: Engine, event_types: list[str], since: datetime) -> in
     done = 0
     for eid, at in rows:  # one failing event never blocks the others: each is retried on its own
         try:
-            record(engine, eid, [], now=at)
+            record(engine, eid, [], now=at, context=False)
             done += 1
         except Exception:  # noqa: BLE001
             import logging
