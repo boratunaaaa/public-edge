@@ -131,6 +131,30 @@ def test_trial_mapped_sponsor_creates_results_event_at_posting_date(engine, clea
     assert ev["available_at"] == end_of_local_day(ev["public_date"])
 
 
+@pytest.mark.parametrize("seen_after_days, results_live", [(1, True), (30, False)])
+def test_trial_event_already_old_when_first_seen_goes_to_the_backfill_lane(engine, clean, seen_after_days, results_live):
+    """The 2000+ historical load ran through run_live with a `since` date and stored ~51k old registrations as LIVE
+    events. An event whose public time is more than LIVE_MAX_AGE before we first see it is history (backfill lane)."""
+    from datetime import timedelta
+
+    from app.markets import identity
+    from app.sources.us.clinical import parse_study, process_study
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO security_master (cik, name) VALUES ('0000078003', 'PFIZER INC')"))
+    identity.reset_cache()
+    d = json.loads((FX / "us" / "ctgov_pfizer_results_2026-08.json").read_text())
+    res_day = parse_study(d["studies"][0])["results_first_post_date"]
+    seen = end_of_local_day(res_day) + timedelta(days=seen_after_days)
+    try:
+        with engine.begin() as c:
+            assert process_study(c, d["studies"][0], first_seen=seen, is_backfill=False)["status"] == "STORED"
+            rows = dict(c.execute(text("SELECT event_type, is_backfill FROM events")).all())
+    finally:
+        identity.reset_cache()
+    assert rows["TRIAL_REGISTERED"] is True  # registered long before it was first seen
+    assert rows["RESULTS_POSTED"] is (not results_live)
+
+
 # ------------------------------------------------------------------ openFDA / CFTC
 
 def test_openfda_only_material_approvals():
