@@ -34,8 +34,8 @@ def family_vs_placebo(conn: Connection, event_type: str, horizon: int = 90, limi
         SELECT DISTINCT ON (e.issuer_cik, date_trunc('quarter', e.public_date)) e.id, e.issuer_cik, e.public_date,
                e.price_symbol, r.excess_ret
         FROM events e JOIN event_returns r ON r.event_id = e.id AND r.horizon_days = :h
-        WHERE e.event_type = :et AND NOT e.superseded AND e.issuer_cik IS NOT NULL AND e.price_symbol IS NOT NULL
-          AND r.excess_ret IS NOT NULL
+        WHERE e.event_type = :et AND NOT e.superseded AND NOT e.needs_review AND e.issuer_cik IS NOT NULL
+          AND e.price_symbol IS NOT NULL AND r.excess_ret IS NOT NULL
         ORDER BY e.issuer_cik, date_trunc('quarter', e.public_date), e.public_date
         {'LIMIT :lim' if limit else ''}"""), {"h": horizon, "et": event_type, "lim": limit}).mappings().all()
     spy = load_bars(conn, "SPY", date(2000, 1, 1), date.today())

@@ -14,18 +14,22 @@ NOW = datetime(2026, 9, 29, 12, tzinfo=timezone.utc)
 
 # ------------------------------------------------------------------ pure pieces
 
-def test_next_eligible_is_the_next_missing_horizon_end():
-    entry = date(2026, 8, 1)
-    nxt = next_eligible_at(entry, {1, 7, 30}, NOW.date(), NOW)  # 60d ends 2026-09-30 -> bar published next day
-    assert nxt == datetime(2026, 10, 1, tzinfo=timezone.utc)
-    assert next_eligible_at(entry, set(HORIZONS), NOW.date(), NOW) is None
+def test_next_eligible_follows_nyse_sessions():
+    from app.backtest.jobs import horizon_ready_at
+    entry = date(2026, 8, 3)  # Monday
+    # 60d ends Fri 2026-10-02 -> that session's close (16:00 ET = 20:00 UTC) + EOD lag
+    assert horizon_ready_at(entry, 60) == datetime(2026, 10, 2, 22, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 29, 12, tzinfo=timezone.utc)
+    assert next_eligible_at(entry, {1, 7, 30}, now.date(), now) == datetime(2026, 10, 2, 22, tzinfo=timezone.utc)
+    assert next_eligible_at(entry, set(HORIZONS), now.date(), now) is None
 
 
 def test_elapsed_but_missing_horizon_is_a_gap_recheck_not_every_round():
-    entry = date(2026, 6, 1)  # 7d / 30d / 90d elapsed but missing (data gap); 180d ends 2026-11-28
-    assert next_eligible_at(entry, {1, 60}, NOW.date(), NOW) == NOW + timedelta(days=7)
-    # a future horizon that ends before the gap recheck wins
-    assert next_eligible_at(date(2026, 8, 1), {1, 30}, NOW.date(), NOW) == datetime(2026, 10, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 29, 12, tzinfo=timezone.utc)
+    entry = date(2026, 6, 1)  # 7d / 30d / 90d should exist but are missing (data gap); 180d is months away
+    assert next_eligible_at(entry, {1, 60}, now.date(), now) == now + timedelta(days=7)
+    # a future horizon that becomes ready before the gap recheck wins
+    assert next_eligible_at(date(2026, 8, 3), {1, 30}, now.date(), now) == datetime(2026, 10, 2, 22, tzinfo=timezone.utc)
 
 
 def test_tiingo_error_object_is_classified_not_iterated():
@@ -136,7 +140,7 @@ def test_partial_is_not_requeued_before_its_next_horizon_and_is_when_due(engine)
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_never_attempted_goes_before_due_partial_and_retry_and_no_cik_order(engine):
+def test_tiers_are_interleaved_and_no_cik_order(engine):
     now = datetime.now(timezone.utc)
     old = now - timedelta(days=3)
     with engine.begin() as c:
@@ -146,11 +150,15 @@ def test_never_attempted_goes_before_due_partial_and_retry_and_no_cik_order(engi
         partial = _event(c, "p", "0000000003", "CCC", date(2024, 3, 1), returns_status="partial", returns_checked_at=old,
                          returns_next_at=now - timedelta(hours=1))
         fresh = [_event(c, f"f{i}", f"00000001{i:02d}", f"F{i}", date(2024, 3, 1)) for i in range(12)]
-    q = _queue(engine)
-    assert set(q[:12]) == set(fresh) and q[12:] == [partial, retry, nodata]
+    from app.backtest.jobs import select_queue
+    with engine.connect() as c:
+        q = [r[0] for r in select_queue(c, datetime.now(timezone.utc), limit=100)]
+    # weighted round robin 6 : 2 : 1 : 1 - due partial / retry / re-verification are served in the FIRST round
+    assert set(q[:6]) <= set(fresh) and q[6:9] == [partial, retry, nodata] and set(q[9:]) <= set(fresh)
     # inside a tier the order is an issuer hash, not the CIK: low CIKs are not systematically first
     ciks = {e: f"00000001{i:02d}" for i, e in enumerate(fresh)}
-    assert [ciks[e] for e in q[:12]] != sorted(ciks.values())
+    fq = [e for e in q if e in ciks]
+    assert [ciks[e] for e in fq] != sorted(ciks.values())
 
 
 @db
@@ -168,8 +176,7 @@ def test_fresh_partial_gets_deterministic_next_at_and_is_not_repriced_until_then
         entry, done = c.execute(text("SELECT min(entry_date), array_agg(horizon_days) FROM event_returns WHERE event_id = :i"),
                                 {"i": eid}).one()
     assert set(done) == {1, 7, 30}
-    exp = entry + timedelta(days=61)
-    assert r["returns_next_at"] == datetime(exp.year, exp.month, exp.day, tzinfo=timezone.utc)
+    assert r["returns_next_at"] == jobs.horizon_ready_at(entry, 60)  # NYSE session of the 60d exit, not a calendar day
     assert jobs.compute_pending(engine).get("candidates", 0) == 0  # nothing new until the 60d horizon has ended
     with engine.begin() as c:  # the 60d horizon ends
         c.execute(text("UPDATE events SET returns_next_at = now() - interval '1 minute' WHERE id = :i"), {"i": eid})

@@ -218,25 +218,35 @@ class SecSecurityMaster(SecurityMasterProvider):
         dl = self.delisting(cik) if cik else None
         if sym is None:
             return PriceSeries(None, None, [], missing, dl)
-        bars = ensure_prices(self.conn, sym, start, end, provider=self.market, skip_known_absent=self.skip_known_absent)
+        scope = self._absence_scope(cik)
+        bars = ensure_prices(self.conn, sym, start, end, provider=self.market, absence=scope)
         if basis == "historical_symbol_verified":
             bars, missing = _validate_historical(bars, on, dl)
             if not bars and self.delisted_prices is not None:
-                alt = self._vendor_bars(sym, start, end)
+                alt = self._vendor_bars(sym, start, end, scope)
                 bars, missing = _validate_historical(alt, on, dl)
         if not bars and missing is None:
             missing = "NO_PRICE_DATA"
         return PriceSeries(sym, basis if bars else None, bars, missing, dl)
 
 
-    def _vendor_bars(self, sym: str, start: date, end: date) -> list[Bar]:
-        """Delisted-vendor series. A 404 / "ticker not found" is a confirmed absence (-> [] and recorded, so the
-        scarce quota is not spent on it again for VENDOR_ABSENCE_TTL_DAYS); everything else is temporary."""
+    def _absence_scope(self, cik: str | None):
+        """Negative-cache identity for this security master (US, CIK-keyed; see AbsenceScope). None = no cache:
+        only the return queue opts in, and only when the issuer is known (a bare ticker is never an identity)."""
+        from app.marketdata.provider import AbsenceScope
+        if not self.skip_known_absent or not cik:
+            return None
+        return AbsenceScope(identity=f"CIK:{cik.zfill(10)}", market="US")
+
+    def _vendor_bars(self, sym: str, start: date, end: date, scope=None) -> list[Bar]:
+        """Delisted-vendor series. A 404 / "ticker not found" is a confirmed absence (-> [] and recorded for this
+        identity, so the scarce quota is not spent on it again for VENDOR_ABSENCE_TTL_DAYS); everything else is
+        temporary."""
         from app import http
         from app.core.ratelimit import QuotaExhausted
         from app.marketdata.provider import absence_fresh, record_absence
         name = getattr(self.delisted_prices, "name", "vendor")
-        if absence_fresh(self.conn, name, sym, VENDOR_ABSENCE_TTL_DAYS):
+        if scope is not None and absence_fresh(self.conn, name, scope, sym, start, VENDOR_ABSENCE_TTL_DAYS):
             return []
         if not self.allow_vendor:
             raise VendorDeferred(sym)
@@ -244,7 +254,8 @@ class SecSecurityMaster(SecurityMasterProvider):
             return self.delisted_prices.get_historical_prices(sym, start, end)
         except http.HttpError as e:
             if e.status == 404:
-                record_absence(self.conn, name, sym)
+                if scope is not None:
+                    record_absence(self.conn, name, scope, sym, start)
                 return []
             raise VendorUnavailable(f"{sym}: delisted vendor: {e}", quota=e.status == 429) from e
         except QuotaExhausted as e:

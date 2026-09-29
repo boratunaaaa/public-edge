@@ -104,7 +104,8 @@ def parse_tiingo_prices(payload, symbol: str) -> list[Bar]:
     Iterating that object yielded its keys (str) and x["date"] failed with "string indices must be integers" -
     every such event then sat in `retry` forever. An object is classified instead:
       * "not found" / unknown ticker -> HttpError 404 (a confirmed absence, handled like any provider 404);
-      * anything else (hourly/daily allocation, maintenance, unexpected shape) -> HttpError 429 / 502 (temporary)."""
+      * anything else (hourly/daily allocation, maintenance, unexpected shape) -> HttpError 429 / 502 (temporary).
+    [] is a genuine empty answer; a non-empty list without a single valid bar is malformed -> 502 (temporary)."""
     if payload is None:
         return []
     if isinstance(payload, dict):
@@ -128,6 +129,10 @@ def parse_tiingo_prices(payload, symbol: str) -> list[Bar]:
             continue
         close, adj = x.get("close"), x.get("adjClose")
         out.append(Bar(d, x.get("open"), x.get("high"), x.get("low"), close, adj, x.get("volume")))
+    if payload and not out:
+        # a non-empty answer without one usable bar is a provider/schema failure, NOT "no data": temporary, and never
+        # written to the absence cache (only [] - Tiingo's genuine empty answer - means no prices in the window)
+        raise http.HttpError(TIINGO_PRICES_URL.format(symbol=symbol), 502, "tiingo: malformed price list")
     return out
 
 

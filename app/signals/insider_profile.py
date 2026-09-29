@@ -147,7 +147,7 @@ LEFT JOIN event_returns r90 ON r90.event_id = e.id AND r90.horizon_days = 90
 LEFT JOIN event_returns r180 ON r180.event_id = e.id AND r180.horizon_days = 180
                              AND e.public_date <= :mature180
 LEFT JOIN security_master sm ON sm.cik = e.issuer_cik
-WHERE e.event_type = 'INSIDER_OPEN_MARKET_BUY' AND NOT e.superseded AND e.date_quality <> 'estimated'
+WHERE e.event_type = 'INSIDER_OPEN_MARKET_BUY' AND NOT e.superseded AND NOT e.needs_review AND e.date_quality <> 'estimated'
   AND COALESCE(e.payload->>'owner_attribution', '') <> 'joint'
   AND e.public_date <= :mature90 {extra}
 """

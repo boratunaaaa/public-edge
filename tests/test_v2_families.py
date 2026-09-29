@@ -214,16 +214,16 @@ def test_13f_accumulation_fires_at_the_third_new_holder_filing(engine, clean):
     q1, q2 = date(2026, 3, 31), date(2026, 6, 30)
     with engine.begin() as c:
         c.execute(text("""INSERT INTO activist_filings (accession, issuer_cik, cusip, filed_date, form_type, is_13d, is_amendment, source_url)
-                          VALUES ('0000000000-25-999999', '0000000555', '123456789', '2025-01-01', 'SC 13D', true, false, 'u')"""))
+                          VALUES ('0000000000-25-999999', '0000000555', '123456782', '2025-01-01', 'SC 13D', true, false, 'u')"""))
         for m in range(4):
             mc = f"{m + 1:010d}"
             for per, acc, filed in ((q1, f"A{m}-1", date(2026, 5, 10)), (q2, f"A{m}-2", date(2026, 7, 20 + m))):
                 c.execute(text("""INSERT INTO inst_filings_13f (accession, manager_cik, manager_name, period, filed_date, available_at,
                                   submission_type, entries, source) VALUES (:a, :m, :n, :p, :f, :av, '13F-HR', 20, 't')"""),
                           {"a": acc, "m": mc, "n": f"M{m}", "p": per, "f": filed, "av": datetime(filed.year, filed.month, filed.day, 23, tzinfo=UTC)})
-                c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES (:a, 1, 'OTHER0001', 'X', 1, 1)"),
+                c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES (:a, 1, 'OTHER0004', 'X', 1, 1)"),
                           {"a": acc})
-            c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES (:a, 2, '123456789', 'TGT', 1, 1)"),
+            c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES (:a, 2, '123456782', 'TGT', 1, 1)"),
                       {"a": f"A{m}-2"})
         ids = accumulation_events(c, q2, is_backfill=True)
         ev = c.execute(text("SELECT public_date, payload->>'trigger_manager' FROM events WHERE id = :i"), {"i": ids[0]}).one()
@@ -268,10 +268,10 @@ def test_13f_filing_without_previous_quarter_is_reevaluated_after_it_arrives(eng
     q1, q2 = date(2026, 3, 31), date(2026, 6, 30)
     with engine.begin() as c:
         c.execute(text("""INSERT INTO activist_filings (accession, issuer_cik, cusip, filed_date, form_type, is_13d, is_amendment, source_url)
-                          VALUES ('0000000000-25-888888', '0000000666', 'NEWCUSIP1', '2025-01-01', 'SC 13D', true, false, 'u')"""))
+                          VALUES ('0000000000-25-888888', '0000000666', 'NEWCUSIP6', '2025-01-01', 'SC 13D', true, false, 'u')"""))
         c.execute(text("""INSERT INTO inst_filings_13f (accession, manager_cik, manager_name, period, filed_date, available_at, submission_type,
                           entries, source) VALUES ('B-2', '0000000077', 'M', :p, '2026-08-01', '2026-08-02T03:59:59Z', '13F-HR', 12, 't')"""), {"p": q2})
-        for i, cu in enumerate(["OLDCUSIP1", "NEWCUSIP1"]):
+        for i, cu in enumerate(["OLDCUSIP0", "NEWCUSIP6"]):
             c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES ('B-2', :l, :c, 'X', :v, 100)"),
                       {"l": i, "c": cu, "v": 50.0})
     from app.db.store import save_job_state
@@ -283,7 +283,7 @@ def test_13f_filing_without_previous_quarter_is_reevaluated_after_it_arrives(eng
     with engine.begin() as c:  # the failed previous quarter is loaded on a retry
         c.execute(text("""INSERT INTO inst_filings_13f (accession, manager_cik, manager_name, period, filed_date, available_at, submission_type,
                           entries, source) VALUES ('B-1', '0000000077', 'M', :p, '2026-05-01', '2026-05-02T03:59:59Z', '13F-HR', 12, 't')"""), {"p": q1})
-        c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES ('B-1', 0, 'OLDCUSIP1', 'X', 50, 100)"))
+        c.execute(text("INSERT INTO inst_holdings_13f (accession, line, cusip, issuer_name, value, shares) VALUES ('B-1', 0, 'OLDCUSIP0', 'X', 50, 100)"))
     v2_steps.after_13f(engine, is_backfill=True)
     with engine.connect() as c:
         ev = c.execute(text("SELECT event_type FROM events WHERE issuer_cik = '0000000666'")).scalars().all()

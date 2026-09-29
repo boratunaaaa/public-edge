@@ -27,7 +27,7 @@ from sqlalchemy.engine import Connection, Engine
 from app.backtest.jobs import next_eligible_at
 
 ITEMS = ("partial_next_at", "vendor_retry", "identity_13f", "ticker_13f", "ca_grants_health")
-REVIEW_PARK_DAYS = 365
+REVIEW_PARK_DAYS = 365  # informational only: needs_review keeps an event out of every return lane permanently
 VENDOR_ERR = "returns_status = 'retry' AND returns_error LIKE '%delisted vendor%'"
 
 
@@ -104,15 +104,20 @@ def _identity_13f(conn: Connection, apply: bool, now: datetime, sample: int = 12
             if len(ex) < sample and not any(e["cusip"] == cusip for e in ex):
                 ex.append({"cusip": cusip, "issuer_name": name, "old_cik": cik, "new_cik": ncik, "why": why})
     if apply:
+        from app.entities.registry import resolver
+        resolver.load(conn, force=True)
         park = now + timedelta(days=REVIEW_PARK_DAYS)
         for eid, kind, ncik, nconf, why in changes:
             conn.execute(text("DELETE FROM event_returns WHERE event_id = :i"), {"i": eid})
             if kind == "CHANGED":
+                # the display ticker follows the corrected issuer (never the old company's symbol); NULL when the new
+                # issuer has no current ticker - prices resolve by CIK either way
                 conn.execute(text("""UPDATE events SET issuer_cik = :c, issuer_id = :c, identity_confidence = :cf,
-                                     returns_status = 'pending', returns_checked_at = NULL, returns_next_at = NULL,
-                                     price_symbol = NULL, price_symbol_basis = NULL, missing_reason = NULL,
-                                     payload = payload || CAST(:p AS jsonb) WHERE id = :i"""),
-                             {"c": ncik, "cf": nconf, "i": eid, "p": json.dumps({"identity_repair": why})})
+                                     ticker = :t, returns_status = 'pending', returns_checked_at = NULL,
+                                     returns_next_at = NULL, price_symbol = NULL, price_symbol_basis = NULL,
+                                     missing_reason = NULL, payload = payload || CAST(:p AS jsonb) WHERE id = :i"""),
+                             {"c": ncik, "cf": nconf, "i": eid, "t": resolver.ticker_for_cik(ncik),
+                              "p": json.dumps({"identity_repair": why})})
             else:
                 conn.execute(text("""UPDATE events SET needs_review = true, identity_confidence = 'LOW',
                                      returns_status = 'no_data', missing_reason = 'IDENTITY_REVIEW', returns_next_at = :n,

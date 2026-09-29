@@ -25,11 +25,16 @@ def _ensure_spy(conn: Connection) -> list:
 
 
 # ---------------- return queue ----------------
-# Priority tiers (lower first). Inside a tier the order is a hash of the issuer: deterministic, grouped by issuer
-# (price cache hits) and uncorrelated with CIK size / age - the priced subset is never the "low CIK" subset.
+# Tiers: 1 never attempted | 2 partial whose next horizon is due | 3 temporary retry / young pending | 4 long-term
+# (no_data re-verification, data-gap recheck). A batch interleaves the tiers by weight (TIER_WEIGHTS per round), so a
+# steady inflow of new events can never starve due partials or retries. Inside a tier: oldest due DAY first (aging),
+# then an issuer hash (deterministic, issuer-grouped for cache hits, uncorrelated with CIK size / age).
 TIER_NEVER_ATTEMPTED, TIER_HORIZON_DUE, TIER_TEMPORARY, TIER_LONG_TERM = 1, 2, 3, 4
-GAP_RECHECK_DAYS = 7  # a horizon that has elapsed but has no exit bar yet (vendor gap / lag)
+TIER_WEIGHTS = ((TIER_NEVER_ATTEMPTED, 6), (TIER_HORIZON_DUE, 2), (TIER_TEMPORARY, 1), (TIER_LONG_TERM, 1))
+GAP_RECHECK_DAYS = 7  # a horizon whose exit bar should exist but does not (vendor gap / lag)
+EOD_LAG = timedelta(hours=2)  # end-of-day bars are published after the 16:00 ET close
 VENDOR_RETRY_HOURS = 1
+VENDOR_CLAIM, VENDOR_LEASE = 5, timedelta(minutes=20)  # <= 5 vendor requests (72 s spacing) per lease
 LANE_MAIN, LANE_VENDOR = "main", "vendor"
 DUE_STATUSES = ("pending", "partial", "retry", "no_data")
 
@@ -47,8 +52,12 @@ def _due(now: datetime):
                 case((events.c.returns_next_at.isnot(None), events.c.returns_next_at <= now), else_=legacy))
 
 
+def _vendor_due(now: datetime):
+    return and_(events.c.returns_status == "vendor_wait",
+                or_(events.c.returns_next_at.is_(None), events.c.returns_next_at <= now))
+
+
 def queue_tier():
-    """1 never attempted | 2 partial (its next horizon is due) | 3 temporary retry / young pending | 4 long-term."""
     return case((events.c.returns_checked_at.is_(None), TIER_NEVER_ATTEMPTED),
                 (events.c.returns_status == "partial", TIER_HORIZON_DUE),
                 (events.c.returns_status.in_(["retry", "pending"]), TIER_TEMPORARY),
@@ -56,35 +65,52 @@ def queue_tier():
 
 
 def queue_order():
-    return (queue_tier(), func.md5(func.coalesce(events.c.issuer_cik, events.c.ticker, "")), events.c.id)
+    """Aging (the day the event became due / was created) first, then the issuer hash."""
+    due_day = func.date_trunc("day", func.coalesce(events.c.returns_next_at, events.c.returns_checked_at, events.c.created_at))
+    return (due_day, func.md5(func.coalesce(events.c.issuer_cik, events.c.ticker, "")), events.c.id)
+
+
+def _session_ready(d: date) -> datetime:
+    """UTC moment the end-of-day bar of NYSE session `d` can be expected."""
+    from app.marketdata.calendar import MARKET_CLOSE, NY
+    return datetime.combine(d, MARKET_CLOSE, NY).astimezone(timezone.utc) + EOD_LAG
+
+
+def horizon_ready_at(entry: date, h: int) -> datetime:
+    """Earliest moment compute_returns can produce horizon h for an entry session (engine._exit_bar semantics):
+      * h = 1: the exit is the first bar AFTER the entry session -> next NYSE session's close (Friday entry -> Monday,
+        or Tuesday after a Monday holiday);
+      * otherwise the last bar on/before entry + h calendar days -> the last NYSE session <= target has closed, and the
+        engine also requires target <= as_of (UTC date) -> max(that close, target 00:00 UTC)."""
+    from app.marketdata.calendar import is_trading_day, next_trading_day
+    target = entry + timedelta(days=h)
+    floor = datetime(target.year, target.month, target.day, tzinfo=timezone.utc)
+    if h == 1:
+        return max(floor, _session_ready(next_trading_day(entry)))
+    last = target
+    while not is_trading_day(last) and last > entry:
+        last -= timedelta(days=1)
+    return max(floor, _session_ready(last))
 
 
 def next_eligible_at(entry: date, done: set[int], today: date, now: datetime) -> datetime | None:
-    """When a partial event can gain its next horizon: the earliest missing horizon's end + 1 day (the exit bar is
-    published the day after). A horizon that has already elapsed but is still missing is a data gap -> re-checked
-    after GAP_RECHECK_DAYS. None = nothing left to compute."""
-    missing = [entry + timedelta(days=h) for h in HORIZONS if h not in done]
-    if not missing:
+    """When a partial event can gain its next horizon (horizon_ready_at of the earliest missing one). A horizon that
+    should already be computable but is missing is a data gap -> re-checked after GAP_RECHECK_DAYS, never every
+    round. None = nothing left to compute. (`today` is kept for callers; readiness is decided on `now`.)"""
+    ready = [horizon_ready_at(entry, h) for h in HORIZONS if h not in done]
+    if not ready:
         return None
-    cands = []
-    future = [t for t in missing if t > today]
-    if future:
-        d = min(future) + timedelta(days=1)
-        cands.append(datetime(d.year, d.month, d.day, tzinfo=timezone.utc))
-    if any(t <= today for t in missing):
+    future = [t for t in ready if t > now]
+    cands = [min(future)] if future else []
+    if any(t <= now for t in ready):
         cands.append(now + timedelta(days=GAP_RECHECK_DAYS))
     return min(cands)
 
 
-def queue_select(now: datetime, *, lane: str = LANE_MAIN, backfill: bool | None = None, ciks: list[str] | None = None,
-                 event_ids: list[int] | None = None, limit: int = 500):
-    """The events the next batch prices, in queue order (see queue_order)."""
-    if lane == LANE_VENDOR:
-        due = and_(events.c.returns_status == "vendor_wait",
-                   or_(events.c.returns_next_at.is_(None), events.c.returns_next_at <= now))
-    else:
-        due = _due(now)
+def _conds(now: datetime, due, backfill, ciks, event_ids) -> list:
     conds = [or_(events.c.ticker.isnot(None), events.c.issuer_cik.isnot(None)), events.c.superseded.is_(False),
+             # REVIEW_REQUIRED identity: permanently out of every lane while the flag is set
+             events.c.needs_review.is_(False),
              events.c.public_date <= now.date() - timedelta(days=2), due]
     if backfill is not None:
         conds.append(events.c.is_backfill.is_(backfill))
@@ -92,10 +118,65 @@ def queue_select(now: datetime, *, lane: str = LANE_MAIN, backfill: bool | None 
         conds.append(events.c.issuer_cik.in_([c.zfill(10) for c in ciks]))
     if event_ids:
         conds.append(events.c.id.in_(event_ids))
-    return (select(events.c.id, events.c.ticker, events.c.issuer_cik, events.c.public_date,
-                   # V2: available_at is the only entry anchor (same as public_at / end-of-day for old rows)
-                   func.coalesce(events.c.available_at, events.c.public_at))
-            .where(and_(*conds)).order_by(*queue_order()).limit(limit))
+    return conds
+
+
+_COLS = (events.c.id, events.c.ticker, events.c.issuer_cik, events.c.public_date,
+         # V2: available_at is the only entry anchor (same as public_at / end-of-day for old rows)
+         func.coalesce(events.c.available_at, events.c.public_at))
+
+
+def queue_select(now: datetime, *, tier: int | None = None, lane: str = LANE_MAIN, backfill: bool | None = None,
+                 ciks: list[str] | None = None, event_ids: list[int] | None = None, limit: int = 500):
+    """Due events of one tier (or all) in queue_order."""
+    conds = _conds(now, _vendor_due(now) if lane == LANE_VENDOR else _due(now), backfill, ciks, event_ids)
+    if tier is not None:
+        conds.append(queue_tier() == tier)
+    return select(*_COLS).where(and_(*conds)).order_by(*queue_order()).limit(limit)
+
+
+def interleave(by_tier: dict[int, list], limit: int) -> list:
+    """Weighted round robin over TIER_WEIGHTS; a tier with no work gives its slots to the others."""
+    pos = {t: 0 for t, _w in TIER_WEIGHTS}
+    out: list = []
+    while len(out) < limit and any(pos[t] < len(by_tier.get(t, [])) for t, _w in TIER_WEIGHTS):
+        for t, w in TIER_WEIGHTS:
+            rows = by_tier.get(t, [])
+            take = rows[pos[t]:pos[t] + w]
+            pos[t] += len(take)
+            out += take
+    return out[:limit]
+
+
+def select_queue(conn: Connection, now: datetime, *, backfill: bool | None = None, ciks: list[str] | None = None,
+                 event_ids: list[int] | None = None, limit: int = 500) -> list:
+    """Main lane batch: every tier fetched separately, then interleaved (fair, deterministic)."""
+    by_tier = {t: conn.execute(queue_select(now, tier=t, backfill=backfill, ciks=ciks, event_ids=event_ids,
+                                            limit=limit)).all() for t, _w in TIER_WEIGHTS}
+    return interleave(by_tier, limit)
+
+
+def claim_vendor(conn: Connection, now: datetime, limit: int = VENDOR_CLAIM, lease: timedelta = VENDOR_LEASE) -> list:
+    """Atomic vendor-lane claim: rows locked with SKIP LOCKED and leased (returns_next_at = now + lease) in the caller's
+    transaction, so two vendor workers never take the same event (no double quota spend). A crashed worker's lease
+    simply expires and the event is claimed again (idempotent: returns are upserts)."""
+    ids = conn.execute(select(events.c.id).where(and_(*_conds(now, _vendor_due(now), None, None, None)))
+                       .order_by(*queue_order()).limit(limit).with_for_update(skip_locked=True)).scalars().all()
+    if not ids:
+        return []
+    conn.execute(events.update().where(events.c.id.in_(ids)).values(returns_next_at=now + lease))
+    return conn.execute(select(*_COLS).where(events.c.id.in_(ids)).order_by(*queue_order())).all()
+
+
+def _fence(conn: Connection, eid: int, ticker, cik, vendor_lane: bool) -> bool:
+    """Row lock + re-read right before pricing: the event must still be what was selected. An identity repair that
+    set needs_review / changed the issuer after selection wins (it either committed first -> we skip, or waits for
+    our transaction and then removes what we wrote)."""
+    cur = conn.execute(select(events.c.needs_review, events.c.superseded, events.c.issuer_cik, events.c.ticker,
+                              events.c.returns_status).where(events.c.id == eid).with_for_update()).first()
+    if cur is None or cur.needs_review or cur.superseded or cur.issuer_cik != cik or cur.ticker != ticker:
+        return False
+    return cur.returns_status == "vendor_wait" if vendor_lane else cur.returns_status in DUE_STATUSES
 
 
 def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600, backfill: bool | None = None,
@@ -115,8 +196,12 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
     today = date.today()
     now = datetime.now(timezone.utc)
     vendor_lane = lane == LANE_VENDOR
-    with engine.connect() as conn:
-        rows = conn.execute(queue_select(now, lane=lane, backfill=backfill, ciks=ciks, event_ids=event_ids, limit=limit)).all()
+    if vendor_lane:
+        with engine.begin() as conn:
+            rows = claim_vendor(conn, now, min(limit, VENDOR_CLAIM))
+    else:
+        with engine.connect() as conn:
+            rows = select_queue(conn, now, backfill=backfill, ciks=ciks, event_ids=event_ids, limit=limit)
     if not rows:
         return {"processed": 0}
     try:
@@ -124,17 +209,30 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
             spy = _ensure_spy(conn)
     except PriceFetchError as e:
         return {"processed": 0, "error": f"benchmark unavailable: {e}"}
-    done = nodata = retry = deferred = 0
+    done = nodata = retry = deferred = fenced = 0
+    claimed = len(rows)
     cache: dict[str, list] = {}
     otc_keys: set[str] = set()  # vendor series confirmed as OTC continuations: no cash-out at the delisting
     failed: dict[str, str] = {}
     sectors = SectorBench()
     stop = None
-    for eid, ticker, cik, pdate, pat in rows:
+    queue = list(rows)
+    while True:
         if time.time() - t0 > time_budget_s or stop:
             break
+        if not queue and vendor_lane and claimed < limit:
+            with engine.begin() as conn:  # next small leased chunk (never more than VENDOR_CLAIM in flight)
+                more = claim_vendor(conn, datetime.now(timezone.utc), min(VENDOR_CLAIM, limit - claimed))
+            claimed += len(more)
+            queue += more
+        if not queue:
+            break
+        eid, ticker, cik, pdate, pat = queue.pop(0)
         with engine.begin() as conn:
             now = datetime.now(timezone.utc)
+            if not _fence(conn, eid, ticker, cik, vendor_lane):
+                fenced += 1
+                continue
             sm = get_security_master(conn, allow_vendor=vendor_lane, skip_known_absent=True)
             sym, basis, missing = sm.price_symbol(cik, pdate, ticker)
             dl = sm.delisting(cik) if cik else None
@@ -221,7 +319,9 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                 returns_status=status, returns_checked_at=now, returns_error=None, price_symbol=sym,
                 price_symbol_basis=basis_used, missing_reason=None, returns_next_at=nxt))
             done += 1
-    out = {"processed": done, "no_data": nodata, "retry": retry, "candidates": len(rows), "lane": lane}
+    out = {"processed": done, "no_data": nodata, "retry": retry, "candidates": claimed, "lane": lane}
+    if fenced:
+        out["fenced"] = fenced
     if deferred:
         out["vendor_queued"] = deferred
     if stop:
@@ -391,7 +491,7 @@ def event_type_stats(conn: Connection, event_type: str, subgroup: str = "all", h
         # estimated public dates are never part of verified statistics
         q = text(f"""SELECT r.ret, r.excess_ret, r.mae, r.mfe FROM event_returns r JOIN events e ON e.id = r.event_id
                      WHERE e.event_type = :et AND r.horizon_days = :h AND e.date_quality <> 'estimated'
-                       AND NOT e.superseded AND {cond} {extra_where}""")
+                       AND NOT e.superseded AND NOT e.needs_review AND {cond} {extra_where}""")
         rows = [dict(x._mapping) for x in conn.execute(q, {"et": event_type, "h": h, **(params or {})})]
         out[h] = summarize(rows, settings.min_sample_size).as_dict()
     return out
@@ -429,6 +529,6 @@ def stats_overview(conn: Connection) -> list[dict]:
                (avg((r.excess_ret > 0)::int) FILTER (WHERE r.excess_ret IS NOT NULL))::float8 spy_beat,
                avg(r.excess_ret) mean_excess, stddev_samp(r.ret) std, avg(r.mae) mae, avg(r.mfe) mfe
         FROM event_returns r JOIN events e ON e.id = r.event_id
-        WHERE NOT e.superseded
+        WHERE NOT e.superseded AND NOT e.needs_review
         GROUP BY 1, r.horizon_days ORDER BY 1, r.horizon_days""")).mappings().all()
     return [dict(r) | {"sufficient": r["n"] >= settings.min_sample_size} for r in rows]

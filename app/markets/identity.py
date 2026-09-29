@@ -42,6 +42,20 @@ def cusip_check_digit_ok(cusip: str) -> bool:
     return str((10 - total % 10) % 10) == cusip[8]
 
 
+_CUSIP_CHARS = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ*@#")
+
+
+def normalize_cusip(raw: str | None) -> str | None:
+    """Canonical 9-character CUSIP or None: trimmed, upper case, only CUSIP characters, exactly 9, valid check digit.
+    Internal spaces / dashes are not repaired (they are not CUSIP characters) - such a value never matches exactly."""
+    if raw is None:
+        return None
+    c = str(raw).strip().upper()
+    if len(c) != 9 or any(ch not in _CUSIP_CHARS for ch in c) or not cusip_check_digit_ok(c) or c == "000000000":
+        return None  # 000000000 passes the check digit but is a registry placeholder, never an identifier
+    return c
+
+
 def _load_names(conn: Connection) -> dict[str, set[str]]:
     global _names, _names_at
     with _lock:
@@ -134,25 +148,33 @@ def cik_names(conn: Connection, cik: str) -> list[str]:
 
 
 def cusip_to_cik(conn: Connection, cusip: str | None, issuer_name: str | None = None) -> tuple[str | None, str, str]:
-    """(cik, confidence, reason). Matching is on the FULL 9-character CUSIP only:
+    """(cik, confidence, reason). HIGH / MEDIUM only for an exact match of a VALID 9-character CUSIP (normalize_cusip:
+    trimmed, upper case, CUSIP characters, check digit), compared with the normalized stored values of:
       * 13D/13G cover pages (the filer states the issuer's CUSIP) and the SEC registry's ticker CUSIP;
         HIGH when both agree, else MEDIUM; two different issuers -> CONFLICT (unresolved).
-      * No exact match anywhere: an 8-character prefix hit (e.g. a registry CUSIP with a wrong check digit - Envista
-        29415F104 vs a corrupt 29415F100 row of another issuer) is only a candidate -> LOW + REVIEW_REQUIRED, never a
-        silent attribution. Registry placeholders (000000000) and invalid check digits never match.
-      * issuer_name given: when the filer-typed issuer name clearly disagrees with every SEC name of the matched CIK
-        (current and former), the match is downgraded to LOW + REVIEW_REQUIRED (e.g. two sources carrying the same
-        wrong CUSIP). Callers mark LOW events needs_review, which keeps them out of validation and paper trading."""
-    if not cusip or len(cusip) < 8:
+    Everything else is at most a candidate -> LOW + REVIEW_REQUIRED, never a silent attribution:
+      * no exact match: an 8-character prefix hit (e.g. Envista 29415F104 vs a registry row of another issuer with the
+        corrupt check digit 29415F100);
+      * the queried CUSIP itself is invalid (wrong check digit / bad characters): its 8-character prefix, if unique;
+      * issuer_name given and it clearly disagrees with every SEC name / ticker of the matched CIK (current and former).
+    Registry placeholders (000000000) never match. Callers mark LOW events needs_review, which keeps them out of the
+    return queue, validation and paper trading."""
+    raw = (cusip or "").strip().upper()
+    if len(raw) < 8:
         return None, "NONE", "BAD_CUSIP"
-    c9 = cusip[:9].upper()
-    thirteen_d = conn.execute(text("""SELECT issuer_cik, count(*) n FROM activist_filings WHERE upper(cusip) = :c
-                                        AND issuer_cik IS NOT NULL GROUP BY 1 ORDER BY 2 DESC"""), {"c": c9}).all()
-    reg_rows = conn.execute(text("""SELECT DISTINCT c.cik, upper(t.cusip) FROM tickers t JOIN companies c ON c.id = t.company_id
-                                     WHERE upper(t.cusip) LIKE :p"""), {"p": c9[:8] + "%"}).all()
-    usable = [(cik, cu) for cik, cu in reg_rows if cu and cu != "000000000" and cusip_check_digit_ok(cu)]
-    a = {r[0] for r in thirteen_d}
-    b = {cik for cik, cu in usable if cu == c9}
+    c9 = normalize_cusip(raw[:9])
+    p8 = raw[:8]
+    if any(ch not in _CUSIP_CHARS for ch in p8):
+        return None, "NONE", "BAD_CUSIP"
+    a: set[str] = set()
+    b: set[str] = set()
+    if c9 is not None:
+        a = set(conn.execute(text("""SELECT DISTINCT issuer_cik FROM activist_filings WHERE upper(trim(cusip)) = :c
+                                       AND issuer_cik IS NOT NULL"""), {"c": c9}).scalars())
+    reg_rows = conn.execute(text("""SELECT DISTINCT c.cik, upper(trim(t.cusip)) FROM tickers t JOIN companies c ON c.id = t.company_id
+                                     WHERE upper(trim(t.cusip)) LIKE :p"""), {"p": p8 + "%"}).all()
+    if c9 is not None:
+        b = {cik for cik, cu in reg_rows if cik and normalize_cusip(cu) == c9}
     if len(a) == 1 and (not b or b == a):
         cik, conf, why = next(iter(a)), "HIGH" if b == a else "MEDIUM", "13D_COVER" + ("+SEC_REGISTRY" if b == a else "")
     elif not a and len(b) == 1:
@@ -162,8 +184,9 @@ def cusip_to_cik(conn: Connection, cusip: str | None, issuer_name: str | None = 
     else:
         prefix = {cik for cik, cu in reg_rows if cik and cu and cu != "000000000"}
         if len(prefix) == 1:
-            return next(iter(prefix)), "LOW", f"{REVIEW}:CUSIP_PREFIX_ONLY"
-        return None, "NONE", "CONFLICT" if prefix else "NO_MATCH"
+            tag = "CUSIP_PREFIX_ONLY" if c9 is not None else "INVALID_CUSIP_PREFIX"
+            return next(iter(prefix)), "LOW", f"{REVIEW}:{tag}"
+        return None, "NONE", "CONFLICT" if prefix else ("NO_MATCH" if c9 is not None else "INVALID_CUSIP")
     if issuer_name:
         names = cik_names(conn, cik)
         if names and not names_agree(issuer_name, names):
