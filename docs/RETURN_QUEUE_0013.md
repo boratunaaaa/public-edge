@@ -33,6 +33,17 @@ Not deployed. Base: production commit 4bd5e0a.
 | 12 | overlength CUSIP truncated to a valid one | the complete normalized input must be a valid CUSIP for an exact match; otherwise prefix path only (LOW + REVIEW) |
 | 13 | Tiingo bars with a date but no usable price | a bar needs a finite, positive numeric close; other fields sanitized to finite positive or NULL; a non-empty payload with no usable bar -> 502 (temporary) |
 
+## Return eligibility vs validation eligibility (app/core/event_policy.py)
+
+* **Return blocker** (`identity_unsafe_clause` / `is_identity_unsafe`, used by `_conds` for every lane and by `_fence`):
+  `identity_confidence IN ('LOW','NONE')` OR `payload ? 'identity_review'` OR `missing_reason = 'IDENTITY_REVIEW'`.
+  `needs_review` alone never blocks raw returns.
+* **Validation blocker** (unchanged policy): `needs_review` for any reason - `event_type_stats`, `stats_overview`,
+  `family_vs_placebo`, `insider_profile`, `research_v2`, `quality`, and the paper gate (`validation_excluded`).
+* The 1,137 production events flagged by the 2026-09-28 V2 identity audit (`data_cleanup_audit` reason
+  `TICKER_OWNED_BY_OTHER_ISSUER`: the event ticker belonged to another CIK at the event date) carry
+  `identity_confidence = 'LOW'`, i.e. they are identity flags and stay return-excluded under this rule.
+
 ## Production dry run (read-only, 2026-09-29, `scripts/pe_return_repair.py`)
 
 | item | rows | effect of --apply |

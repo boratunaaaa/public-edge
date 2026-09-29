@@ -14,6 +14,8 @@ population (modulo events that changed in between). Items:
                       UNRESOLVED no issuer any more -> as REVIEW
   ticker_13f        13F events with ticker NULL -> display ticker of the same CIK (never used for prices)
   ca_grants_health  source_health still HEALTHY without any recorded run -> DEGRADED (initial load incomplete)
+  return_eligibility report only: identity-unsafe (return-excluded) vs identity-safe review events (see
+                    app.core.event_policy); never writes
 """
 from __future__ import annotations
 
@@ -21,13 +23,13 @@ import json
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import text
+from sqlalchemy import and_, func, text
 from sqlalchemy.engine import Connection, Engine
 
 from app.backtest.jobs import next_eligible_at
 
-ITEMS = ("partial_next_at", "vendor_retry", "identity_13f", "ticker_13f", "ca_grants_health")
-REVIEW_PARK_DAYS = 365  # informational only: needs_review keeps an event out of every return lane permanently
+ITEMS = ("partial_next_at", "vendor_retry", "identity_13f", "ticker_13f", "ca_grants_health", "return_eligibility")
+REVIEW_PARK_DAYS = 365  # informational only: the unsafe identity keeps the event out of every return lane
 VENDOR_ERR = "returns_status = 'retry' AND returns_error LIKE '%delisted vendor%'"
 
 
@@ -157,8 +159,27 @@ def _ca_grants_health(conn: Connection, apply: bool, now: datetime) -> dict:
     return {"current": dict(row) if row else None, "initial_load_complete": complete, "would_mark_degraded": wrong}
 
 
+def _return_eligibility(conn: Connection, apply: bool, now: datetime) -> dict:
+    """Report only (no write even with --apply): return eligibility vs validation eligibility today."""
+    from sqlalchemy import select
+
+    from app.core.event_policy import identity_unsafe_clause
+    from app.db.models import event_returns, events
+    has_ret = select(event_returns.c.event_id).where(event_returns.c.event_id == events.c.id).exists()
+    unsafe = identity_unsafe_clause()
+    q = select(func.count().filter(unsafe), func.count().filter(and_(unsafe, has_ret)),
+               func.count().filter(and_(events.c.needs_review, ~unsafe)),
+               func.count().filter(and_(events.c.needs_review, ~unsafe, has_ret)),
+               func.count().filter(events.c.needs_review)).where(events.c.superseded.is_(False))
+    a, b, c, d, e = conn.execute(q).one()
+    return {"return_excluded_identity_unsafe": a, "return_excluded_with_returns": b,
+            "identity_safe_needs_review": c, "identity_safe_needs_review_with_returns": d,
+            "validation_excluded_needs_review": e,
+            "note": "counts BEFORE the identity_13f item; its REVIEW events become identity-unsafe when applied"}
+
+
 FUNCS = {"partial_next_at": _partial_next_at, "vendor_retry": _vendor_retry, "identity_13f": _identity_13f,
-         "ticker_13f": _ticker_13f, "ca_grants_health": _ca_grants_health}
+         "ticker_13f": _ticker_13f, "ca_grants_health": _ca_grants_health, "return_eligibility": _return_eligibility}
 
 
 def run(engine: Engine, items=ITEMS, apply: bool = False, now: datetime | None = None) -> dict:

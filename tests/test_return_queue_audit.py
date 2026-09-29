@@ -19,13 +19,14 @@ db = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL not set")
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_needs_review_never_enters_the_main_queue(engine):
+def test_identity_unsafe_never_enters_the_main_queue(engine):
     from app.backtest.jobs import select_queue
     now = datetime.now(timezone.utc)
     with engine.begin() as c:
         ok = _event(c, "ok", "0001953926", "ZBIO", date(2024, 3, 1))
-        rv = [_event(c, f"rv{s}", "0001737450", "OPRA", date(2024, 3, 1), needs_review=True, returns_status=s,
-                     returns_next_at=now - timedelta(days=1)) for s in ("pending", "partial", "retry", "no_data")]
+        rv = [_event(c, f"rv{s}", "0001737450", "OPRA", date(2024, 3, 1), needs_review=True, identity_confidence="LOW",
+                     returns_status=s, returns_next_at=now - timedelta(days=1))
+              for s in ("pending", "partial", "retry", "no_data")]
     with engine.connect() as c:
         q = [r[0] for r in select_queue(c, now, limit=100)]
     assert q == [ok] and not set(rv) & set(_queue(engine))
@@ -33,10 +34,11 @@ def test_needs_review_never_enters_the_main_queue(engine):
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_needs_review_never_enters_the_vendor_lane(engine):
+def test_identity_unsafe_never_enters_the_vendor_lane(engine):
     from app.backtest.jobs import claim_vendor
     with engine.begin() as c:
-        rv = _event(c, "rv", "0001737450", "OPRA", date(2024, 3, 1), needs_review=True, returns_status="vendor_wait")
+        rv = _event(c, "rv", "0001737450", "OPRA", date(2024, 3, 1), needs_review=True, identity_confidence="NONE",
+                    returns_status="vendor_wait")
         ok = _event(c, "ok", "0001953926", "ZBIO", date(2024, 3, 1), returns_status="vendor_wait")
         got = [r[0] for r in claim_vendor(c, datetime.now(timezone.utc), 10)]
     assert got == [ok] and _row(engine, rv)["returns_next_at"] is None  # not even leased
@@ -54,7 +56,7 @@ def test_event_selected_before_an_identity_repair_cannot_persist_a_return(engine
 
     def spy_then_repair(conn):  # runs after the batch was selected, before any event is priced
         bars = real_spy(conn)
-        with engine.begin() as other:
+        with engine.begin() as other:  # what the identity repair writes
             other.execute(text("UPDATE events SET needs_review = true, identity_confidence = 'LOW' WHERE id = :i"), {"i": eid})
         return bars
     monkeypatch.setattr(jobs, "_ensure_spy", spy_then_repair)
@@ -79,7 +81,8 @@ def test_repair_waits_for_an_inflight_pricing_and_then_wins(engine):
         def repair():
             with engine.begin() as other:
                 other.execute(text("SET lock_timeout = '10s'"))
-                other.execute(text("UPDATE events SET needs_review = true WHERE id = :i"), {"i": eid})
+                other.execute(text("UPDATE events SET needs_review = true, identity_confidence = 'LOW' WHERE id = :i"),
+                              {"i": eid})
             done.set()
         t = threading.Thread(target=repair)
         t.start()
@@ -137,7 +140,9 @@ def test_review_events_are_excluded_from_every_statistics_consumer(engine, monke
     from app.backtest import jobs, placebo
     with engine.begin() as c:
         good = _event(c, "g", "0001953926", "ZBIO", date(2023, 1, 10), price_symbol="ZBIO")
-        bad = _event(c, "b", "0001737450", "OPRA", date(2023, 1, 10), price_symbol="OPRA", needs_review=True)
+        # an identity-SAFE review event: it may carry raw returns, but never counts in a verdict path
+        bad = _event(c, "b", "0001737450", "OPRA", date(2023, 1, 10), price_symbol="OPRA", needs_review=True,
+                     identity_confidence="HIGH")
         for e, ex in ((good, 0.05), (bad, -0.9)):
             _ret(c, e, 90, ex)
         et = jobs.event_type_stats(c, "INSIDER_OPEN_MARKET_BUY", horizons=(90,))

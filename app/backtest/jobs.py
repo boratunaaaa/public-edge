@@ -117,9 +117,11 @@ def next_eligible_at(entry: date, done: set[int], today: date, now: datetime) ->
 
 
 def _conds(now: datetime, due, backfill, ciks, event_ids) -> list:
-    conds = [or_(events.c.ticker.isnot(None), events.c.issuer_cik.isnot(None)), events.c.superseded.is_(False),
-             # REVIEW_REQUIRED identity: permanently out of every lane while the flag is set
-             events.c.needs_review.is_(False),
+    from app.core.event_policy import return_eligible_clause
+    conds = [or_(events.c.ticker.isnot(None), events.c.issuer_cik.isnot(None)),
+             # identity-unsafe events (LOW / NONE / explicit identity review) are out of every lane; a review flag for
+             # another reason does NOT stop raw returns (validation eligibility is separate: app.core.event_policy)
+             return_eligible_clause(),
              events.c.public_date <= now.date() - timedelta(days=2), due]
     if backfill is not None:
         conds.append(events.c.is_backfill.is_(backfill))
@@ -169,12 +171,14 @@ def claim_vendor(conn: Connection, now: datetime, limit: int = VENDOR_CLAIM, lea
 def _fence(conn: Connection, eid: int, ticker, cik, vendor_lane: bool, lease: str | None = None,
            now: datetime | None = None) -> bool:
     """Row lock + re-read right before pricing: the event must still be what was selected. An identity repair that
-    set needs_review / changed the issuer after selection wins (it either committed first -> we skip, or waits for
-    our transaction and then removes what we wrote)."""
-    cur = conn.execute(select(events.c.needs_review, events.c.superseded, events.c.issuer_cik, events.c.ticker,
-                              events.c.returns_status, events.c.returns_lease, events.c.returns_next_at)
+    made the identity unsafe / changed the issuer after selection wins (it either committed first -> we skip, or waits
+    for our transaction and then removes what we wrote)."""
+    from app.core.event_policy import is_identity_unsafe
+    cur = conn.execute(select(events.c.superseded, events.c.issuer_cik, events.c.ticker, events.c.identity_confidence,
+                              events.c.payload, events.c.missing_reason, events.c.returns_status, events.c.returns_lease,
+                              events.c.returns_next_at)
                        .where(events.c.id == eid).with_for_update()).first()
-    if cur is None or cur.needs_review or cur.superseded or cur.issuer_cik != cik or cur.ticker != ticker:
+    if cur is None or cur.superseded or is_identity_unsafe(cur._mapping) or cur.issuer_cik != cik or cur.ticker != ticker:
         return False
     if vendor_lane:
         # the vendor lease must still be OURS and unexpired (a reclaimed or expired claim never reaches the provider)
