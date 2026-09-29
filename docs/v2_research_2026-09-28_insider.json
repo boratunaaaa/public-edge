@@ -1,0 +1,339 @@
+{
+ "_provenance": "subset of the production read-only run of app.backtest.research_v2 on 2026-09-28 05:32 UTC (/opt/pe-crosscheck/research_v2.json); manager_profiles / cluster_audit / tenk_negative omitted",
+ "cluster_placebo_pre20_family": {
+  "companies": 2151,
+  "contamination": "family",
+  "control_rate": 0.4268825618218513,
+  "difference": 0.018447780877020356,
+  "event_rate": 0.44533034269887173,
+  "event_type": "CLUSTER_INSIDER_BUY",
+  "lookback": 20,
+  "sign_test_p": 0.12323180328940092,
+  "skipped": 2351,
+  "where": "TRUE"
+ },
+ "cluster_placebo_pre60_any": {
+  "companies": 1573,
+  "contamination": "any",
+  "control_rate": 0.44376325447526976,
+  "difference": -0.0030944650461497266,
+  "event_rate": 0.44066878942911997,
+  "event_type": "CLUSTER_INSIDER_BUY",
+  "lookback": 60,
+  "sign_test_p": 0.35801971882281597,
+  "skipped": 4884,
+  "where": "TRUE"
+ },
+ "cluster_placebo_pre60_family": {
+  "companies": 2061,
+  "contamination": "family",
+  "control_rate": 0.45511432136250185,
+  "difference": -0.013540146709724584,
+  "event_rate": 0.44157417465277726,
+  "event_type": "CLUSTER_INSIDER_BUY",
+  "lookback": 60,
+  "sign_test_p": 0.2682596599860981,
+  "skipped": 2807,
+  "where": "TRUE"
+ },
+ "cluster_placebo_pre90_family": {
+  "companies": 2014,
+  "contamination": "family",
+  "control_rate": 0.4533132472184111,
+  "difference": -0.018953091209794288,
+  "event_rate": 0.43436015600861677,
+  "event_type": "CLUSTER_INSIDER_BUY",
+  "lookback": 90,
+  "sign_test_p": 0.08763210699052187,
+  "skipped": 3085,
+  "where": "TRUE"
+ },
+ "insider_breakdown": {
+  "incr_10_50pct": {
+   "placebo": {
+    "companies": 2067,
+    "contamination": "family",
+    "control_rate": 0.4307206594942444,
+    "difference": 0.03087171389058181,
+    "event_rate": 0.4615923733848262,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 0.10171257198647793,
+    "skipped": 3232,
+    "where": "((payload->>'holdings_increase')::float >= 0.10 AND (payload->>'holdings_increase')::float < 0.50) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 2900,
+    "company_equal": 0.44599129775085256,
+    "event_weighted": 0.43089223441354085,
+    "events": 11757,
+    "median_excess": -0.028164520657698366
+   }
+  },
+  "incr_ge_50pct": {
+   "placebo": {
+    "companies": 1740,
+    "contamination": "family",
+    "control_rate": 0.4242022441160372,
+    "difference": 0.02242063492063492,
+    "event_rate": 0.44662287903667214,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 0.07969719623062552,
+    "skipped": 2010,
+    "where": "((payload->>'holdings_increase')::float >= 0.50) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 2532,
+    "company_equal": 0.4300795891552168,
+    "event_weighted": 0.4250673048160335,
+    "events": 6686,
+    "median_excess": -0.031528966706433126
+   }
+  },
+  "incr_lt_10pct": {
+   "placebo": {
+    "companies": 2333,
+    "contamination": "family",
+    "control_rate": 0.4415614342318157,
+    "difference": 0.0025382223624829696,
+    "event_rate": 0.4440996565942987,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 0.4251620141585839,
+    "skipped": 5416,
+    "where": "((payload->>'holdings_increase')::float < 0.10) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 3219,
+    "company_equal": 0.42378412491595147,
+    "event_weighted": 0.423333244118513,
+    "events": 37363,
+    "median_excess": -0.02714754233907901
+   }
+  },
+  "role_10pct_only": {
+   "placebo": {
+    "companies": 620,
+    "contamination": "family",
+    "control_rate": 0.34367959549411164,
+    "difference": 0.082547363031234,
+    "event_rate": 0.42622695852534564,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 7.901491777563255e-05,
+    "skipped": 1157,
+    "where": "((payload->>'is_ten_pct')::boolean AND NOT (payload->>'is_director')::boolean AND NOT (payload->>'is_ceo')::boolean AND NOT (payload->>'is_cfo')::boolean) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 1068,
+    "company_equal": 0.38607961938600033,
+    "event_weighted": 0.3924367121575164,
+    "events": 9599,
+    "median_excess": -0.04044521996746564
+   }
+  },
+  "role_ceo": {
+   "placebo": {
+    "companies": 1589,
+    "contamination": "family",
+    "control_rate": 0.41461825182718826,
+    "difference": 0.015003783364387516,
+    "event_rate": 0.4296220351915758,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 0.16843983426727632,
+    "skipped": 2642,
+    "where": "((payload->>'is_ceo')::boolean) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 2283,
+    "company_equal": 0.412667073471645,
+    "event_weighted": 0.40094171997157074,
+    "events": 11256,
+    "median_excess": -0.04348667175578358
+   }
+  },
+  "role_cfo": {
+   "placebo": {
+    "companies": 917,
+    "contamination": "family",
+    "control_rate": 0.45119913105191184,
+    "difference": 0.02504067784874764,
+    "event_rate": 0.4762398089006595,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 0.23775070725839742,
+    "skipped": 1250,
+    "where": "((payload->>'is_cfo')::boolean AND NOT (payload->>'is_ceo')::boolean) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 1373,
+    "company_equal": 0.44972609915552864,
+    "event_weighted": 0.44400106411279594,
+    "events": 3759,
+    "median_excess": -0.022991496725780713
+   }
+  },
+  "role_director_only": {
+   "placebo": {
+    "companies": 2568,
+    "contamination": "family",
+    "control_rate": 0.4357244002103815,
+    "difference": 0.013828706556510292,
+    "event_rate": 0.44955310676689186,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 0.21723650205558714,
+    "skipped": 5743,
+    "where": "((payload->>'is_director')::boolean AND NOT (payload->>'is_ceo')::boolean AND NOT (payload->>'is_cfo')::boolean) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 3559,
+    "company_equal": 0.42471565217482354,
+    "event_weighted": 0.4328307525129041,
+    "events": 29448,
+    "median_excess": -0.025205362801414388
+   }
+  },
+  "role_other_officer": {
+   "placebo": {
+    "companies": 1286,
+    "contamination": "family",
+    "control_rate": 0.44926932623277877,
+    "difference": 0.0012946898444565623,
+    "event_rate": 0.45056401607723534,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 0.9134008501193046,
+    "skipped": 2202,
+    "where": "(payload->>'officer_title' IS NOT NULL AND NOT (payload->>'is_ceo')::boolean AND NOT (payload->>'is_cfo')::boolean) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 1961,
+    "company_equal": 0.4333081526399788,
+    "event_weighted": 0.4213214171720396,
+    "events": 9399,
+    "median_excess": -0.029165425233199427
+   }
+  },
+  "value_100k_1m": {
+   "placebo": {
+    "companies": 2101,
+    "contamination": "family",
+    "control_rate": 0.4421183257749179,
+    "difference": 0.026074541567164128,
+    "event_rate": 0.468192867342082,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 0.031711836403515464,
+    "skipped": 3322,
+    "where": "((payload->>'value')::float >= 100000 AND (payload->>'value')::float < 1000000) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 3009,
+    "company_equal": 0.43911630821421177,
+    "event_weighted": 0.42403852496866545,
+    "events": 15159,
+    "median_excess": -0.028848582373959708
+   }
+  },
+  "value_ge_1m": {
+   "placebo": {
+    "companies": 1013,
+    "contamination": "family",
+    "control_rate": 0.4172997069838136,
+    "difference": 0.02801908522540309,
+    "event_rate": 0.4453187922092167,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 0.06796356085628841,
+    "skipped": 1511,
+    "where": "((payload->>'value')::float >= 1000000) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 1697,
+    "company_equal": 0.3923198909741519,
+    "event_weighted": 0.3886652712928675,
+    "events": 6211,
+    "median_excess": -0.049256583204900894
+   }
+  },
+  "value_lt_100k": {
+   "placebo": {
+    "companies": 2572,
+    "contamination": "family",
+    "control_rate": 0.4272472505462397,
+    "difference": 0.0022216713215935592,
+    "event_rate": 0.42946892186783325,
+    "event_type": "INSIDER_OPEN_MARKET_BUY",
+    "lookback": 60,
+    "sign_test_p": 0.4479657211523963,
+    "skipped": 6115,
+    "where": "((payload->>'value')::float < 100000) AND NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "spy": {
+    "companies": 3480,
+    "company_equal": 0.4248924014310668,
+    "event_weighted": 0.4258765383768442,
+    "events": 40871,
+    "median_excess": -0.027021296446549603
+   }
+  }
+ },
+ "insider_placebo_pre20_family": {
+  "companies": 3340,
+  "contamination": "family",
+  "control_rate": 0.42259430417826865,
+  "difference": 0.027462884289011447,
+  "event_rate": 0.45005718846728004,
+  "event_type": "INSIDER_OPEN_MARKET_BUY",
+  "lookback": 20,
+  "sign_test_p": 0.0026237381664679883,
+  "skipped": 7432,
+  "where": "NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+ },
+ "insider_placebo_pre60_any": {
+  "companies": 2951,
+  "contamination": "any",
+  "control_rate": 0.43930700168839787,
+  "difference": 0.00591327325485238,
+  "event_rate": 0.44522027494325017,
+  "event_type": "INSIDER_OPEN_MARKET_BUY",
+  "lookback": 60,
+  "sign_test_p": 0.11605578716308627,
+  "skipped": 10867,
+  "where": "NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+ },
+ "insider_placebo_pre60_family": {
+  "companies": 3277,
+  "contamination": "family",
+  "control_rate": 0.4262509381406238,
+  "difference": 0.018929093318779004,
+  "event_rate": 0.4451800314594028,
+  "event_type": "INSIDER_OPEN_MARKET_BUY",
+  "lookback": 60,
+  "sign_test_p": 0.005441011407918793,
+  "skipped": 8448,
+  "where": "NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+ },
+ "insider_placebo_pre90_family": {
+  "companies": 3236,
+  "contamination": "family",
+  "control_rate": 0.44299681656758294,
+  "difference": 0.001335546835392322,
+  "event_rate": 0.44433236340297527,
+  "event_type": "INSIDER_OPEN_MARKET_BUY",
+  "lookback": 90,
+  "sign_test_p": 0.6381220978618631,
+  "skipped": 9049,
+  "where": "NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+ },
+ "insider_spy": {
+  "companies": 4412,
+  "company_equal": 0.42207268111005286,
+  "event_weighted": 0.4217155894024839,
+  "events": 62241,
+  "median_excess": -0.029447015824587752
+ }
+}

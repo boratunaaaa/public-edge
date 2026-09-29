@@ -71,8 +71,45 @@ def test_a_discretionary_insider_buy_gets_the_validated_base_edge(engine):
 @db
 @pytest.mark.usefixtures("clean")
 def test_a_ten_percent_owner_buy_uses_the_more_specific_validated_cell(engine):
-    s = _score(engine, {"is_ten_pct": True, "value": 2_000_000})
+    owner = {"is_ten_pct": True, "is_director": False, "is_ceo": False, "is_cfo": False, "value": 2_000_000}
+    s = _score(engine, owner)
     assert s["cell"] == "INSIDER_BUY:role_10pct_only" and s["score_pp"] == pytest.approx(8.25, abs=0.01)
+
+
+@pytest.mark.parametrize("flags, owner_cell", [
+    ({"is_ten_pct": True}, False),  # competing flags missing: NOT NULL is unknown in the research SQL
+    ({"is_ten_pct": True, "is_director": None, "is_ceo": False, "is_cfo": False}, False),
+    ({"is_ten_pct": True, "is_director": False, "is_ceo": False, "is_cfo": False}, True),
+    ({"is_ten_pct": "true", "is_director": "false", "is_ceo": "false", "is_cfo": "false"}, True),  # JSON text booleans
+    ({"is_ten_pct": True, "is_director": True, "is_ceo": False, "is_cfo": False}, False),
+    ({"is_ten_pct": None, "is_director": False, "is_ceo": False, "is_cfo": False}, False),
+])
+def test_bucket_membership_follows_sql_null_semantics(flags, owner_cell):
+    from app.scoring.engine import BUCKETS
+    assert (BUCKETS["role_10pct_only"](flags) is True) is owner_cell
+
+
+def test_standard_errors_are_implied_by_the_measured_paired_test():
+    from app.scoring.evidence import _se
+    assert _se({"difference": 0.04, "sign_test_p": 0.05}) == pytest.approx(0.04 / 1.959964, rel=1e-4)
+    assert _se({"difference": 0.04, "sign_test_p": 0.05}) * 1.96 == pytest.approx(0.04, rel=1e-3)  # lower bound ~ 0
+    assert _se({"difference": 0.04, "sign_test_p": None}) == float("inf")
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_an_event_not_public_at_the_scoring_moment_scores_zero(engine):
+    from app.scoring.engine import score_event
+    owner = {"is_ten_pct": True, "is_director": False, "is_ceo": False, "is_cfo": False, "value": 2e6}
+    with engine.begin() as c:
+        eid = _event(c, payload=owner, key="future")
+        c.execute(text("UPDATE events SET available_at = :a WHERE id = :i"), {"a": NOW + timedelta(hours=1), "i": eid})
+        ev = dict(c.execute(text("SELECT * FROM events WHERE id = :i"), {"i": eid}).mappings().one())
+        fut = score_event(c, ev, NOW)
+        ev2 = {**ev, "available_at": None, "public_at": None}
+        none = score_event(c, ev2, NOW)
+    assert (fut["score_pp"], fut["cell"]) == (0.0, "NOT_PUBLIC_YET")
+    assert (none["score_pp"], none["cell"]) == (0.0, "NO_PUBLIC_TIME")
 
 
 @db
@@ -107,7 +144,8 @@ def _live_setup(engine, monkeypatch):
         _universe(c)
         zb = _bars(c, "ZBIO", today - timedelta(days=90), 60, 10.0, 0.01)
         spy = _bars(c, "SPY", today - timedelta(days=90), 60, 400.0, 0.5)
-        eid = _event(c, d=today - timedelta(days=1), payload={"is_ten_pct": True, "value": 2e6})
+        eid = _event(c, d=today - timedelta(days=1),
+                     payload={"is_ten_pct": True, "is_director": False, "is_ceo": False, "is_cfo": False, "value": 2e6})
     _serve(monkeypatch, ZBIO=zb, SPY=spy)
     return eid
 

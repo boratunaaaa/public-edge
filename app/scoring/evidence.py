@@ -51,12 +51,16 @@ def bh_survivors(pvals: dict[str, float], q: float = Q) -> set[str]:
 
 
 def _se(cell: dict) -> float:
-    n = cell.get("companies") or 0
-    pe = cell.get("event_rate")
-    pc = cell.get("control_rate", cell.get("placebo_rate"))
-    if not n or pe is None or pc is None:
+    """Standard error IMPLIED by the measured test itself: the evidence is a paired, company-equal comparison tested with
+    a two-sided sign test, so marginal rates cannot give its variance (they would assume independent samples). Under
+    the normal approximation of that test, z = Phi^-1(1 - p/2) and se = |difference| / z - the interval whose lower
+    bound touches 0 exactly at p = 0.05. A missing or degenerate test gives an infinite SE (no usable interval)."""
+    from statistics import NormalDist
+    d, p = cell.get("difference"), cell.get("sign_test_p")
+    if d is None or p is None or not (0 < p < 1) or d == 0:
         return math.inf
-    return math.sqrt(pe * (1 - pe) / n + pc * (1 - pc) / n)
+    z = NormalDist().inv_cdf(1 - p / 2)
+    return abs(d) / z if z > 0 else math.inf
 
 
 def _effect(name: str, cell: dict, source: str, survives: bool) -> Effect:

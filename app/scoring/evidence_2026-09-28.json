@@ -194,6 +194,6 @@
  },
  "sources": {
   "placebo": "docs/v2_placebo_results_2026-09-28.jsonl (same-issuer +/-182 day control)",
-  "research_v2": "production read-only run 2026-09-28 05:32 UTC (app.backtest.research_v2), /opt/pe-crosscheck/research_v2.json"
+  "research_v2": "docs/v2_research_2026-09-28_insider.json (subset of the production read-only research_v2 run, 2026-09-28 05:32 UTC)"
  }
 }

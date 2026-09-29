@@ -13,9 +13,17 @@ Probability points of beating SPY over 90 days, the event minus a matched contro
            + VALIDATED risk adjustments that apply at the scoring moment
     ci_low = score - 1.96 * sqrt(sum of the components' squared standard errors)
 
-When several validated cells match, the smallest effect is used. Components are added (a V1 assumption, stated).
+When several validated cells match, the smallest effect is used. Components are added and their errors combined as
+if independent (a V1 assumption, stated: the edge cell and the 10-K adjustment were measured on different events).
 
-## Which evidence counts (`app/scoring/evidence.py`, `evidence_2026-09-28.json`)
+Standard errors are those IMPLIED by each measured test: the evidence is a paired, company-equal comparison tested
+with a two-sided sign test, so se = |difference| / z(p) under its normal approximation (a component's lower bound
+touches 0 exactly at p = 0.05). Marginal event / control rates are never used for the variance. Bucket membership
+follows the research SQL exactly, including NULL semantics: a missing role flag never qualifies for a bucket. An
+event that is not public at the scoring moment (or has no public time) scores 0.
+
+## Which evidence counts (`app/scoring/evidence.py`, `evidence_2026-09-28.json`; sources
+`docs/v2_research_2026-09-28_insider.json`, `docs/v2_placebo_results_2026-09-28.jsonl`)
 A component gets a weight only if it has >= 100 companies and its p-value survives Benjamini-Hochberg (q 0.05) across
 its test family (the 11 insider buckets are one family). Everything else weighs 0 and is shown with the reason.
 

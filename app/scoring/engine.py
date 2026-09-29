@@ -27,9 +27,27 @@ MODEL_VERSION = "score.v1-evidence"
 Z95 = 1.96
 TENK_WINDOW_DAYS = 90  # the 10-K effect was measured over the 90 days after the change
 
-# research_v2.INSIDER_BUCKETS as Python predicates on the Form 4 payload (same definitions, same order)
+# research_v2.INSIDER_BUCKETS as Python predicates with SQL three-valued logic: `(payload->>'x')::boolean` is NULL when
+# the key is missing or null, NOT NULL is NULL, and a WHERE clause keeps a row only when the whole condition is TRUE.
 def _b(p, k):
-    return bool(p.get(k))
+    """SQL boolean of payload->>k: True / False / None (unknown)."""
+    v = p.get(k)
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    t = str(v).strip().lower()
+    return True if t in ("true", "t", "1", "yes", "y", "on") else False if t in ("false", "f", "0", "no", "n", "off") else None
+
+
+def _not(v):
+    return None if v is None else not v
+
+
+def _and(*vs):
+    if any(v is False for v in vs):
+        return False
+    return None if any(v is None for v in vs) else True
 
 
 def _f(p, k):
@@ -39,19 +57,29 @@ def _f(p, k):
         return None
 
 
+def _cmp(x, test):
+    return None if x is None else test(x)
+
+
 BUCKETS = {
     "role_ceo": lambda p: _b(p, "is_ceo"),
-    "role_cfo": lambda p: _b(p, "is_cfo") and not _b(p, "is_ceo"),
-    "role_director_only": lambda p: _b(p, "is_director") and not _b(p, "is_ceo") and not _b(p, "is_cfo"),
-    "role_10pct_only": lambda p: _b(p, "is_ten_pct") and not (_b(p, "is_director") or _b(p, "is_ceo") or _b(p, "is_cfo")),
-    "role_other_officer": lambda p: p.get("officer_title") is not None and not _b(p, "is_ceo") and not _b(p, "is_cfo"),
-    "value_lt_100k": lambda p: (_f(p, "value") is not None and _f(p, "value") < 1e5),
-    "value_100k_1m": lambda p: (_f(p, "value") is not None and 1e5 <= _f(p, "value") < 1e6),
-    "value_ge_1m": lambda p: (_f(p, "value") is not None and _f(p, "value") >= 1e6),
-    "incr_lt_10pct": lambda p: (_f(p, "holdings_increase") is not None and _f(p, "holdings_increase") < 0.10),
-    "incr_10_50pct": lambda p: (_f(p, "holdings_increase") is not None and 0.10 <= _f(p, "holdings_increase") < 0.50),
-    "incr_ge_50pct": lambda p: (_f(p, "holdings_increase") is not None and _f(p, "holdings_increase") >= 0.50),
+    "role_cfo": lambda p: _and(_b(p, "is_cfo"), _not(_b(p, "is_ceo"))),
+    "role_director_only": lambda p: _and(_b(p, "is_director"), _not(_b(p, "is_ceo")), _not(_b(p, "is_cfo"))),
+    "role_10pct_only": lambda p: _and(_b(p, "is_ten_pct"), _not(_b(p, "is_director")), _not(_b(p, "is_ceo")),
+                                      _not(_b(p, "is_cfo"))),
+    "role_other_officer": lambda p: _and(p.get("officer_title") is not None, _not(_b(p, "is_ceo")), _not(_b(p, "is_cfo"))),
+    "value_lt_100k": lambda p: _cmp(_f(p, "value"), lambda x: x < 1e5),
+    "value_100k_1m": lambda p: _cmp(_f(p, "value"), lambda x: 1e5 <= x < 1e6),
+    "value_ge_1m": lambda p: _cmp(_f(p, "value"), lambda x: x >= 1e6),
+    "incr_lt_10pct": lambda p: _cmp(_f(p, "holdings_increase"), lambda x: x < 0.10),
+    "incr_10_50pct": lambda p: _cmp(_f(p, "holdings_increase"), lambda x: 0.10 <= x < 0.50),
+    "incr_ge_50pct": lambda p: _cmp(_f(p, "holdings_increase"), lambda x: x >= 0.50),
 }
+
+
+def _discretionary(p) -> bool:
+    """research_v2.DISCRETIONARY = NOT COALESCE((payload->>'is_10b5_1')::boolean, false)."""
+    return not (_b(p, "is_10b5_1") or False)
 
 # families without validated evidence (weight 0) - the reason is taken from the evidence file
 UNVALIDATED_FAMILY = {"ACTIVIST_13D": "13D", "CONGRESS_BUY": "HOUSE_BUY", "MULTI_SIGNAL_EVENT": "MULTI_SIGNAL",
@@ -71,14 +99,14 @@ def _edge_cell(ev: dict, reg: dict) -> tuple[object | None, str, list[dict]]:
     p = ev.get("payload") or {}
     comps: list[dict] = []
     if et == "INSIDER_OPEN_MARKET_BUY":
-        if _b(p, "is_10b5_1"):
+        if not _discretionary(p):
             return None, "OUTSIDE_EVIDENCE:10b5-1", [{"component": "INSIDER_BUY", "applies": False, "status": NOT_MEASURED,
                                                      "effect_pp": 0.0, "companies": None, "p": None,
                                                      "why": "pre-planned (10b5-1) purchase: the evidence covers discretionary buys only"}]
         matched = []
         for name, pred in BUCKETS.items():
             eff = reg["INSIDER_BUY_BUCKETS"][name]
-            hit = pred(p)
+            hit = pred(p) is True  # a WHERE keeps the row only when the condition is TRUE (not NULL)
             comps.append(_comp(f"INSIDER_BUY:{name}", eff, hit and eff.usable,
                                "" if (hit or not eff.usable) else "bucket does not match this filing"))
             if hit and eff.usable:
@@ -104,6 +132,13 @@ def _edge_cell(ev: dict, reg: dict) -> tuple[object | None, str, list[dict]]:
 def score_event(conn: Connection, ev: dict, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
     reg = registry()
+    public = ev.get("available_at") or ev.get("public_at")
+    if public is None or public > now:  # the event itself must be public at the scoring moment
+        return {"model_version": MODEL_VERSION, "evidence_version": reg["version"], "scored_at": now, "score_pp": 0.0,
+                "ci_low_pp": 0.0, "cell": "NOT_PUBLIC_YET" if public else "NO_PUBLIC_TIME",
+                "components": [{"component": "EVENT", "applies": False, "status": NOT_MEASURED, "effect_pp": 0.0,
+                                "companies": None, "p": None,
+                                "why": "event not public at the scoring moment" if public else "event has no public time"}]}
     cell, cell_name, comps = _edge_cell(ev, reg)
     parts = [cell] if cell else []
     tk = reg["TENK_CHANGE_RECENT"]
