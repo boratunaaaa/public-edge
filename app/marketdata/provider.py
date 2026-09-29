@@ -12,6 +12,7 @@ from sqlalchemy.engine import Connection
 
 from app import http
 from app.db.models import companies, market_prices, tickers
+from app.core import clock as _clock
 
 log = logging.getLogger(__name__)
 BENCHMARK = "SPY"
@@ -114,7 +115,7 @@ def ensure_prices(conn: Connection, symbol: str, start: date, end: date, provide
     Any other failure raises PriceFetchError so the caller can schedule a retry.
     """
     have = load_bars(conn, symbol, start, end)
-    today = date.today()
+    today = _clock.today()  # replay: the simulated date (app.core.clock)
     need_end = min(end, today)
     covered = bool(have) and have[0].date <= start + timedelta(days=5) and have[-1].date >= need_end - timedelta(days=4)
     if covered:

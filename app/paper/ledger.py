@@ -22,6 +22,7 @@ from sqlalchemy.engine import Connection, Engine
 from app.db.models import (paper_accounts, paper_cash, paper_orders, paper_performance, paper_positions, paper_trades,
                            proposed_trades, security_master)
 from app.marketdata.calendar import first_tradable_session, next_trading_day
+from app.core import clock as _clock
 
 
 def _f(name: str, default: float) -> float:
@@ -64,7 +65,7 @@ def ensure_accounts(conn: Connection, capital: float | None = None, book: str = 
         if aid is None:
             aid = conn.execute(paper_accounts.insert().values(name=name, strategy=strat, starting_capital=capital, book=book,
                                                               commission_per_trade=COMMISSION).returning(paper_accounts.c.id)).scalar_one()
-            conn.execute(paper_cash.insert().values(account_id=aid, on_date=date.today(), delta=capital, balance_after=capital,
+            conn.execute(paper_cash.insert().values(account_id=aid, on_date=_clock.today(), delta=capital, balance_after=capital,
                                                     reason="DEPOSIT"))
         out[strat] = aid
     return out
@@ -321,7 +322,7 @@ def check_exits(conn: Connection, today: date) -> dict:
             continue
         conn.execute(paper_positions.update().where(paper_positions.c.id == p["id"]).values(status="CLOSING", exit_reason=reason))
         conn.execute(paper_orders.insert().values(account_id=p["account_id"], proposal_id=p["proposal_id"], position_id=p["id"],
-                                                  ticker=p["ticker"], side="SELL", requested_at=datetime.now(timezone.utc),
+                                                  ticker=p["ticker"], side="SELL", requested_at=_clock.now(),
                                                   not_before=not_before, status="PENDING", note=reason))
         out["exit_orders"] += 1
     return out
@@ -357,7 +358,7 @@ def snapshot(conn: Connection, today: date) -> int:
 
 def run(engine: Engine, today: date | None = None) -> dict:
     from app.paper.proposals import expire
-    today = today or date.today()
+    today = today or _clock.today()
     out = {"expired": expire(engine)}
     with engine.begin() as conn:
         ensure_accounts(conn)

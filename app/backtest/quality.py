@@ -32,6 +32,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
 from app.db.models import metrics_quality
+from app.core import clock as _clock
 
 MIN_COMPANIES = 30
 MIN_EPISODES = 30
@@ -145,7 +146,7 @@ def outcome_for(excess: float | None, has_return: bool, missing_reason: str | No
 
 def load_rows(conn: Connection, event_type: str, cond: str, params: dict, horizon: int, as_of: date | None = None) -> list[Row]:
     """Every MATURE comparable event (never only the ones that happen to have prices)."""
-    as_of = as_of or date.today()
+    as_of = as_of or _clock.today()
     q = text(f"""
         SELECT e.id, COALESCE(e.issuer_cik, 'T:' || e.ticker, 'E:' || e.id::text) issuer, sm.sector,
                e.public_date, r.excess_ret, r.ret, r.mae, r.sector_excess, (r.event_id IS NOT NULL) has_ret, e.missing_reason,
@@ -294,13 +295,13 @@ def reason_text_tr(st: QualityStats | dict) -> str:
 def cached(conn: Connection, key: str) -> dict | None:
     r = conn.execute(text("SELECT status, reasons, stats, computed_at FROM metrics_quality WHERE metric_key = :k"),
                      {"k": key}).mappings().first()
-    if r and r["computed_at"] and datetime.now(timezone.utc) - r["computed_at"] < CACHE_TTL:
+    if r and r["computed_at"] and _clock.now() - r["computed_at"] < CACHE_TTL:
         return dict(r["stats"])
     return None
 
 
 def store(conn: Connection, key: str, st: QualityStats) -> None:
-    vals = {"status": st.status, "reasons": st.reasons, "stats": _json(st.as_dict()), "computed_at": datetime.now(timezone.utc)}
+    vals = {"status": st.status, "reasons": st.reasons, "stats": _json(st.as_dict()), "computed_at": _clock.now()}
     conn.execute(pg_insert(metrics_quality).values(metric_key=key[:160], **vals)
                  .on_conflict_do_update(index_elements=["metric_key"], set_=vals))
 

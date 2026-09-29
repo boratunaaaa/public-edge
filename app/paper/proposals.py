@@ -22,6 +22,7 @@ from sqlalchemy import and_, select, text
 from sqlalchemy.engine import Connection, Engine
 
 from app.db.models import discovery_risks, events, paper_positions, proposed_trades, universe_snapshots
+from app.core import clock as _clock
 
 
 def _f(name: str, default: float) -> float:
@@ -89,7 +90,7 @@ def size_limits(market_cap: float | None, bucket: str | None, risk_names: set[st
 
 def evaluate_gate(conn: Connection, ev: dict, *, family_ok: tuple[bool, str], price_basis: str | None,
                   now: datetime | None = None) -> GateResult:
-    now = now or datetime.now(timezone.utc)
+    now = now or _clock.now()
     g = GateResult(ok=False)
     cik, ticker = ev.get("issuer_cik"), ev.get("ticker")
     # 1. data quality
@@ -190,7 +191,7 @@ def create_proposal(engine: Engine, event_id: int, *, research_only: bool = Fals
     """Run the gate for one event and store a PENDING proposal when it passes."""
     from app.paper.alpha import EVENT_FAMILY, proposal_allowed
     from app.securitymaster.provider import get_security_master
-    now = now or datetime.now(timezone.utc)
+    now = now or _clock.now()
     with engine.begin() as conn:
         ev = conn.execute(select(events).where(events.c.id == event_id)).mappings().first()
         if ev is None:
@@ -231,7 +232,7 @@ def scan_new_events(engine: Engine, days: int = 2) -> dict:
     with engine.connect() as conn:
         ids = [r[0] for r in conn.execute(select(events.c.id).where(and_(
             events.c.is_backfill.is_(False), events.c.superseded.is_(False), events.c.event_type.in_(list(EVENT_FAMILY)),
-            events.c.public_date >= date.today() - timedelta(days=days),
+            events.c.public_date >= _clock.today() - timedelta(days=days),
             ~select(proposed_trades.c.id).where(proposed_trades.c.event_id == events.c.id).exists())).order_by(events.c.id)).all()]
     out = {"checked": len(ids), "created": 0, "rejected": {}, "rejected_ids": {}}
     for eid in ids:
@@ -260,7 +261,7 @@ def source_valid(conn: Connection, event_id: int | None, lock: bool = False) -> 
 def expire(engine: Engine, now: datetime | None = None) -> int:
     """Time-outs, plus proposals / unfilled paper BUY orders whose source event was superseded."""
     from app.db.models import paper_orders
-    now = now or datetime.now(timezone.utc)
+    now = now or _clock.now()
     with engine.begin() as conn:
         n = conn.execute(proposed_trades.update().where(and_(
             proposed_trades.c.approval_status == "PENDING", proposed_trades.c.expires_at <= now))
@@ -280,7 +281,7 @@ def decide(engine: Engine, code: str, approve: bool, by: str, now: datetime | No
     """Human decision. Only a PENDING, unexpired proposal can change state; approval creates paper
     BUY orders (one per active strategy book) that fill at the NEXT session - never a real order."""
     from app.paper.ledger import queue_buy
-    now = now or datetime.now(timezone.utc)
+    now = now or _clock.now()
     with engine.begin() as conn:
         p = conn.execute(select(proposed_trades).where(proposed_trades.c.code == code.strip().upper())
                          .with_for_update()).mappings().first()

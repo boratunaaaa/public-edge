@@ -22,6 +22,7 @@ from app.db.models import corporate_actions, listing_periods, security_master, s
 from app.entities.registry import resolver
 from app.marketdata.provider import Bar, MarketDataProvider, PriceFetchError, ensure_prices
 from app.securitymaster.delisting import Delisting, classify_delisting
+from app.core import clock as _clock
 
 log = logging.getLogger(__name__)
 SYMBOL_GRACE_DAYS = 120  # a filing symbol stays valid this long after its last observation
@@ -219,7 +220,7 @@ def _validate_historical(bars: list[Bar], on: date, dl: Delisting | None) -> tup
         if last > dl.date + timedelta(days=30):
             return [], "TICKER_REUSED"
         return bars, None
-    if last > date.today() - timedelta(days=30):
+    if last > _clock.today() - timedelta(days=30):
         return [], "SYMBOL_UNVERIFIED"  # still trading but not in the SEC ticker file: cannot confirm identity
     return bars, None
 
