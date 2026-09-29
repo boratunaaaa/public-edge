@@ -324,8 +324,9 @@ def test_transient_price_failure_is_retried_not_no_data(engine, monkeypatch):
     with engine.connect() as c:
         e = c.execute(select(events)).mappings().first()
     assert r["retry"] == 1 and e["returns_status"] == "retry" and "503" in e["returns_error"]
-    with engine.begin() as c:  # time passes, provider recovers
-        c.execute(events.update().values(returns_checked_at=text("now() - interval '21 hours'")))
+    with engine.begin() as c:  # time passes (the retry backoff elapses), provider recovers
+        c.execute(events.update().values(returns_checked_at=text("now() - interval '21 hours'"),
+                                         returns_next_at=text("now() - interval '1 hour'")))
     mode["m"] = "up"
     assert jobs.compute_pending(engine)["processed"] == 1
     with engine.connect() as c:

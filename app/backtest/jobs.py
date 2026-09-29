@@ -5,7 +5,7 @@ import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import func, and_, or_, select, text
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine
 
@@ -24,39 +24,99 @@ def _ensure_spy(conn: Connection) -> list:
     return ensure_prices(conn, BENCHMARK, PRICE_HISTORY_START, date.today())
 
 
-def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600, backfill: bool | None = None,
-                    ciks: list[str] | None = None, event_ids: list[int] | None = None) -> dict:
-    """Compute/refresh returns for events whose horizons have (newly) elapsed.
+# ---------------- return queue ----------------
+# Priority tiers (lower first). Inside a tier the order is a hash of the issuer: deterministic, grouped by issuer
+# (price cache hits) and uncorrelated with CIK size / age - the priced subset is never the "low CIK" subset.
+TIER_NEVER_ATTEMPTED, TIER_HORIZON_DUE, TIER_TEMPORARY, TIER_LONG_TERM = 1, 2, 3, 4
+GAP_RECHECK_DAYS = 7  # a horizon that has elapsed but has no exit bar yet (vendor gap / lag)
+VENDOR_RETRY_HOURS = 1
+LANE_MAIN, LANE_VENDOR = "main", "vendor"
+DUE_STATUSES = ("pending", "partial", "retry", "no_data")
 
-    The price series is chosen by the security master (same CIK, never a reused symbol); an event
-    that cannot be priced is recorded with WHY (missing_reason) instead of silently disappearing.
-    backfill: None = all events, True/False = only historical / only live (separate processes).
-    ciks / event_ids: only these issuers / events (targeted recompute after a new price source or an issuer
-    re-attribution, never the whole universe)."""
-    from app.securitymaster.provider import get_security_master
-    t0 = time.time()
-    today = date.today()
-    now = datetime.now(timezone.utc)
-    due = or_(
+
+def _due(now: datetime):
+    """Main lane: returns_next_at when it is set, else the pre-0013 rule on returns_checked_at."""
+    legacy = or_(
+        events.c.returns_checked_at.is_(None),
         and_(events.c.returns_status.in_(["pending", "partial", "retry"]),
-             or_(events.c.returns_checked_at.is_(None), events.c.returns_checked_at < now - timedelta(hours=RECHECK_HOURS))),
+             events.c.returns_checked_at < now - timedelta(hours=RECHECK_HOURS)),
         # confirmed no-data is re-verified monthly (symbol changes, provider backfills, new SEC actions)
         and_(events.c.returns_status == "no_data", events.c.returns_checked_at < now - timedelta(days=NO_DATA_RECHECK_DAYS)),
     )
+    return and_(events.c.returns_status.in_(DUE_STATUSES),
+                case((events.c.returns_next_at.isnot(None), events.c.returns_next_at <= now), else_=legacy))
+
+
+def queue_tier():
+    """1 never attempted | 2 partial (its next horizon is due) | 3 temporary retry / young pending | 4 long-term."""
+    return case((events.c.returns_checked_at.is_(None), TIER_NEVER_ATTEMPTED),
+                (events.c.returns_status == "partial", TIER_HORIZON_DUE),
+                (events.c.returns_status.in_(["retry", "pending"]), TIER_TEMPORARY),
+                else_=TIER_LONG_TERM)
+
+
+def queue_order():
+    return (queue_tier(), func.md5(func.coalesce(events.c.issuer_cik, events.c.ticker, "")), events.c.id)
+
+
+def next_eligible_at(entry: date, done: set[int], today: date, now: datetime) -> datetime | None:
+    """When a partial event can gain its next horizon: the earliest missing horizon's end + 1 day (the exit bar is
+    published the day after). A horizon that has already elapsed but is still missing is a data gap -> re-checked
+    after GAP_RECHECK_DAYS. None = nothing left to compute."""
+    missing = [entry + timedelta(days=h) for h in HORIZONS if h not in done]
+    if not missing:
+        return None
+    cands = []
+    future = [t for t in missing if t > today]
+    if future:
+        d = min(future) + timedelta(days=1)
+        cands.append(datetime(d.year, d.month, d.day, tzinfo=timezone.utc))
+    if any(t <= today for t in missing):
+        cands.append(now + timedelta(days=GAP_RECHECK_DAYS))
+    return min(cands)
+
+
+def queue_select(now: datetime, *, lane: str = LANE_MAIN, backfill: bool | None = None, ciks: list[str] | None = None,
+                 event_ids: list[int] | None = None, limit: int = 500):
+    """The events the next batch prices, in queue order (see queue_order)."""
+    if lane == LANE_VENDOR:
+        due = and_(events.c.returns_status == "vendor_wait",
+                   or_(events.c.returns_next_at.is_(None), events.c.returns_next_at <= now))
+    else:
+        due = _due(now)
     conds = [or_(events.c.ticker.isnot(None), events.c.issuer_cik.isnot(None)), events.c.superseded.is_(False),
-             events.c.public_date <= today - timedelta(days=2), due]
+             events.c.public_date <= now.date() - timedelta(days=2), due]
     if backfill is not None:
         conds.append(events.c.is_backfill.is_(backfill))
     if ciks:
         conds.append(events.c.issuer_cik.in_([c.zfill(10) for c in ciks]))
     if event_ids:
         conds.append(events.c.id.in_(event_ids))
+    return (select(events.c.id, events.c.ticker, events.c.issuer_cik, events.c.public_date,
+                   # V2: available_at is the only entry anchor (same as public_at / end-of-day for old rows)
+                   func.coalesce(events.c.available_at, events.c.public_at))
+            .where(and_(*conds)).order_by(*queue_order()).limit(limit))
+
+
+def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600, backfill: bool | None = None,
+                    ciks: list[str] | None = None, event_ids: list[int] | None = None, lane: str = LANE_MAIN) -> dict:
+    """Compute/refresh returns for events whose horizons have (newly) elapsed.
+
+    The price series is chosen by the security master (same CIK, never a reused symbol); an event
+    that cannot be priced is recorded with WHY (missing_reason) instead of silently disappearing.
+    backfill: None = all events, True/False = only historical / only live (separate processes).
+    ciks / event_ids: only these issuers / events (targeted recompute after a new price source or an issuer
+    re-attribution, never the whole universe).
+    lane: "main" never calls the delisted-price vendor (quota 50/hour, 72 s spacing): an event that needs it moves to
+    returns_status 'vendor_wait' and is priced by the "vendor" lane (compute_vendor_lane, its own thread), so normal
+    events never wait behind the vendor's rate limit. Selection order: queue_order() (tiers, then issuer hash)."""
+    from app.securitymaster.provider import VendorDeferred, VendorUnavailable, get_security_master
+    t0 = time.time()
+    today = date.today()
+    now = datetime.now(timezone.utc)
+    vendor_lane = lane == LANE_VENDOR
     with engine.connect() as conn:
-        rows = conn.execute(select(events.c.id, events.c.ticker, events.c.issuer_cik, events.c.public_date,
-                                   # V2: available_at is the only entry anchor (same as public_at / end-of-day for old rows)
-                                   func.coalesce(events.c.available_at, events.c.public_at))
-                            .where(and_(*conds)).order_by(events.c.issuer_cik, events.c.ticker, events.c.public_date)
-                            .limit(limit)).all()
+        rows = conn.execute(queue_select(now, lane=lane, backfill=backfill, ciks=ciks, event_ids=event_ids, limit=limit)).all()
     if not rows:
         return {"processed": 0}
     try:
@@ -64,17 +124,18 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
             spy = _ensure_spy(conn)
     except PriceFetchError as e:
         return {"processed": 0, "error": f"benchmark unavailable: {e}"}
-    done = nodata = retry = 0
+    done = nodata = retry = deferred = 0
     cache: dict[str, list] = {}
     otc_keys: set[str] = set()  # vendor series confirmed as OTC continuations: no cash-out at the delisting
     failed: dict[str, str] = {}
     sectors = SectorBench()
+    stop = None
     for eid, ticker, cik, pdate, pat in rows:
-        if time.time() - t0 > time_budget_s:
+        if time.time() - t0 > time_budget_s or stop:
             break
         with engine.begin() as conn:
             now = datetime.now(timezone.utc)
-            sm = get_security_master(conn)
+            sm = get_security_master(conn, allow_vendor=vendor_lane, skip_known_absent=True)
             sym, basis, missing = sm.price_symbol(cik, pdate, ticker)
             dl = sm.delisting(cik) if cik else None
             vendor = None
@@ -96,25 +157,32 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                 why = "HISTORICAL_PRICE_STILL_MISSING" if _has_resolution(conn, cik) else _missing(missing, dl, pdate)
                 conn.execute(events.update().where(events.c.id == eid).values(
                     returns_status=status, returns_checked_at=now, returns_error=None, price_symbol=None,
-                    price_symbol_basis=None, missing_reason=why))
+                    price_symbol_basis=None, missing_reason=why, returns_next_at=_recheck_at(status, now)))
                 continue
             if sym in failed:
-                conn.execute(events.update().where(events.c.id == eid).values(
-                    returns_status="retry", returns_checked_at=now, returns_error=failed[sym]))
+                conn.execute(events.update().where(events.c.id == eid).values(**_temporary(vendor_lane, failed[sym], now)))
                 retry += 1
                 continue
             key = f"{cik}|vendor" if vendor is not None else f"{cik}|{sym}"
             if key not in cache:
-                cache.clear()  # rows are issuer-ordered; keep memory bounded
+                cache.clear()  # rows are issuer-grouped; keep memory bounded
                 try:
                     ps = sm.get_historical_price(cik, min(pdate, today) - timedelta(days=10), today, on=pdate, ticker_hint=ticker)
                     cache[key] = (ps.bars, ps.basis, ps.missing_reason)
+                except VendorDeferred:
+                    # needs the delisted-price vendor: handed to the vendor lane, never waited for here
+                    conn.execute(events.update().where(events.c.id == eid).values(
+                        returns_status="vendor_wait", returns_checked_at=now, returns_error="VENDOR_QUEUED",
+                        returns_next_at=None))
+                    deferred += 1
+                    continue
                 except PriceFetchError as e:
                     # transient: keep the event retryable, never mark it as "no data"
                     failed[sym] = str(e)[:500]
-                    conn.execute(events.update().where(events.c.id == eid).values(
-                        returns_status="retry", returns_checked_at=now, returns_error=failed[sym]))
+                    conn.execute(events.update().where(events.c.id == eid).values(**_temporary(vendor_lane, failed[sym], now)))
                     retry += 1
+                    if isinstance(e, VendorUnavailable) and e.quota:
+                        stop = "vendor quota"
                     continue
             all_bars, basis_used, series_missing = cache[key]
             bars = [b for b in all_bars if pdate - timedelta(days=10) <= b.date <= pdate + timedelta(days=400)]
@@ -124,14 +192,20 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                 terminal = None  # the source's coverage ended before the delisting: no cash-out at a stale price
             if key in otc_keys:
                 terminal = None  # confirmed OTC continuation: the holding is valued on OTC quotes after the delisting
-            cexit = _corporate_exit(conn, cik, cache)
+            try:
+                cexit = _corporate_exit(conn, cik, cache, allow_vendor=vendor_lane)
+            except VendorDeferred:
+                conn.execute(events.update().where(events.c.id == eid).values(
+                    returns_status="vendor_wait", returns_checked_at=now, returns_error="VENDOR_QUEUED", returns_next_at=None))
+                deferred += 1
+                continue
             res = compute_returns(bars, spy, pdate, pat, as_of=today, terminal_date=terminal, corporate_exit=cexit)
             if not res:
                 status = "no_data" if (today - pdate).days > 10 else "pending"
                 nodata += status == "no_data"
                 conn.execute(events.update().where(events.c.id == eid).values(
                     returns_status=status, returns_checked_at=now, returns_error=None, price_symbol=sym,
-                    price_symbol_basis=basis_used,
+                    price_symbol_basis=basis_used, returns_next_at=_recheck_at(status, now),
                     missing_reason=("HISTORICAL_PRICE_STILL_MISSING" if cexit is not None or _has_resolution(conn, cik)
                                     else _missing(series_missing or "NO_PRICE_DATA", dl, pdate)) if status == "no_data" else None))
                 continue
@@ -142,11 +216,37 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
                 conn.execute(pg_insert(event_returns).values(event_id=eid, horizon_days=r.horizon_days, **vals)
                              .on_conflict_do_update(index_elements=["event_id", "horizon_days"], set_=vals))
             status = "complete" if len(res) == len(HORIZONS) else "partial"
+            nxt = None if status == "complete" else next_eligible_at(res[0].entry_date, {r.horizon_days for r in res}, today, now)
             conn.execute(events.update().where(events.c.id == eid).values(
                 returns_status=status, returns_checked_at=now, returns_error=None, price_symbol=sym,
-                price_symbol_basis=basis_used, missing_reason=None))
+                price_symbol_basis=basis_used, missing_reason=None, returns_next_at=nxt))
             done += 1
-    return {"processed": done, "no_data": nodata, "retry": retry, "candidates": len(rows)}
+    out = {"processed": done, "no_data": nodata, "retry": retry, "candidates": len(rows), "lane": lane}
+    if deferred:
+        out["vendor_queued"] = deferred
+    if stop:
+        out["stopped"] = stop
+    return out
+
+
+def _recheck_at(status: str, now: datetime) -> datetime:
+    """pending (young event, prices may still arrive) -> RECHECK_HOURS; no_data -> monthly re-verification."""
+    return now + (timedelta(days=NO_DATA_RECHECK_DAYS) if status == "no_data" else timedelta(hours=RECHECK_HOURS))
+
+
+def _temporary(vendor_lane: bool, error: str, now: datetime) -> dict:
+    """A temporary provider failure. Main lane: `retry` after RECHECK_HOURS. Vendor lane: the event stays in
+    vendor_wait (it still needs the vendor) and is offered again after VENDOR_RETRY_HOURS."""
+    if vendor_lane:
+        return {"returns_status": "vendor_wait", "returns_checked_at": now, "returns_error": error,
+                "returns_next_at": now + timedelta(hours=VENDOR_RETRY_HOURS)}
+    return {"returns_status": "retry", "returns_checked_at": now, "returns_error": error,
+            "returns_next_at": now + timedelta(hours=RECHECK_HOURS)}
+
+
+def compute_vendor_lane(engine: Engine, limit: int = 60, time_budget_s: float = 3600) -> dict:
+    """Delisted-vendor lane (own thread): the vendor's shared rate limiter / quota paces this lane only."""
+    return compute_pending(engine, limit=limit, time_budget_s=time_budget_s, backfill=None, lane=LANE_VENDOR)
 
 
 def _has_resolution(conn: Connection, cik: str | None) -> bool:
@@ -154,7 +254,7 @@ def _has_resolution(conn: Connection, cik: str | None) -> bool:
     return resolution_for(conn, cik) is not None
 
 
-def _corporate_exit(conn: Connection, cik: str | None, cache: dict):
+def _corporate_exit(conn: Connection, cik: str | None, cache: dict, allow_vendor: bool = True):
     """Verified merger consideration for this issuer (CONFIRMED + SIMPLE), valued with the successor's real price."""
     from app.corpactions import exit_value, resolution_for, successor_window
     res = resolution_for(conn, cik)
@@ -169,8 +269,8 @@ def _corporate_exit(conn: Connection, cik: str | None, cache: dict):
             from app.securitymaster.provider import VERIFIED_BASES, get_security_master
             lo, hi = successor_window(res)
             try:
-                ps = get_security_master(conn).get_historical_price(res["successor_cik"], lo, min(hi, date.today()),
-                                                                    on=res["effective_date"])
+                ps = get_security_master(conn, allow_vendor=allow_vendor).get_historical_price(
+                    res["successor_cik"], lo, min(hi, date.today()), on=res["effective_date"])
                 bars = ps.bars if ps.basis in VERIFIED_BASES else None
             except PriceFetchError:
                 bars = None
@@ -263,7 +363,8 @@ def revalidate_price_identity(engine: Engine, batch: int = 5000) -> dict:
                 else:
                     conn.execute(event_returns.delete().where(event_returns.c.event_id == eid))
                     conn.execute(events.update().where(events.c.id == eid).values(
-                        returns_status="pending", returns_checked_at=None, price_symbol=None, price_symbol_basis=None))
+                        returns_status="pending", returns_checked_at=None, price_symbol=None, price_symbol_basis=None,
+                        returns_next_at=None))
                     recomputed += 1
     return {"kept": kept, "sent_for_recompute": recomputed, "batch": len(rows)}
 

@@ -271,6 +271,16 @@ market_prices = Table(
     Column("volume", BigInteger),
 )
 
+# confirmed provider absences ("404 / no such symbol") so the return queue does not ask again every round
+# (migration 0013). Only a 404 is recorded here - a network / 5xx / rate-limit failure never is.
+price_absences = Table(
+    "price_absences", metadata,
+    Column("provider", String(16), primary_key=True),
+    Column("symbol", String(16), primary_key=True),
+    _ts("checked_at", nullable=False),
+    Column("hits", Integer, nullable=False, server_default="1"),
+)
+
 events = Table(
     "events", metadata,
     Column("id", BigInteger, primary_key=True),
@@ -325,10 +335,15 @@ events = Table(
     Column("episode_id", String(64)),
     Column("feature_source_event_ids", JSONB),  # derived events: the primary events they were built from
     _ts("updated_at"),
+    # ---- return queue (migration 0013) ----
+    # earliest moment the event is worth pricing again: the next missing horizon's end (partial), the retry backoff
+    # (retry) or the monthly re-verification (no_data). NULL = decided by returns_checked_at (legacy rows).
+    _ts("returns_next_at"),
 )
 Index("ix_events_type_public", events.c.event_type, events.c.public_date)
 Index("ix_events_issuer", events.c.issuer_cik)
 Index("ix_events_returns_status", events.c.returns_status)
+Index("ix_events_returns_queue", events.c.returns_status, events.c.returns_next_at)
 Index("ix_events_available_at", events.c.available_at)
 Index("ix_events_country_exchange_ticker", events.c.country, events.c.exchange, events.c.ticker, events.c.public_date)
 

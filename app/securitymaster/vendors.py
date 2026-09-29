@@ -90,15 +90,45 @@ class TiingoPriceProvider(MarketDataProvider):
         except http.HttpError as e:
             # never echo the request headers; the status is enough
             raise http.HttpError(TIINGO_PRICES_URL.format(symbol=symbol), e.status, "tiingo request failed") from None
-        out = []
-        for x in r.json() or []:
-            try:
-                d = date.fromisoformat(x["date"][:10])
-            except (KeyError, ValueError):
-                continue
-            close, adj = x.get("close"), x.get("adjClose")
-            out.append(Bar(d, x.get("open"), x.get("high"), x.get("low"), close, adj, x.get("volume")))
-        return out
+        try:
+            return parse_tiingo_prices(r.json(), symbol)
+        except http.HttpError as e:
+            if e.status == 429:  # allocation message inside a 200: push the shared slot out like a real 429
+                from app.core import ratelimit
+                ratelimit.record_429("tiingo", backoff_s=900.0)
+            raise
+
+
+def parse_tiingo_prices(payload, symbol: str) -> list[Bar]:
+    """Tiingo answers a price list, but some errors arrive as HTTP 200 with a JSON object ({"detail": "..."}).
+    Iterating that object yielded its keys (str) and x["date"] failed with "string indices must be integers" -
+    every such event then sat in `retry` forever. An object is classified instead:
+      * "not found" / unknown ticker -> HttpError 404 (a confirmed absence, handled like any provider 404);
+      * anything else (hourly/daily allocation, maintenance, unexpected shape) -> HttpError 429 / 502 (temporary)."""
+    if payload is None:
+        return []
+    if isinstance(payload, dict):
+        detail = str(payload.get("detail") or payload.get("message") or payload)[:200]
+        low = detail.lower()
+        url = TIINGO_PRICES_URL.format(symbol=symbol)
+        if "not found" in low or "no data" in low or "does not exist" in low:
+            raise http.HttpError(url, 404, "tiingo: ticker not found")
+        if "allocation" in low or "limit" in low or "too many" in low:
+            raise http.HttpError(url, 429, "tiingo: request allocation exhausted")
+        raise http.HttpError(url, 502, "tiingo: unexpected response object")
+    if not isinstance(payload, list):
+        raise http.HttpError(TIINGO_PRICES_URL.format(symbol=symbol), 502, "tiingo: unexpected response type")
+    out = []
+    for x in payload:
+        if not isinstance(x, dict):
+            continue
+        try:
+            d = date.fromisoformat(str(x["date"])[:10])
+        except (KeyError, ValueError):
+            continue
+        close, adj = x.get("close"), x.get("adjClose")
+        out.append(Bar(d, x.get("open"), x.get("high"), x.get("low"), close, adj, x.get("volume")))
+    return out
 
 
 def delisted_price_provider() -> MarketDataProvider | None:

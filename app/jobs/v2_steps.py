@@ -183,17 +183,28 @@ def ca_grants_weekly(engine: Engine) -> dict:
     last = st.get("last_run")
     if last and (datetime.now(timezone.utc) - datetime.fromisoformat(last)).days < 7:
         return {"skipped": "NOT_DUE"}
+    from app.core.source_state import classify_exception
+    from app.db.store import health_failure, health_success
     src = CanadaGrantsSource()
     try:
         res = src.run_live(engine)
         with engine.begin() as c:
+            # legacy bookkeeping first (last_run / last_success / consecutive_failures), then the V2 health row -
+            # the same order as the worker (record_run derives DEGRADED from consecutive_failures)
+            health_success(c, src.name, items=res.items)
             record_run(c, src.name, RunOutcome(ok=True, items=res.items, watermark=res.watermark), country="CA",
-                       dataset=src.dataset, license_status=src.license_status)
+                       dataset=src.dataset, license_status=src.license_status, stale_after=src.stale_after)
             save_job_state(c, "v2_ca_grants", {"last_run": datetime.now(timezone.utc).isoformat(), **(res.watermark or {})})
         return {"stored": res.items}
     except Exception as e:
+        kind, status = classify_exception(e)
         with engine.begin() as c:
-            record_run(c, src.name, RunOutcome(ok=False, failure_kind="ERROR", error=str(e)[:300]), country="CA", dataset=src.dataset)
+            # before 0013 only record_run ran here: consecutive_failures stayed 0 and a failed (incomplete) historical
+            # pass was reported HEALTHY. The initial-load flag is untouched, so partial data stays HISTORICAL.
+            health_failure(c, src.name, f"{type(e).__name__}: {e}")
+            record_run(c, src.name, RunOutcome(ok=False, failure_kind=kind, error=str(e)[:300], response_status=status,
+                                               watermark={"initial_load_complete": False}),
+                       country="CA", dataset=src.dataset, stale_after=src.stale_after)
         raise
 
 

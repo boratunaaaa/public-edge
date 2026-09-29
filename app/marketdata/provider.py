@@ -107,11 +107,31 @@ class PriceFetchError(RuntimeError):
     NOT evidence that the symbol has no data."""
 
 
-def ensure_prices(conn: Connection, symbol: str, start: date, end: date, provider: MarketDataProvider | None = None) -> list[Bar]:
+ABSENCE_TTL_DAYS = 7  # a confirmed 404 is not asked again for a week (return queue only, see ensure_prices)
+
+
+def absence_fresh(conn: Connection, provider: str, symbol: str, ttl_days: int = ABSENCE_TTL_DAYS) -> bool:
+    from app.db.models import price_absences as pa
+    at = conn.execute(select(pa.c.checked_at).where(pa.c.provider == provider, pa.c.symbol == symbol[:16])).scalar()
+    return at is not None and at > datetime.now(timezone.utc) - timedelta(days=ttl_days)
+
+
+def record_absence(conn: Connection, provider: str, symbol: str) -> None:
+    from app.db.models import price_absences as pa
+    st = pg_insert(pa).values(provider=provider, symbol=symbol[:16], checked_at=datetime.now(timezone.utc), hits=1)
+    conn.execute(st.on_conflict_do_update(index_elements=["provider", "symbol"],
+                                          set_={"checked_at": st.excluded.checked_at, "hits": pa.c.hits + 1}))
+
+
+def ensure_prices(conn: Connection, symbol: str, start: date, end: date, provider: MarketDataProvider | None = None,
+                  skip_known_absent: bool = False) -> list[Bar]:
     """Return bars for [start, end], fetching from the provider only when coverage is missing.
 
     A provider 404 ("no data / delisted") is a confirmed absence -> returns what is cached (maybe []).
     Any other failure raises PriceFetchError so the caller can schedule a retry.
+    skip_known_absent (return queue): a 404 is recorded in price_absences and the same symbol is not requested
+    again for ABSENCE_TTL_DAYS - the result is exactly what that 404 returned (the cached bars). Temporary failures
+    are never recorded, so they stay retryable.
     """
     have = load_bars(conn, symbol, start, end)
     today = date.today()
@@ -120,12 +140,17 @@ def ensure_prices(conn: Connection, symbol: str, start: date, end: date, provide
     if covered:
         return have
     provider = provider or get_provider()
+    pname = getattr(provider, "name", type(provider).__name__)[:16]
+    if skip_known_absent and absence_fresh(conn, pname, symbol):
+        return have
     fetch_from = start if not have or have[0].date > start + timedelta(days=5) else have[-1].date - timedelta(days=3)
     try:
         bars = provider.get_historical_prices(symbol, fetch_from, need_end)
     except http.HttpError as e:
         if e.status == 404:
             log.info("no price data for %s (provider 404)", symbol)
+            if skip_known_absent:
+                record_absence(conn, pname, symbol)
             return have
         raise PriceFetchError(f"{symbol}: {e}") from e
     except Exception as e:
