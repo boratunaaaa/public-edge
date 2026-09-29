@@ -24,7 +24,6 @@ import statistics
 from collections import defaultdict
 from datetime import timedelta
 
-from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from app.backtest.research_v2 import DISCRETIONARY, EXCL, H, INSIDER_BUCKETS, TOL, _events, _exclusion, _ret, _series, sign_p
