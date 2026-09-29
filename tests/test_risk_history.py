@@ -185,3 +185,14 @@ def test_replay_stages_the_label_only_from_its_public_time_and_blocks_the_gate()
     assert [r[0] for r in rows] == [1]  # the February event was proposed: the warning did not exist yet
     assert q("replay_t_risk_gc", "SELECT risk, detected_at FROM discovery_risks WHERE risk = 'GOING_CONCERN'") == \
         [("GOING_CONCERN", GC_2021)]
+
+
+def test_full_policy_is_checked_against_the_sessions_actually_replayed():
+    from app.replay.config import ReplayConfig
+    from app.replay.engine import risk_history
+    from app.replay.source import SourceData
+    cov = Coverage({f: {"status": "COMPLETE", "from": date(2021, 3, 1), "to": date(2021, 6, 30)} for f in FAMILIES})
+    cfg = ReplayConfig(replay_id="x", start=datetime(2021, 3, 1, tzinfo=UTC), end=datetime(2021, 6, 30, 23, tzinfo=UTC))
+    assert risk_history(cfg, SourceData(risk_cov=cov))["comparability"] == "FULL"  # UTC midnight = Feb 28 in New York
+    cfg2 = ReplayConfig(replay_id="x", start=datetime(2021, 2, 26, tzinfo=UTC), end=datetime(2021, 6, 30, 23, tzinfo=UTC))
+    assert risk_history(cfg2, SourceData(risk_cov=cov))["comparability"] == "LIMITED"  # Friday Feb 26 is not covered

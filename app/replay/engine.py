@@ -49,7 +49,9 @@ def risk_history(cfg: ReplayConfig, src: SourceData) -> dict:
     """Explicit risk-history coverage of the run (app.replay.risk_history.coverage_policy): FULL only when every
     required family is COMPLETE over the window. Past labels are never invented."""
     from app.replay.risk_history import Coverage, coverage_policy
-    s, e = cfg.start.astimezone(NY).date(), cfg.end.astimezone(NY).date()
+    days = sessions(cfg.start.astimezone(NY).date(), cfg.end.astimezone(NY).date())
+    # the coverage must span the sessions the run actually trades (a UTC-midnight start is the previous NY day)
+    s, e = (days[0], days[-1]) if days else (cfg.start.date(), cfg.end.date())
     pol = coverage_policy(src.risk_cov if isinstance(src.risk_cov, Coverage) else Coverage(), s, e)
     pol["gates_not_applied"] = sorted({g for fam in pol["not_complete"] for g in FAMILY_CONSUMERS.get(fam, ())})
     pol["labels"] = len(src.risk_labels)
