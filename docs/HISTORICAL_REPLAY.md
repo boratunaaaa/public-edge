@@ -57,7 +57,27 @@ holdout runs are sealed and `tuning_results()` never returns them. `ReplayCampai
 | fill before `not_before` or after the simulated date | `check_state` |
 | event identity outside its symbol period | `identity_check` -> REVIEW (not traded, recorded) |
 
-## Findings about the production pipeline (reproduced by the replay, not changed here)
+## Correctness fixes (commit 9fbc72e)
+
+| finding | fix |
+|---|---|
+| zero-volume first bar -> order stuck forever | `fill_orders`: a BUY tries every session inside its validity (`PAPER_ORDER_VALID_SESSIONS`, default 5) and fills on the first with an opening trade; after that it is CANCELLED (`expired: ...`). Exits never expire but also skip sessions without an opening trade |
+| liquidity gate only knew MICRO / EARLY_SMALL | root cause: `build_universe` fills `adv_dollar_30d` only for those buckets and the gate read NULL as LOW_LIQUIDITY. The gate now measures the same 30-session mean close x volume from PRIOR sessions of the resolved series when the snapshot has none (`adv_source`); the $1M policy (`PAPER_MIN_ADV_USD`, all proposals) is unchanged |
+| fill used the fill day's total volume (close-time knowledge) | `fills.v3-prior-session-adv`: liquidity class, participation cap and impact use only the median volume of PRIOR sessions; the only same-session fact is whether an opening trade printed. No prior volume -> a BUY is not sized blind |
+| renamed securities (QXO / SSNT) | `PriceIndex`: price identity = issuer + symbol period + date. A symbol resolves to its point-in-time owner, served from ONE stored series of that issuer (catalog `series`: the vendor's current-symbol series is unbounded, other stored symbols only for their period), restricted to that symbol period - reused tickers never splice issuers |
+| no historical risk labels | `risk_history` per run: `RISK_HISTORY_COMPLETE / PARTIAL / UNAVAILABLE` from the source's label history start dates, the list of production decisions that could not be applied, and `comparability` FULL / LIMITED (stored in `replay_meta.replay_runs`); `holdout_verdict_inputs()` returns LIMITED holdout runs only as `limited_excluded` |
+| reference data rebuilt every step | incremental: re-staged only when the date changes, only changed rows written; tested equal to a full rebuild |
+
+## Historical risk reconstruction (design only - nothing is invented)
+
+`discovery_risks` are derived from SEC filings whose acceptance time is known (S-3 / 424B / ATM programs, convertible
+and warrant exhibits, 8-K 3.01 deficiency notices, 10-K going-concern / material-weakness language, reverse splits).
+A reconstruction would re-run the SAME detectors over the historical filing index with `detected_at` = the filing's
+acceptance timestamp (never today's run time), store the rows with provenance (accession, detector version) in a
+separate history table, and publish `risk_coverage` = the first date from which every detector's inputs are complete.
+Until that exists, pre-2026-09-24 replays are `RISK_HISTORY_UNAVAILABLE` / LIMITED.
+
+## Findings about the production pipeline at 4193e20 (items 1-3 and 5 fixed in 9fbc72e, 4 flagged per run)
 
 1. **Zero-volume first bar -> order stuck forever**: `fill_orders` always prices the first bar on/after `not_before`;
    if that session had no volume the order stays PENDING and never fills on a later session.
