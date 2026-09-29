@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import secrets
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import and_, select, text
 from sqlalchemy.engine import Connection, Engine

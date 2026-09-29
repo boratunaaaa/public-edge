@@ -14,7 +14,7 @@ Every strategy book (A-E) is a separate account with its own cash - results are 
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.engine import Connection, Engine

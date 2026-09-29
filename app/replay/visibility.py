@@ -12,7 +12,7 @@ from sqlalchemy.engine import Connection
 
 from app import http
 from app.core import clock
-from app.db.models import (companies, corporate_actions, events, market_prices, security_master, security_symbols,
+from app.db.models import (companies, corporate_actions, events, security_master, security_symbols,
                            tickers, universe_snapshots)
 from app.entities.names import normalize_company
 from app.marketdata.provider import Bar, MarketDataProvider, shares_as_of
