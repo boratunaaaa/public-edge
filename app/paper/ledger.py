@@ -191,19 +191,43 @@ def _proposal_info(conn: Connection, proposal_id: int | None) -> dict:
     return {"gate": (r[0] or {}) if r else {}, "cik": r[1] if r else None}
 
 
+def _first_fillable(conn: Connection, o, today: date) -> date | None:
+    """The first session this order could fill on (opening trade printed; for a BUY also inside its validity and with
+    prior-session volume to size on) - the chronological processing key."""
+    bars = [b for b in _bars(conn, o["ticker"], o["not_before"] - timedelta(days=45), today)]
+    seen_volume = False
+    for b in bars:
+        if b.date >= o["not_before"] and b.open and b.volume:
+            if o["side"] != "BUY":
+                return b.date
+            if sessions_since(o["not_before"], b.date) > ORDER_VALID_SESSIONS:
+                return None
+            if seen_volume:
+                return b.date
+        seen_volume = seen_volume or bool(b.volume)
+    return None
+
+
 def fill_orders(conn: Connection, today: date) -> dict:
     out = {"filled": 0, "cancelled": 0, "waiting": 0}
     rows = conn.execute(select(paper_orders).where(and_(paper_orders.c.status == "PENDING", paper_orders.c.not_before <= today))
                         .order_by(paper_orders.c.id)).mappings().all()
     from app.paper.fills import quote
+    # chronological: a catch-up run (after a halt or a missed day) fills in session order, so every sizing sees the
+    # portfolio as it stood on that session - never a later session's fill
+    rows = sorted(rows, key=lambda o: (_first_fillable(conn, o, today) or date.max, o["id"]))
     for o in rows:
+        # the order row is locked and re-read: a concurrent run that already filled / cancelled it is never overwritten
+        cur = conn.execute(select(paper_orders.c.status).where(paper_orders.c.id == o["id"]).with_for_update()).scalar()
+        if cur != "PENDING":
+            continue
         fq = None
         bars = [b for b in _bars(conn, o["ticker"], o["not_before"], today) if b.date >= o["not_before"]]
         if o["side"] == "BUY":  # only sessions inside the order's validity may fill it
             bars = [b for b in bars if sessions_since(o["not_before"], b.date) <= ORDER_VALID_SESSIONS]
         if not bars:
             if o["side"] == "BUY" and sessions_since(o["not_before"], today) > ORDER_VALID_SESSIONS:
-                conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
+                conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(
                     status="CANCELLED", note=f"expired: no fillable session within {ORDER_VALID_SESSIONS} sessions"))
                 out["cancelled"] += 1
             else:
@@ -221,7 +245,7 @@ def fill_orders(conn: Connection, today: date) -> dict:
                 if o["proposal_id"] else None
             why = source_block(conn, ev_id, lock=True)  # superseded / identity unsafe / under review; row stays locked
             if why:                                     # until the fill commits
-                conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
+                conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(
                     status="CANCELLED", note=SOURCE_NOTE[why]))
                 out["cancelled"] += 1
                 continue
@@ -238,7 +262,7 @@ def fill_orders(conn: Connection, today: date) -> dict:
                     break
             if fq is None:  # no fillable session yet: never assume a fill
                 if sessions_since(o["not_before"], today) > ORDER_VALID_SESSIONS:
-                    conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
+                    conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(
                         status="CANCELLED", note=f"expired: no fillable session within {ORDER_VALID_SESSIONS} sessions"))
                     out["cancelled"] += 1
                 else:
@@ -249,7 +273,7 @@ def fill_orders(conn: Connection, today: date) -> dict:
             shares = fq.shares * b.open / px
             notional = shares * px
             if notional < 10:
-                conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(status="CANCELLED",
+                conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(status="CANCELLED",
                                                                                                 note="insufficient paper cash"))
                 out["cancelled"] += 1
                 continue
@@ -288,7 +312,7 @@ def fill_orders(conn: Connection, today: date) -> dict:
                 status="CLOSED", exit_date=b.date, exit_price=px, realized_pnl=proceeds - pos["cost"],
                 last_price=px, last_price_date=b.date))
             _move_cash(conn, o["account_id"], b.date, proceeds, "SELL", o["id"])
-        conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
+        conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(
             status="FILLED", fill_date=b.date, fill_price=px, shares=shares, slippage_bps=bps, commission=comm,
             position_id=pos_id, fill_model=fq.model if fq else "ILLIQUID", spread_bps=fq.spread_bps if fq else None,
             participation=fq.participation if fq else None, adv_shares=fq.adv_shares if fq else None,

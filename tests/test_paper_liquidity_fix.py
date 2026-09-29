@@ -61,9 +61,11 @@ def test_gate_keeps_rejecting_unknown_or_thin_liquidity(engine, monkeypatch):
         _serve(monkeypatch, ZBIO=[])
         g = evaluate_gate(c, ev, family_ok=(True, "x"), price_basis="current_ticker_same_cik", now=now, price_symbol="ZBIO")
         assert "LOW_LIQUIDITY" in g.failed and g.info["adv_source"] == "unknown"  # never guessed
-        _serve(monkeypatch, ZBIO=_series(date(2024, 1, 2), 45, volume=5_000))  # ~$50k / day
-        g = evaluate_gate(c, ev, family_ok=(True, "x"), price_basis="current_ticker_same_cik", now=now, price_symbol="ZOTHER")
-    assert "LOW_LIQUIDITY" in g.failed
+    _serve(monkeypatch, ZBIO=_series(date(2024, 1, 2), 45, volume=5_000))  # ~$50k / day: measured, but thin
+    with engine.begin() as c:
+        g = evaluate_gate(c, ev, family_ok=(True, "x"), price_basis="current_ticker_same_cik", now=now, price_symbol="ZBIO")
+    assert "LOW_LIQUIDITY" in g.failed and g.info["adv_source"] == "prior_sessions_30d"
+    assert g.info["adv_dollar_30d"] is not None and g.info["adv_dollar_30d"] < 1e6
 
 
 @db
@@ -191,3 +193,67 @@ def test_an_exit_never_expires_and_waits_for_an_opening_trade(engine, monkeypatc
         fill_orders(c, date(2024, 4, 20))
         s = _row(c, sell)
     assert s["status"] == "FILLED" and s["fill_date"] == date(2024, 4, 15) and buy
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_a_concurrent_run_never_overwrites_a_fill(engine):
+    """Run A fills (not yet committed); run B, whose `today` is past the validity, would expire the same order. B must
+    wait on the order row and, once A committed, leave the fill alone."""
+    from sqlalchemy.exc import OperationalError
+
+    from app.paper.ledger import fill_orders
+    d0 = date(2024, 3, 4)
+    with engine.begin() as c:
+        _store(c, "ZBIO", _series(date(2024, 1, 2), 60))
+        oid = _order(c, d0)
+    conn_a = engine.connect()
+    tx = conn_a.begin()
+    try:
+        assert fill_orders(conn_a, date(2024, 3, 8))["filled"] == 1
+        with engine.connect() as conn_b:
+            conn_b.execute(text("SET lock_timeout = '300ms'"))
+            with pytest.raises(OperationalError):
+                fill_orders(conn_b, date(2024, 4, 30))
+            conn_b.rollback()
+    finally:
+        tx.commit()
+        conn_a.close()
+    with engine.begin() as c:
+        out = fill_orders(c, date(2024, 4, 30))
+        o = _row(c, oid)
+    assert out["cancelled"] == 0 and o["status"] == "FILLED" and o["fill_date"] == d0
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_a_catch_up_run_fills_in_session_order_like_daily_runs(engine):
+    """Order 1 (lower id) is halted until Friday, order 2 is fillable on Tuesday. A single catch-up run must size both
+    exactly like daily runs did: Tuesday first, on the portfolio as it stood then."""
+    from app.paper.ledger import fill_orders
+    mon, tue, fri = date(2024, 3, 4), date(2024, 3, 5), date(2024, 3, 8)
+    halted = {mon + timedelta(days=i): (None, 0) for i in range(4)}
+
+    def world(c):
+        _store(c, "HALT", _series(date(2024, 1, 2), 60, overrides=halted))
+        _store(c, "OKAY", _series(date(2024, 1, 2), 60, price=20.0))
+        return _order(c, mon, ticker="HALT", target=0.5), _order(c, tue, ticker="OKAY", target=0.5)
+
+    def result(c, ids):
+        return [(r["fill_date"], round(r["fill_price"], 6), round(r["shares"], 6)) for r in (_row(c, i) for i in ids)]
+
+    conn = engine.connect()
+    tx = conn.begin()
+    ids = world(conn)
+    for d in (mon, tue, date(2024, 3, 6), date(2024, 3, 7), fri):
+        fill_orders(conn, d)
+    daily = result(conn, ids)
+    tx.rollback()
+    tx = conn.begin()
+    ids = world(conn)
+    fill_orders(conn, fri)
+    catch_up = result(conn, ids)
+    tx.rollback()
+    conn.close()
+    assert daily[0][0] == fri and daily[1][0] == tue
+    assert catch_up == daily
