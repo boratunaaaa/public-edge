@@ -60,6 +60,10 @@ services:
       POSTGRES_PASSWORD: ${PE_DB_PASSWORD:?set in .env}
     command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=40", "-c", "work_mem=8MB",
               "-c", "maintenance_work_mem=64MB", "-c", "effective_cache_size=512MB"]
+    # parallel hash joins keep their shared memory in /dev/shm (dynamic_shared_memory_type=posix); Docker's 64 MB default
+    # made insider_profiles fail with DiskFull. Worst case per parallel hash = work_mem 8 MB x hash_mem_multiplier 2 x
+    # 3 participants = 48 MB; 4 nested hashes = 192 MB -> 256 MB (tmpfs, used only on demand, inside mem_limit)
+    shm_size: 256m
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
