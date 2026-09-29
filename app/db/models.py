@@ -272,16 +272,19 @@ market_prices = Table(
 )
 
 # confirmed provider absences ("404 / no such symbol") so the return queue does not ask again every round
-# (migration 0013). Identity-scoped - a ticker is never an identity: the same symbol for another issuer, another
-# market or an earlier period is NOT covered. A row covers requests of the same (provider, identity, market, symbol)
-# whose window starts on/after window_start. Only a 404 is recorded - never a network / 5xx / rate-limit failure.
+# (migration 0013). Identity-scoped - a ticker is never an identity: identity is the security (security_id) or the
+# issuer + the symbol period it used the ticker in, so another issuer reusing the symbol, another market, or a
+# predecessor / successor security period is NOT covered. Interval-bounded: a row only covers requests whose
+# [start, end] lies inside the confirmed [window_start, window_end]. Only a 404 is recorded - never a network / 5xx /
+# rate-limit failure.
 price_absences = Table(
     "price_absences", metadata,
     Column("provider", String(16), primary_key=True),
-    Column("identity", String(48), primary_key=True),  # security_id when known, else "CIK:<cik>"
+    Column("identity", String(64), primary_key=True),  # "SEC:<security_id>" or "CIK:<cik>|SYM:<symbol period start>"
     Column("market", String(8), primary_key=True),  # e.g. US
     Column("symbol", String(16), primary_key=True),
-    Column("window_start", Date, primary_key=True),  # first date the 404'd request asked for
+    Column("window_start", Date, primary_key=True),  # the 404'd request's interval
+    Column("window_end", Date, primary_key=True),
     _ts("checked_at", nullable=False),
     Column("hits", Integer, nullable=False, server_default="1"),
 )

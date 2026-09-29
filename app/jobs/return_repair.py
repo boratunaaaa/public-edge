@@ -108,6 +108,9 @@ def _identity_13f(conn: Connection, apply: bool, now: datetime, sample: int = 12
         resolver.load(conn, force=True)
         park = now + timedelta(days=REVIEW_PARK_DAYS)
         for eid, kind, ncik, nconf, why in changes:
+            # same lock order as the return worker (_fence): the event row first. A worker that is pricing this event
+            # holds the lock until its returns are committed; we wait here, THEN delete - so nothing it wrote survives.
+            conn.execute(text("SELECT 1 FROM events WHERE id = :i FOR UPDATE"), {"i": eid})
             conn.execute(text("DELETE FROM event_returns WHERE event_id = :i"), {"i": eid})
             if kind == "CHANGED":
                 # the display ticker follows the corrected issuer (never the old company's symbol); NULL when the new

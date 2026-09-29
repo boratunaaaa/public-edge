@@ -1,4 +1,4 @@
-"""Return queue: deterministic next-eligible time per event + identity-scoped confirmed provider absences.
+"""Return queue: deterministic next-eligible time per event + identity-scoped, interval-bounded provider absences.
 
 Revision ID: 0013
 Revises: 0012
@@ -10,46 +10,49 @@ one new table. No data is rewritten here; scripts/pe_return_repair.py sets retur
 
 Locking (events has ~319k rows and is written continuously by worker / backfill):
   * ADD COLUMN without a default is a catalog-only change, but it needs a brief ACCESS EXCLUSIVE lock. lock_timeout
-    (5 s) makes it fail fast instead of queueing behind a long transaction and blocking every writer behind it; the
-    migration is simply re-run.
+    (5 s) makes it fail fast instead of queueing behind a long transaction and blocking every writer behind it.
   * The index is built with CREATE INDEX CONCURRENTLY in an autocommit block (no write lock; it cannot run inside a
-    transaction). A failed concurrent build leaves an INVALID index - it is dropped IF EXISTS first, so a re-run is
-    clean. Downgrade drops it CONCURRENTLY too.
+    transaction).
+
+Restart safety: entering the autocommit block COMMITS the column and the table before the concurrent build. If the
+build fails or is interrupted, alembic stays at 0012 with those objects already present, and a failed concurrent build
+leaves an INVALID index. Every step is therefore idempotent - ADD COLUMN / CREATE TABLE IF NOT EXISTS, and the index
+is dropped (IF EXISTS, concurrently) before it is built - so simply re-running `alembic upgrade head` completes the
+migration from any partial state (tested: tests/test_return_queue_audit.py).
 """
 from alembic import op
-import sqlalchemy as sa
 
 revision = '0013'
 down_revision = '0012'
 branch_labels = None
 depends_on = None
 
-TS = sa.DateTime(timezone=True)
-
 
 def upgrade() -> None:
     op.execute("SET lock_timeout = '5s'")
-    op.add_column('events', sa.Column('returns_next_at', TS))
-    op.create_table(
-        'price_absences',
-        sa.Column('provider', sa.String(16), primary_key=True),
-        sa.Column('identity', sa.String(48), primary_key=True),
-        sa.Column('market', sa.String(8), primary_key=True),
-        sa.Column('symbol', sa.String(16), primary_key=True),
-        sa.Column('window_start', sa.Date(), primary_key=True),
-        sa.Column('checked_at', TS, nullable=False),
-        sa.Column('hits', sa.Integer(), server_default='1', nullable=False),
-    )
+    op.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS returns_next_at TIMESTAMP WITH TIME ZONE")
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS price_absences (
+            provider VARCHAR(16) NOT NULL,
+            identity VARCHAR(64) NOT NULL,
+            market VARCHAR(8) NOT NULL,
+            symbol VARCHAR(16) NOT NULL,
+            window_start DATE NOT NULL,
+            window_end DATE NOT NULL,
+            checked_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            hits INTEGER DEFAULT '1' NOT NULL,
+            PRIMARY KEY (provider, identity, market, symbol, window_start, window_end)
+        )""")
     with op.get_context().autocommit_block():
         op.execute("SET lock_timeout = 0")  # CONCURRENTLY waits for old transactions by design; it never blocks writes
+        # a previous failed / interrupted concurrent build leaves an INVALID index of this name
         op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_events_returns_queue")
-        op.create_index('ix_events_returns_queue', 'events', ['returns_status', 'returns_next_at'],
-                        postgresql_concurrently=True)
+        op.execute("CREATE INDEX CONCURRENTLY ix_events_returns_queue ON events (returns_status, returns_next_at)")
 
 
 def downgrade() -> None:
     with op.get_context().autocommit_block():
         op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_events_returns_queue")
     op.execute("SET lock_timeout = '5s'")
-    op.drop_table('price_absences')
-    op.drop_column('events', 'returns_next_at')
+    op.execute("DROP TABLE IF EXISTS price_absences")
+    op.execute("ALTER TABLE events DROP COLUMN IF EXISTS returns_next_at")

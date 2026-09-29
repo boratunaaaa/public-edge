@@ -123,7 +123,7 @@ def _conds(now: datetime, due, backfill, ciks, event_ids) -> list:
 
 _COLS = (events.c.id, events.c.ticker, events.c.issuer_cik, events.c.public_date,
          # V2: available_at is the only entry anchor (same as public_at / end-of-day for old rows)
-         func.coalesce(events.c.available_at, events.c.public_at))
+         func.coalesce(events.c.available_at, events.c.public_at), events.c.security_id)
 
 
 def queue_select(now: datetime, *, tier: int | None = None, lane: str = LANE_MAIN, backfill: bool | None = None,
@@ -227,7 +227,7 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
             queue += more
         if not queue:
             break
-        eid, ticker, cik, pdate, pat = queue.pop(0)
+        eid, ticker, cik, pdate, pat, security_id = queue.pop(0)
         with engine.begin() as conn:
             now = datetime.now(timezone.utc)
             if not _fence(conn, eid, ticker, cik, vendor_lane):
@@ -265,7 +265,8 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
             if key not in cache:
                 cache.clear()  # rows are issuer-grouped; keep memory bounded
                 try:
-                    ps = sm.get_historical_price(cik, min(pdate, today) - timedelta(days=10), today, on=pdate, ticker_hint=ticker)
+                    ps = sm.get_historical_price(cik, min(pdate, today) - timedelta(days=10), today, on=pdate, ticker_hint=ticker,
+                                                 security_id=security_id)
                     cache[key] = (ps.bars, ps.basis, ps.missing_reason)
                 except VendorDeferred:
                     # needs the delisted-price vendor: handed to the vendor lane, never waited for here

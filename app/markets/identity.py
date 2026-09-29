@@ -162,7 +162,9 @@ def cusip_to_cik(conn: Connection, cusip: str | None, issuer_name: str | None = 
     raw = (cusip or "").strip().upper()
     if len(raw) < 8:
         return None, "NONE", "BAD_CUSIP"
-    c9 = normalize_cusip(raw[:9])
+    # the COMPLETE value must be a valid CUSIP to match exactly ("037833100X" is not Apple's 037833100); anything
+    # else can only reach the prefix path below, i.e. LOW + REVIEW at most
+    c9 = normalize_cusip(raw)
     p8 = raw[:8]
     if any(ch not in _CUSIP_CHARS for ch in p8):
         return None, "NONE", "BAD_CUSIP"

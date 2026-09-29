@@ -212,13 +212,13 @@ class SecSecurityMaster(SecurityMasterProvider):
         return None, None, "TICKER_REUSED" if reused else "TICKER_UNRESOLVED"
 
     def get_historical_price(self, cik: str | None, start: date, end: date, *, on: date | None = None,
-                             ticker_hint: str | None = None) -> PriceSeries:
+                             ticker_hint: str | None = None, security_id: str | None = None) -> PriceSeries:
         on = on or start
         sym, basis, missing = self.price_symbol(cik, on, ticker_hint)
         dl = self.delisting(cik) if cik else None
         if sym is None:
             return PriceSeries(None, None, [], missing, dl)
-        scope = self._absence_scope(cik)
+        scope = self._absence_scope(cik, sym, basis, on, security_id)
         bars = ensure_prices(self.conn, sym, start, end, provider=self.market, absence=scope)
         if basis == "historical_symbol_verified":
             bars, missing = _validate_historical(bars, on, dl)
@@ -230,13 +230,31 @@ class SecSecurityMaster(SecurityMasterProvider):
         return PriceSeries(sym, basis if bars else None, bars, missing, dl)
 
 
-    def _absence_scope(self, cik: str | None):
-        """Negative-cache identity for this security master (US, CIK-keyed; see AbsenceScope). None = no cache:
-        only the return queue opts in, and only when the issuer is known (a bare ticker is never an identity)."""
+    def _absence_scope(self, cik: str | None, sym: str, basis: str | None, on: date, security_id: str | None = None):
+        """Negative-cache identity (see AbsenceScope); None = no negative cache. Only the return queue opts in.
+          * security_id known -> the security itself;
+          * else the issuer + the period in which it used this symbol: "CUR" for its current exchange ticker, the
+            first filing observation of the (cik, symbol) period covering `on` for a historical symbol - so a
+            predecessor and a successor security period never share an absence;
+          * no issuer, or no symbol period covering the date -> no cache (conservative)."""
         from app.marketdata.provider import AbsenceScope
-        if not self.skip_known_absent or not cik:
+        if not self.skip_known_absent:
             return None
-        return AbsenceScope(identity=f"CIK:{cik.zfill(10)}", market="US")
+        if security_id:
+            return AbsenceScope(identity=f"SEC:{security_id}", market="US")
+        if not cik:
+            return None
+        cik = cik.zfill(10)
+        if basis == "current_ticker_same_cik":
+            period = "CUR"
+        else:
+            rows = [r for r in self._symbol_rows(cik=cik, symbol=sym.upper())
+                    if r["first_seen"] and r["first_seen"] - timedelta(days=SYMBOL_GRACE_DAYS) <= on
+                    and (r["last_seen"] is None or on <= r["last_seen"] + timedelta(days=SYMBOL_GRACE_DAYS))]
+            if not rows:
+                return None  # no symbol period covers the date: never cache
+            period = min(r["first_seen"] for r in rows).isoformat()  # sources overlap: the period's earliest sighting
+        return AbsenceScope(identity=f"CIK:{cik}|SYM:{period}", market="US")
 
     def _vendor_bars(self, sym: str, start: date, end: date, scope=None) -> list[Bar]:
         """Delisted-vendor series. A 404 / "ticker not found" is a confirmed absence (-> [] and recorded for this
@@ -246,7 +264,7 @@ class SecSecurityMaster(SecurityMasterProvider):
         from app.core.ratelimit import QuotaExhausted
         from app.marketdata.provider import absence_fresh, record_absence
         name = getattr(self.delisted_prices, "name", "vendor")
-        if scope is not None and absence_fresh(self.conn, name, scope, sym, start, VENDOR_ABSENCE_TTL_DAYS):
+        if scope is not None and absence_fresh(self.conn, name, scope, sym, start, end, VENDOR_ABSENCE_TTL_DAYS):
             return []
         if not self.allow_vendor:
             raise VendorDeferred(sym)
@@ -255,7 +273,7 @@ class SecSecurityMaster(SecurityMasterProvider):
         except http.HttpError as e:
             if e.status == 404:
                 if scope is not None:
-                    record_absence(self.conn, name, scope, sym, start)
+                    record_absence(self.conn, name, scope, sym, start, end)
                 return []
             raise VendorUnavailable(f"{sym}: delisted vendor: {e}", quota=e.status == 429) from e
         except QuotaExhausted as e:

@@ -88,6 +88,41 @@ def test_repair_waits_for_an_inflight_pricing_and_then_wins(engine):
     assert done.is_set() and _row(engine, eid)["needs_review"] is True
 
 
+@db
+@pytest.mark.usefixtures("clean")
+def test_actual_repair_removes_returns_written_by_an_inflight_worker(engine):
+    """Worker locks the event (fence) and is pricing; the real identity repair starts, must wait for the worker's
+    commit, and then delete what the worker wrote - no stale return survives."""
+    from app.backtest.jobs import _fence
+    from app.jobs import return_repair
+    with engine.begin() as c:
+        _registry(c, "0001326706", "ENvue Medical, Inc.", "FEED", "29415F100")
+        eid = _event(c, "env", "0001326706", "FEED", date(2024, 5, 15), event_type="INST_13F_EXIT",
+                     company_name="ENVISTA HOLDINGS CORP", identity_confidence="MEDIUM")
+        c.execute(text("""UPDATE events SET payload = '{"cusip": "29415F104"}' WHERE id = :i"""), {"i": eid})
+    finished = threading.Event()
+    errors: list = []
+
+    def repair():
+        try:
+            return_repair.run(engine, items=("identity_13f",), apply=True)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+        finished.set()
+    with engine.begin() as worker:
+        assert _fence(worker, eid, "FEED", "0001326706", False)
+        t = threading.Thread(target=repair)
+        t.start()
+        assert not finished.wait(1.5)  # the repair is waiting for the worker's row lock
+        _ret(worker, eid, 30, 0.2)  # the worker persists its (wrong-issuer) return while the repair waits
+    t.join(30)
+    assert finished.is_set() and not errors
+    with engine.connect() as c:
+        assert c.execute(text("SELECT count(*) FROM event_returns WHERE event_id = :i"), {"i": eid}).scalar() == 0
+    r = _row(engine, eid)
+    assert r["needs_review"] is True and r["missing_reason"] == "IDENTITY_REVIEW"
+
+
 # ------------------------------------------------------------------ 2. analytics consumers
 
 def _ret(c, eid, h=90, ex=0.05):
@@ -150,17 +185,40 @@ def test_reused_ticker_does_not_share_the_negative_cache_across_issuers_or_marke
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_historical_periods_do_not_share_the_negative_cache(engine):
+def test_absence_covers_only_the_confirmed_interval(engine):
     from app.marketdata.provider import AbsenceScope, ensure_prices
     calls: list = []
     p = _counting(calls)
-    sc = AbsenceScope("CIK:0000000001")
+    sc = AbsenceScope("CIK:0000000001|SYM:2019-01-01")
     with engine.begin() as c:
-        ensure_prices(c, "ABC", date(2023, 6, 1), date(2024, 1, 1), provider=p, absence=sc)
-        ensure_prices(c, "ABC", date(2021, 1, 1), date(2022, 1, 1), provider=p, absence=sc)  # earlier period
-        assert [x[1] for x in calls] == [date(2023, 6, 1), date(2021, 1, 1)]
-        ensure_prices(c, "ABC", date(2024, 2, 1), date(2024, 6, 1), provider=p, absence=sc)  # inside a recorded 404
-        assert len(calls) == 2
+        ensure_prices(c, "ABC", date(2023, 1, 1), date(2023, 6, 30), provider=p, absence=sc)  # 404 recorded Jan-Jun
+        ensure_prices(c, "ABC", date(2023, 2, 1), date(2023, 5, 1), provider=p, absence=sc)  # inside: cached
+        assert len(calls) == 1
+        ensure_prices(c, "ABC", date(2023, 7, 1), date(2023, 12, 31), provider=p, absence=sc)  # later, disjoint
+        ensure_prices(c, "ABC", date(2021, 1, 1), date(2021, 6, 30), provider=p, absence=sc)  # earlier, disjoint
+        ensure_prices(c, "ABC", date(2022, 12, 1), date(2023, 3, 1), provider=p, absence=sc)  # overlapping, not inside
+        assert [x[1] for x in calls] == [date(2023, 1, 1), date(2023, 7, 1), date(2021, 1, 1), date(2022, 12, 1)]
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_predecessor_and_successor_periods_have_distinct_identities(engine):
+    from app.securitymaster.provider import SecSecurityMaster
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO security_symbols (cik, symbol, first_seen, last_seen, n_obs, source) VALUES
+                          ('0000000777', 'ABC', '2015-01-05', '2018-06-01', 3, 'form345_filing'),
+                          ('0000000888', 'ABC', '2021-03-01', '2024-01-02', 3, 'form345_filing')"""))
+        sm = SecSecurityMaster(c, None, None, skip_known_absent=True)
+        pred = sm._absence_scope("0000000777", "ABC", "historical_symbol_verified", date(2017, 1, 3))
+        succ = sm._absence_scope("0000000888", "ABC", "historical_symbol_verified", date(2022, 1, 3))
+        cur = sm._absence_scope("0000000777", "ABC", "current_ticker_same_cik", date(2025, 1, 3))
+        assert len({pred.identity, succ.identity, cur.identity}) == 3
+        assert pred.identity == "CIK:0000000777|SYM:2015-01-05"
+        # the issuer outside any period it used the symbol in: no negative cache at all
+        assert sm._absence_scope("0000000777", "ABC", "historical_symbol_verified", date(2020, 6, 1)) is None
+        # a known security id wins over the issuer fallback
+        assert sm._absence_scope("0000000777", "ABC", "current_ticker_same_cik", date(2025, 1, 3), "US:XYZ:1").identity == "SEC:US:XYZ:1"
+        assert SecSecurityMaster(c, None, None)._absence_scope("0000000777", "ABC", None, date(2017, 1, 3)) is None
 
 
 # ------------------------------------------------------------------ 4. fairness under continuous arrivals
@@ -249,13 +307,29 @@ def test_two_vendor_workers_cannot_claim_the_same_event(engine):
 
 # ------------------------------------------------------------------ 7. malformed Tiingo payload
 
-def test_malformed_tiingo_list_is_not_no_data():
+@pytest.mark.parametrize("payload", [
+    [{"foo": 1}, "x", {"date": "not-a-date"}],
+    [{"date": "2024-01-02"}],  # a valid date but no prices at all
+    [{"date": "2024-01-02", "close": "12.5"}],  # a string is not a price
+    [{"date": "2024-01-02", "close": float("nan")}, {"date": "2024-01-03", "close": float("inf")}],
+    [{"date": "2024-01-02", "close": 0}, {"date": "2024-01-03", "close": -3.0}, {"date": "2024-01-04", "close": True}],
+])
+def test_malformed_tiingo_list_is_not_no_data(payload):
     from app import http
     from app.securitymaster.vendors import parse_tiingo_prices
     assert parse_tiingo_prices([], "K") == []  # genuine empty answer
     with pytest.raises(http.HttpError) as e:
-        parse_tiingo_prices([{"foo": 1}, "x", {"date": "not-a-date"}], "K")
+        parse_tiingo_prices(payload, "K")
     assert e.value.status == 502
+
+
+def test_tiingo_bar_fields_are_sanitized():
+    from app.securitymaster.vendors import parse_tiingo_prices
+    bars = parse_tiingo_prices([{"date": "2024-01-02", "close": 10.0, "open": float("nan"), "high": "x", "low": -1,
+                                 "adjClose": 9.5, "volume": -5}, {"date": "2024-01-03", "close": None}], "K")
+    assert len(bars) == 1
+    b = bars[0]
+    assert (b.close, b.open, b.high, b.low, b.adj_close, b.volume) == (10.0, None, None, None, 9.5, None)
 
 
 @db
@@ -276,7 +350,7 @@ def test_malformed_vendor_payload_is_temporary_and_never_cached(engine):
         with pytest.raises(VendorUnavailable) as e:
             sm._vendor_bars("OLDB", date(2023, 1, 1), date(2023, 6, 1), sc)
         assert e.value.quota is False
-        assert not absence_fresh(c, "tiingo", sc, "OLDB", date(2023, 1, 1))
+        assert not absence_fresh(c, "tiingo", sc, "OLDB", date(2023, 1, 1), date(2023, 6, 1))
 
 
 # ------------------------------------------------------------------ 8. CUSIP normalization
@@ -290,6 +364,19 @@ def test_invalid_check_digit_never_gets_medium_or_high(engine):
         _cover(c, "0000000000-24-000009", "0000320193", "037833101", "Apple Inc.")  # the 13D row carries the bad value
         _registry(c, "0000320193", "Apple Inc.", "AAPL", "037833101")
         cik, conf, why = cusip_to_cik(c, "037833101", "APPLE INC")
+    assert conf not in ("HIGH", "MEDIUM") and (cik is None or why.startswith("REVIEW_REQUIRED"))
+
+
+@db
+@pytest.mark.usefixtures("clean")
+@pytest.mark.parametrize("q", ["037833100X", "037833100 0", "0378331000", "037833100-"])
+def test_overlength_cusip_lookup_never_gets_medium_or_high(engine, q):
+    from app.markets.identity import cusip_to_cik
+    with engine.begin() as c:
+        _cover(c, "0000000000-24-000011", "0000320193", "037833100", "Apple Inc.")
+        _registry(c, "0000320193", "Apple Inc.", "AAPL", "037833100")
+        assert cusip_to_cik(c, "037833100", "APPLE INC")[1] == "HIGH"  # the valid value itself
+        cik, conf, why = cusip_to_cik(c, q, "APPLE INC")
     assert conf not in ("HIGH", "MEDIUM") and (cik is None or why.startswith("REVIEW_REQUIRED"))
 
 
@@ -349,9 +436,55 @@ def test_migration_0013_upgrade_downgrade_reupgrade():
             valid = c.execute(text("""SELECT i.indisvalid FROM pg_index i JOIN pg_class x ON x.oid = i.indexrelid
                                       WHERE x.relname = 'ix_events_returns_queue'""")).scalar()
             cols = c.execute(text("""SELECT count(*) FROM information_schema.columns WHERE table_name = 'price_absences'
-                                     AND column_name IN ('identity', 'market', 'window_start')""")).scalar()
+                                     AND column_name IN ('identity', 'market', 'window_start', 'window_end')""")).scalar()
         eng.dispose()
-        assert valid is True and cols == 3
+        assert valid is True and cols == 4
+    finally:
+        with admin.connect() as c:
+            c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+
+
+@db
+def test_migration_0013_recovers_from_a_failed_concurrent_index_build():
+    """Partial state after a failed run: column + table committed, an INVALID index left behind, alembic at 0012.
+    Re-running `alembic upgrade head` must complete."""
+    admin = create_engine(URL, isolation_level="AUTOCOMMIT")
+    name = "pe_mig_0013_fail"
+    with admin.connect() as c:
+        c.execute(text(f"DROP DATABASE IF EXISTS {name}"))
+        c.execute(text(f"CREATE DATABASE {name}"))
+    url = URL.rsplit("/", 1)[0] + "/" + name
+    env = {**os.environ, "DATABASE_URL": url}
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def alembic(*args):
+        p = subprocess.run(["alembic", *args], cwd=root, env=env, capture_output=True, text=True, timeout=300)
+        assert p.returncode == 0, p.stderr[-2000:]
+    try:
+        alembic("upgrade", "0012")
+        eng = create_engine(url, isolation_level="AUTOCOMMIT")
+        with eng.connect() as c:
+            c.execute(text("ALTER TABLE events ADD COLUMN returns_next_at TIMESTAMP WITH TIME ZONE"))
+            c.execute(text("""CREATE TABLE price_absences (provider VARCHAR(16) NOT NULL, identity VARCHAR(64) NOT NULL,
+                              market VARCHAR(8) NOT NULL, symbol VARCHAR(16) NOT NULL, window_start DATE NOT NULL,
+                              window_end DATE NOT NULL, checked_at TIMESTAMPTZ NOT NULL, hits INTEGER DEFAULT 1 NOT NULL,
+                              PRIMARY KEY (provider, identity, market, symbol, window_start, window_end))"""))
+            for k in ("a", "b"):  # duplicates make a UNIQUE concurrent build fail -> INVALID index remains
+                c.execute(text("""INSERT INTO events (event_type, dedupe_key, public_date, title, payload, source_url)
+                                  VALUES ('X', :k, '2024-01-02', 't', '{}', 'u')"""), {"k": k})
+            with pytest.raises(Exception):
+                c.execute(text("CREATE UNIQUE INDEX CONCURRENTLY ix_events_returns_queue ON events (returns_status)"))
+            assert c.execute(text("""SELECT i.indisvalid FROM pg_index i JOIN pg_class x ON x.oid = i.indexrelid
+                                     WHERE x.relname = 'ix_events_returns_queue'""")).scalar() is False
+            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0012"
+        alembic("upgrade", "head")  # the documented recovery: just run it again
+        with eng.connect() as c:
+            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0013"
+            assert c.execute(text("""SELECT i.indisvalid AND NOT i.indisunique FROM pg_index i JOIN pg_class x
+                                     ON x.oid = i.indexrelid WHERE x.relname = 'ix_events_returns_queue'""")).scalar() is True
+        alembic("downgrade", "0012")
+        alembic("upgrade", "head")
+        eng.dispose()
     finally:
         with admin.connect() as c:
             c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))

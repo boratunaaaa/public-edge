@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import math
 import os
 import zipfile
 from datetime import date
@@ -99,13 +100,28 @@ class TiingoPriceProvider(MarketDataProvider):
             raise
 
 
+def _price(v) -> float | None:
+    """A finite, positive number, else None (strings, NaN, inf, 0, negatives and booleans are not prices)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    f = float(v)
+    return f if math.isfinite(f) and f > 0 else None
+
+
+def _volume(v) -> int | None:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)) or v < 0:
+        return None
+    return int(v)
+
+
 def parse_tiingo_prices(payload, symbol: str) -> list[Bar]:
     """Tiingo answers a price list, but some errors arrive as HTTP 200 with a JSON object ({"detail": "..."}).
     Iterating that object yielded its keys (str) and x["date"] failed with "string indices must be integers" -
     every such event then sat in `retry` forever. An object is classified instead:
       * "not found" / unknown ticker -> HttpError 404 (a confirmed absence, handled like any provider 404);
       * anything else (hourly/daily allocation, maintenance, unexpected shape) -> HttpError 429 / 502 (temporary).
-    [] is a genuine empty answer; a non-empty list without a single valid bar is malformed -> 502 (temporary)."""
+    [] is a genuine empty answer; a non-empty list without a single valid bar (a parseable date AND a finite positive
+    close) is malformed -> 502 (temporary)."""
     if payload is None:
         return []
     if isinstance(payload, dict):
@@ -127,8 +143,11 @@ def parse_tiingo_prices(payload, symbol: str) -> list[Bar]:
             d = date.fromisoformat(str(x["date"])[:10])
         except (KeyError, ValueError):
             continue
-        close, adj = x.get("close"), x.get("adjClose")
-        out.append(Bar(d, x.get("open"), x.get("high"), x.get("low"), close, adj, x.get("volume")))
+        close = _price(x.get("close"))
+        if close is None:
+            continue  # a bar without a usable close is not a price
+        out.append(Bar(d, _price(x.get("open")), _price(x.get("high")), _price(x.get("low")), close,
+                       _price(x.get("adjClose")), _volume(x.get("volume"))))
     if payload and not out:
         # a non-empty answer without one usable bar is a provider/schema failure, NOT "no data": temporary, and never
         # written to the absence cache (only [] - Tiingo's genuine empty answer - means no prices in the window)
