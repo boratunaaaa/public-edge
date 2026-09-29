@@ -26,11 +26,14 @@ def _ensure_spy(conn: Connection) -> list:
 
 # ---------------- return queue ----------------
 # Tiers: 1 never attempted | 2 partial whose next horizon is due | 3 temporary retry / young pending | 4 long-term
-# (no_data re-verification, data-gap recheck). A batch interleaves the tiers by weight (TIER_WEIGHTS per round), so a
-# steady inflow of new events can never starve due partials or retries. Inside a tier: oldest due DAY first (aging),
-# then an issuer hash (deterministic, issuer-grouped for cache hits, uncorrelated with CIK size / age).
+# (no_data re-verification, data-gap recheck). Order = AGING KEY: the moment the event became due minus its tier's
+# head start (TIER_HEAD_START). The key is a pure function of the row (no per-batch state), so neither a small batch
+# limit nor a batch cut short by its time budget can reset fairness: an event due at T (key T - h) is served before
+# every event that arrives after T - h + 24 h, i.e. a partial never waits more than 12 h behind a stream of new events,
+# a retry never more than 18 h, a re-verification never more than 24 h. Inside an hour of keys: issuer hash
+# (deterministic, issuer-grouped for cache hits, uncorrelated with CIK size / age).
 TIER_NEVER_ATTEMPTED, TIER_HORIZON_DUE, TIER_TEMPORARY, TIER_LONG_TERM = 1, 2, 3, 4
-TIER_WEIGHTS = ((TIER_NEVER_ATTEMPTED, 6), (TIER_HORIZON_DUE, 2), (TIER_TEMPORARY, 1), (TIER_LONG_TERM, 1))
+TIER_HEAD_START = {TIER_NEVER_ATTEMPTED: 24, TIER_HORIZON_DUE: 12, TIER_TEMPORARY: 6, TIER_LONG_TERM: 0}  # hours
 GAP_RECHECK_DAYS = 7  # a horizon whose exit bar should exist but does not (vendor gap / lag)
 EOD_LAG = timedelta(hours=2)  # end-of-day bars are published after the 16:00 ET close
 VENDOR_RETRY_HOURS = 1
@@ -64,10 +67,16 @@ def queue_tier():
                 else_=TIER_LONG_TERM)
 
 
+def aging_key():
+    """When the event became due (next_at, else last check, else creation) minus its tier's head start."""
+    due_at = func.coalesce(events.c.returns_next_at, events.c.returns_checked_at, events.c.created_at)
+    head = case(*[(queue_tier() == t, h) for t, h in TIER_HEAD_START.items()], else_=0)
+    return due_at - func.make_interval(0, 0, 0, 0, head)
+
+
 def queue_order():
-    """Aging (the day the event became due / was created) first, then the issuer hash."""
-    due_day = func.date_trunc("day", func.coalesce(events.c.returns_next_at, events.c.returns_checked_at, events.c.created_at))
-    return (due_day, func.md5(func.coalesce(events.c.issuer_cik, events.c.ticker, "")), events.c.id)
+    return (func.date_trunc("hour", aging_key()), func.md5(func.coalesce(events.c.issuer_cik, events.c.ticker, "")),
+            events.c.id)
 
 
 def _session_ready(d: date) -> datetime:
@@ -135,48 +144,44 @@ def queue_select(now: datetime, *, tier: int | None = None, lane: str = LANE_MAI
     return select(*_COLS).where(and_(*conds)).order_by(*queue_order()).limit(limit)
 
 
-def interleave(by_tier: dict[int, list], limit: int) -> list:
-    """Weighted round robin over TIER_WEIGHTS; a tier with no work gives its slots to the others."""
-    pos = {t: 0 for t, _w in TIER_WEIGHTS}
-    out: list = []
-    while len(out) < limit and any(pos[t] < len(by_tier.get(t, [])) for t, _w in TIER_WEIGHTS):
-        for t, w in TIER_WEIGHTS:
-            rows = by_tier.get(t, [])
-            take = rows[pos[t]:pos[t] + w]
-            pos[t] += len(take)
-            out += take
-    return out[:limit]
-
-
 def select_queue(conn: Connection, now: datetime, *, backfill: bool | None = None, ciks: list[str] | None = None,
                  event_ids: list[int] | None = None, limit: int = 500) -> list:
-    """Main lane batch: every tier fetched separately, then interleaved (fair, deterministic)."""
-    by_tier = {t: conn.execute(queue_select(now, tier=t, backfill=backfill, ciks=ciks, event_ids=event_ids,
-                                            limit=limit)).all() for t, _w in TIER_WEIGHTS}
-    return interleave(by_tier, limit)
+    """Main lane batch in aging-key order (see TIER_HEAD_START)."""
+    return conn.execute(queue_select(now, backfill=backfill, ciks=ciks, event_ids=event_ids, limit=limit)).all()
 
 
 def claim_vendor(conn: Connection, now: datetime, limit: int = VENDOR_CLAIM, lease: timedelta = VENDOR_LEASE) -> list:
-    """Atomic vendor-lane claim: rows locked with SKIP LOCKED and leased (returns_next_at = now + lease) in the caller's
-    transaction, so two vendor workers never take the same event (no double quota spend). A crashed worker's lease
-    simply expires and the event is claimed again (idempotent: returns are upserts)."""
+    """Atomic vendor-lane claim: rows locked with SKIP LOCKED and leased in the caller's transaction - a unique lease
+    token (returns_lease) and an expiry (returns_next_at = now + lease) - so two vendor workers never take the same
+    event. Each returned row carries its token as the last column; _fence re-validates token AND expiry under the row
+    lock right before the provider call, so a worker whose lease expired (and was reclaimed by another worker, or not)
+    can never spend quota on the event. A crashed worker's lease expires and the event is claimed again."""
+    import uuid
     ids = conn.execute(select(events.c.id).where(and_(*_conds(now, _vendor_due(now), None, None, None)))
                        .order_by(*queue_order()).limit(limit).with_for_update(skip_locked=True)).scalars().all()
     if not ids:
         return []
-    conn.execute(events.update().where(events.c.id.in_(ids)).values(returns_next_at=now + lease))
-    return conn.execute(select(*_COLS).where(events.c.id.in_(ids)).order_by(*queue_order())).all()
+    token = uuid.uuid4().hex
+    conn.execute(events.update().where(events.c.id.in_(ids)).values(returns_next_at=now + lease, returns_lease=token))
+    return conn.execute(select(*_COLS, events.c.returns_lease).where(events.c.id.in_(ids)).order_by(*queue_order())).all()
 
 
-def _fence(conn: Connection, eid: int, ticker, cik, vendor_lane: bool) -> bool:
+def _fence(conn: Connection, eid: int, ticker, cik, vendor_lane: bool, lease: str | None = None,
+           now: datetime | None = None) -> bool:
     """Row lock + re-read right before pricing: the event must still be what was selected. An identity repair that
     set needs_review / changed the issuer after selection wins (it either committed first -> we skip, or waits for
     our transaction and then removes what we wrote)."""
     cur = conn.execute(select(events.c.needs_review, events.c.superseded, events.c.issuer_cik, events.c.ticker,
-                              events.c.returns_status).where(events.c.id == eid).with_for_update()).first()
+                              events.c.returns_status, events.c.returns_lease, events.c.returns_next_at)
+                       .where(events.c.id == eid).with_for_update()).first()
     if cur is None or cur.needs_review or cur.superseded or cur.issuer_cik != cik or cur.ticker != ticker:
         return False
-    return cur.returns_status == "vendor_wait" if vendor_lane else cur.returns_status in DUE_STATUSES
+    if vendor_lane:
+        # the vendor lease must still be OURS and unexpired (a reclaimed or expired claim never reaches the provider)
+        now = now or datetime.now(timezone.utc)
+        return (cur.returns_status == "vendor_wait" and lease is not None and cur.returns_lease == lease
+                and cur.returns_next_at is not None and cur.returns_next_at > now)
+    return cur.returns_status in DUE_STATUSES
 
 
 def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600, backfill: bool | None = None,
@@ -218,7 +223,9 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
     stop = None
     queue = list(rows)
     while True:
-        if time.time() - t0 > time_budget_s or stop:
+        # the budget is checked only after progress: a batch always handles at least one event, so a tiny budget
+        # (or a slow first request) can never stall the queue at the same head forever
+        if stop or (done + nodata + retry + deferred + fenced and time.time() - t0 > time_budget_s):
             break
         if not queue and vendor_lane and claimed < limit:
             with engine.begin() as conn:  # next small leased chunk (never more than VENDOR_CLAIM in flight)
@@ -227,10 +234,10 @@ def compute_pending(engine: Engine, limit: int = 500, time_budget_s: float = 600
             queue += more
         if not queue:
             break
-        eid, ticker, cik, pdate, pat, security_id = queue.pop(0)
+        eid, ticker, cik, pdate, pat, security_id, *lease = queue.pop(0)
         with engine.begin() as conn:
             now = datetime.now(timezone.utc)
-            if not _fence(conn, eid, ticker, cik, vendor_lane):
+            if not _fence(conn, eid, ticker, cik, vendor_lane, lease[0] if lease else None, now):
                 fenced += 1
                 continue
             sm = get_security_master(conn, allow_vendor=vendor_lane, skip_known_absent=True)

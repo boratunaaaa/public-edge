@@ -4,7 +4,7 @@ Revision ID: 0013
 Revises: 0012
 Create Date: 2026-09-29
 
-Additive only: one nullable column (NULL keeps the pre-0013 rule, returns_checked_at + recheck interval), one index and
+Additive only: two nullable columns (returns_next_at, returns_lease) (NULL keeps the pre-0013 rule, returns_checked_at + recheck interval), one index and
 one new table. No data is rewritten here; scripts/pe_return_repair.py sets returns_next_at for existing partial events
 (dry-run by default).
 
@@ -31,6 +31,7 @@ depends_on = None
 def upgrade() -> None:
     op.execute("SET lock_timeout = '5s'")
     op.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS returns_next_at TIMESTAMP WITH TIME ZONE")
+    op.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS returns_lease VARCHAR(32)")  # vendor-lane claim token
     op.execute("""
         CREATE TABLE IF NOT EXISTS price_absences (
             provider VARCHAR(16) NOT NULL,
@@ -55,4 +56,5 @@ def downgrade() -> None:
         op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_events_returns_queue")
     op.execute("SET lock_timeout = '5s'")
     op.execute("DROP TABLE IF EXISTS price_absences")
+    op.execute("ALTER TABLE events DROP COLUMN IF EXISTS returns_lease")
     op.execute("ALTER TABLE events DROP COLUMN IF EXISTS returns_next_at")

@@ -140,7 +140,7 @@ def test_partial_is_not_requeued_before_its_next_horizon_and_is_when_due(engine)
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_tiers_are_interleaved_and_no_cik_order(engine):
+def test_aging_order_across_tiers_and_no_cik_order(engine):
     now = datetime.now(timezone.utc)
     old = now - timedelta(days=3)
     with engine.begin() as c:
@@ -153,8 +153,9 @@ def test_tiers_are_interleaved_and_no_cik_order(engine):
     from app.backtest.jobs import select_queue
     with engine.connect() as c:
         q = [r[0] for r in select_queue(c, datetime.now(timezone.utc), limit=100)]
-    # weighted round robin 6 : 2 : 1 : 1 - due partial / retry / re-verification are served in the FIRST round
-    assert set(q[:6]) <= set(fresh) and q[6:9] == [partial, retry, nodata] and set(q[9:]) <= set(fresh)
+    # aging key = due moment - tier head start: the long-waiting re-verification (40 d) and retry (3 d) first, the
+    # new events (key now - 24 h) next, the partial that became due an hour ago (key now - 13 h) after them
+    assert q[:2] == [nodata, retry] and set(q[2:14]) == set(fresh) and q[14:] == [partial]
     # inside a tier the order is an issuer hash, not the CIK: low CIKs are not systematically first
     ciks = {e: f"00000001{i:02d}" for i, e in enumerate(fresh)}
     fq = [e for e in q if e in ciks]

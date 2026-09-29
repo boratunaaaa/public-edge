@@ -221,34 +221,74 @@ def test_predecessor_and_successor_periods_have_distinct_identities(engine):
         assert SecSecurityMaster(c, None, None)._absence_scope("0000000777", "ABC", None, date(2017, 1, 3)) is None
 
 
+@db
+@pytest.mark.usefixtures("clean")
+def test_absence_records_only_the_interval_actually_requested(engine):
+    """Cached Jan + Jun bars: a Jan-Dec request asks the provider only from late May; its 404 must not suppress a
+    later request for an earlier, never-checked gap."""
+    from app.marketdata.provider import AbsenceScope, Bar, ensure_prices, store_bars
+    calls: list = []
+    p = _counting(calls)
+    sc = AbsenceScope("CIK:0000000001|SYM:2019-01-01")
+    with engine.begin() as c:
+        store_bars(c, "ABC", [Bar(date(2023, 1, 3), 1, 1, 1, 1, 1, 1), Bar(date(2023, 6, 1), 1, 1, 1, 1, 1, 1)])
+        ensure_prices(c, "ABC", date(2023, 1, 1), date(2023, 12, 31), provider=p, absence=sc)
+        assert calls == [("ABC", date(2023, 5, 29))]  # fetch_from = last cached bar - 3 days
+        ensure_prices(c, "ABC", date(2023, 1, 1), date(2023, 12, 31), provider=p, absence=sc)
+        assert len(calls) == 1  # the same provider interval: cached
+        ensure_prices(c, "ABC", date(2022, 12, 1), date(2023, 12, 31), provider=p, absence=sc)  # earlier gap
+        assert calls[-1] == ("ABC", date(2022, 12, 1)) and len(calls) == 2
+        ensure_prices(c, "ABC", date(2022, 6, 1), date(2022, 11, 30), provider=p, absence=sc)  # never checked
+        assert len(calls) == 3
+
+
 # ------------------------------------------------------------------ 4. fairness under continuous arrivals
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_due_partial_and_retry_are_served_under_a_continuous_inflow_of_new_events(engine):
+def test_no_tier_starves_under_sustained_overload_with_batches_of_one(engine):
+    """3 new events arrive per hour, only ONE event is priced per batch (the smallest limit / a batch cut short
+    after its first event by the time budget). Every lower tier is still served, within a bounded number of batches."""
     from app.backtest.jobs import select_queue
-    now = datetime.now(timezone.utc)
+    t0 = datetime.now(timezone.utc) - timedelta(hours=200)
     with engine.begin() as c:
         partial = _event(c, "p", "0000000003", "CCC", date(2024, 3, 1), returns_status="partial",
-                         returns_checked_at=now - timedelta(days=3), returns_next_at=now - timedelta(hours=1))
+                         returns_checked_at=t0 - timedelta(days=1), returns_next_at=t0)
         retry = _event(c, "r", "0000000001", "AAA", date(2024, 3, 1), returns_status="retry",
-                       returns_checked_at=now - timedelta(days=3), returns_next_at=now - timedelta(hours=1))
-        old_new = _event(c, "old", "0000000999", "OLD", date(2024, 3, 1))
-        c.execute(text("UPDATE events SET created_at = now() - interval '5 days' WHERE id = :i"), {"i": old_new})
+                       returns_checked_at=t0 - timedelta(days=1), returns_next_at=t0)
+        nodata = _event(c, "n", "0000000002", "BBB", date(2024, 3, 1), returns_status="no_data",
+                        returns_checked_at=t0 - timedelta(days=30), returns_next_at=t0)
     served: dict[int, int] = {}
-    for rnd in range(6):
-        with engine.begin() as c:  # a new wave of never-attempted events, larger than a batch, every round
-            for i in range(25):
-                _event(c, f"w{rnd}-{i}", f"0000{rnd:02d}{i:04d}", f"W{rnd}{i}", date(2024, 3, 1))
+    for hour in range(120):
+        with engine.begin() as c:
+            for i in range(3):
+                e = _event(c, f"w{hour}-{i}", f"000{hour:03d}{i:04d}", f"W{hour}x{i}", date(2024, 3, 1))
+                c.execute(text("UPDATE events SET created_at = :t WHERE id = :i"), {"t": t0 + timedelta(hours=hour), "i": e})
         with engine.connect() as c:
-            batch = [r[0] for r in select_queue(c, datetime.now(timezone.utc), limit=10)]
-        with engine.begin() as c:  # the batch is priced: it leaves the due set
+            batch = [r[0] for r in select_queue(c, datetime.now(timezone.utc), limit=1)]
+        with engine.begin() as c:
             c.execute(text("""UPDATE events SET returns_status = 'complete', returns_checked_at = now(),
                               returns_next_at = NULL WHERE id = ANY(:i)"""), {"i": batch})
         for e in batch:
-            served.setdefault(e, rnd)
-    assert served.get(partial) == 0 and served.get(retry) == 0  # first batch, despite 25 new events per round
-    assert served.get(old_new) == 0  # aging: the oldest never-attempted event is not overtaken by newer waves
+            served.setdefault(e, hour)
+    # key = due - head start; only arrivals with a smaller key go first: 3 per hour for 12 h / 18 h / 24 h
+    assert served[partial] <= 3 * 12 + 1 and served[retry] <= 3 * 18 + 2 and served[nodata] <= 3 * 24 + 3
+    assert served[partial] < served[retry] < served[nodata]
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_a_zero_time_budget_still_makes_progress(engine, monkeypatch):
+    from app.backtest import jobs
+    _prices(monkeypatch)
+    with engine.begin() as c:
+        for i in range(3):
+            _event(c, f"tb{i}", "0001953926", "ZBIO", date(2024, 3, 1) + timedelta(days=i))
+    for expected_left in (2, 1, 0):
+        r = jobs.compute_pending(engine, time_budget_s=0)
+        assert r["processed"] == 1  # the budget is checked only after progress
+        with engine.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM events WHERE returns_checked_at IS NULL")).scalar() == expected_left
 
 
 # ------------------------------------------------------------------ 5. NYSE-session eligibility
@@ -303,6 +343,34 @@ def test_two_vendor_workers_cannot_claim_the_same_event(engine):
         assert claim_vendor(c, datetime.now(timezone.utc), 10) == []
     with engine.begin() as c:  # a crashed worker: the lease expires and the event is claimed again
         assert len(claim_vendor(c, datetime.now(timezone.utc) + timedelta(minutes=21), 10)) == 4
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_a_stale_vendor_claim_can_never_reach_the_provider(engine):
+    """Worker A claims, stalls past its lease; worker B reclaims; A resumes - A's fence fails, B's holds."""
+    from app.backtest.jobs import _fence, claim_vendor
+    with engine.begin() as c:
+        eid = _event(c, "v", "0000000701", "V1", date(2024, 3, 1), returns_status="vendor_wait")
+    t = datetime.now(timezone.utc)
+    with engine.begin() as c:
+        (row_a,) = claim_vendor(c, t, 1)
+    lease_a = row_a[-1]
+    with engine.begin() as c:  # A is still inside its lease: its own fence holds
+        assert _fence(c, eid, "V1", "0000000701", True, lease_a, t + timedelta(minutes=1))
+    with engine.begin() as c:  # A stalls; its lease expired; nobody reclaimed yet -> A is out
+        assert not _fence(c, eid, "V1", "0000000701", True, lease_a, t + timedelta(minutes=21))
+    with engine.begin() as c:  # B reclaims after expiry
+        (row_b,) = claim_vendor(c, t + timedelta(minutes=21), 1)
+    lease_b = row_b[-1]
+    assert lease_b != lease_a
+    with engine.begin() as c:  # A resumes with its old token -> refused; B -> allowed
+        assert not _fence(c, eid, "V1", "0000000701", True, lease_a, t + timedelta(minutes=22))
+        assert _fence(c, eid, "V1", "0000000701", True, lease_b, t + timedelta(minutes=22))
+    with engine.begin() as c:  # B hit a temporary failure: rescheduled; A's stale token still cannot retry at once
+        c.execute(text("UPDATE events SET returns_next_at = :n WHERE id = :i"), {"n": t + timedelta(hours=2), "i": eid})
+        assert not _fence(c, eid, "V1", "0000000701", True, lease_a, t + timedelta(minutes=23))
+        assert _fence(c, eid, "V1", "0000000701", False) is False  # never in the main lane either
 
 
 # ------------------------------------------------------------------ 7. malformed Tiingo payload

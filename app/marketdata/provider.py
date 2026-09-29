@@ -147,8 +147,9 @@ def ensure_prices(conn: Connection, symbol: str, start: date, end: date, provide
 
     A provider 404 ("no data / delisted") is a confirmed absence -> returns what is cached (maybe []).
     Any other failure raises PriceFetchError so the caller can schedule a retry.
-    absence (return queue): a 404 is recorded in price_absences for THIS identity / market / symbol / [start, end], and a
-    request inside that interval is not repeated for ABSENCE_TTL_DAYS - the result is exactly what that 404 returned
+    absence (return queue): a 404 is recorded in price_absences for THIS identity / market / symbol and exactly the
+    interval requested from the provider ([fetch_from, need_end] - with partial cached coverage that is less than
+    [start, end]); a later provider request inside that interval is not repeated for ABSENCE_TTL_DAYS - the result is exactly what that 404 returned
     (the cached bars). Temporary failures are never recorded, so they stay retryable. No scope -> no negative cache.
     """
     have = load_bars(conn, symbol, start, end)
@@ -159,16 +160,17 @@ def ensure_prices(conn: Connection, symbol: str, start: date, end: date, provide
         return have
     provider = provider or get_provider()
     pname = getattr(provider, "name", type(provider).__name__)[:16]
-    if absence is not None and absence_fresh(conn, pname, absence, symbol, start, need_end):
-        return have
     fetch_from = start if not have or have[0].date > start + timedelta(days=5) else have[-1].date - timedelta(days=3)
+    # the negative cache speaks only about the interval actually asked of the provider: [fetch_from, need_end]
+    if absence is not None and absence_fresh(conn, pname, absence, symbol, fetch_from, need_end):
+        return have
     try:
         bars = provider.get_historical_prices(symbol, fetch_from, need_end)
     except http.HttpError as e:
         if e.status == 404:
             log.info("no price data for %s (provider 404)", symbol)
             if absence is not None:
-                record_absence(conn, pname, absence, symbol, start, need_end)
+                record_absence(conn, pname, absence, symbol, fetch_from, need_end)  # what was checked, not more
             return have
         raise PriceFetchError(f"{symbol}: {e}") from e
     except Exception as e:

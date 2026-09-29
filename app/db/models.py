@@ -347,6 +347,7 @@ events = Table(
     # earliest moment the event is worth pricing again: the next missing horizon's end (partial), the retry backoff
     # (retry) or the monthly re-verification (no_data). NULL = decided by returns_checked_at (legacy rows).
     _ts("returns_next_at"),
+    Column("returns_lease", String(32)),  # vendor-lane claim token (claim_vendor / _fence)
 )
 Index("ix_events_type_public", events.c.event_type, events.c.public_date)
 Index("ix_events_issuer", events.c.issuer_cik)
