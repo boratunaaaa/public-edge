@@ -42,13 +42,17 @@ def liquidity_class(prior_bars) -> tuple[str, float | None]:
     return ("LIQUID" if m >= 20e6 else "NORMAL" if m >= 1e6 else "ILLIQUID"), adv
 
 
+def fillable(prior_bars, fill_bar) -> bool:
+    """Can an order fill on this bar at all (sizing aside)? An opening trade printed and a prior-session volume
+    estimate exists. The single rule used by quote() and by the ledger's chronological ordering."""
+    return bool(fill_bar.open and fill_bar.volume and liquidity_class(prior_bars)[1])
+
+
 def quote(prior_bars, fill_bar, desired_shares: float, floor_bps: float) -> FillQuote | None:
     """None = cannot fill on this bar (no opening trade, or no prior-session liquidity estimate)."""
-    if not fill_bar.open or not fill_bar.volume:
+    if not fillable(prior_bars, fill_bar):
         return None
     model, adv = liquidity_class(prior_bars)
-    if not adv:
-        return None
     half_spread, cap = CLASSES[model]
     max_shares = cap * adv
     shares = min(desired_shares, max_shares)

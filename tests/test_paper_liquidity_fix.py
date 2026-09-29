@@ -257,3 +257,54 @@ def test_a_catch_up_run_fills_in_session_order_like_daily_runs(engine):
     conn.close()
     assert daily[0][0] == fri and daily[1][0] == tue
     assert catch_up == daily
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_ordering_uses_the_fill_rule_after_a_long_volume_gap(engine):
+    """After > 20 volume-less sessions the fill model has no ADV estimate (its 20-bar window): the ordering key must
+    agree with the fill itself, not with older volume."""
+    from app.paper.ledger import _first_fillable, fill_orders
+    mon = date(2024, 3, 4)
+    gap = {date(2024, 1, 29) + timedelta(days=i): (10.0, 0) for i in range(35)}  # ~25 stored sessions, zero volume
+    with engine.begin() as c:
+        _store(c, "GAPD", _series(date(2023, 11, 1), 110, overrides={**gap, mon: (10.0, 50_000)}))
+        oid = _order(c, mon, ticker="GAPD")
+        o = _row(c, oid)
+        key = _first_fillable(c, o, date(2024, 3, 8), {})
+        fill_orders(c, date(2024, 3, 8))
+        filled = _row(c, oid)["fill_date"]
+    assert key == filled == date(2024, 3, 5)  # Monday prints, but has no prior estimate; Tuesday does (Monday)
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_concurrent_runs_with_different_dates_lock_in_the_same_order(engine):
+    """Two BUYs: a Monday run (both unfillable, id order) and a Friday catch-up (id 2 first chronologically) must not
+    deadlock: every run locks the pending set in id order first, so the second one only waits."""
+    from sqlalchemy.exc import OperationalError
+
+    from app.paper.ledger import fill_orders
+    mon = date(2024, 3, 4)
+    with engine.begin() as c:
+        _store(c, "HALTA", _series(date(2024, 1, 2), 60, overrides={mon + timedelta(days=i): (None, 0) for i in range(4)}))
+        _store(c, "HALTB", _series(date(2024, 1, 2), 60, overrides={mon: (None, 0)}))
+        a = _order(c, mon, ticker="HALTA", book="A_30D")
+        b = _order(c, mon, ticker="HALTB", book="B_90D")
+    conn_a = engine.connect()
+    tx = conn_a.begin()
+    try:
+        fill_orders(conn_a, mon)  # holds both order locks, fills nothing
+        with engine.connect() as conn_b:
+            conn_b.execute(text("SET lock_timeout = '300ms'"))
+            with pytest.raises(OperationalError) as err:
+                fill_orders(conn_b, date(2024, 3, 8))
+            assert "deadlock" not in str(err.value).lower()  # a plain lock wait, never a deadlock
+            conn_b.rollback()
+    finally:
+        tx.commit()
+        conn_a.close()
+    with engine.begin() as c:
+        fill_orders(c, date(2024, 3, 8))
+        ra, rb = _row(c, a), _row(c, b)
+    assert (ra["fill_date"], rb["fill_date"]) == (date(2024, 3, 8), date(2024, 3, 5))

@@ -191,40 +191,58 @@ def _proposal_info(conn: Connection, proposal_id: int | None) -> dict:
     return {"gate": (r[0] or {}) if r else {}, "cik": r[1] if r else None}
 
 
-def _first_fillable(conn: Connection, o, today: date) -> date | None:
-    """The first session this order could fill on (opening trade printed; for a BUY also inside its validity and with
-    prior-session volume to size on) - the chronological processing key."""
-    bars = [b for b in _bars(conn, o["ticker"], o["not_before"] - timedelta(days=45), today)]
-    seen_volume = False
-    for b in bars:
-        if b.date >= o["not_before"] and b.open and b.volume:
-            if o["side"] != "BUY":
-                return b.date
-            if sessions_since(o["not_before"], b.date) > ORDER_VALID_SESSIONS:
-                return None
-            if seen_volume:
-                return b.date
-        seen_volume = seen_volume or bool(b.volume)
-    return None
+def _buy_sessions(conn: Connection, o, today: date) -> tuple[list, list]:
+    """(candidate sessions inside the BUY's validity, price history) - the ONE selection used for ordering and fill."""
+    bars = [b for b in _bars(conn, o["ticker"], o["not_before"], today) if b.date >= o["not_before"]
+            and sessions_since(o["not_before"], b.date) <= ORDER_VALID_SESSIONS]
+    return bars, _bars(conn, o["ticker"], o["not_before"] - timedelta(days=45), today)
+
+
+def _prior(hist: list, cand) -> list:
+    return [x for x in hist if cand.date - timedelta(days=45) <= x.date < cand.date]
+
+
+def _sell_session(conn: Connection, o, today: date, fresh: dict):
+    """(position, growth, first series bar with an opening trade on/after not_before) for an exit - cached per run so
+    ordering and execution read the same freshly fetched series."""
+    key = o["id"]
+    if key not in fresh:
+        pos = dict(conn.execute(select(paper_positions).where(paper_positions.c.id == o["position_id"])).mappings().first())
+        series = fresh_bars(conn, o["ticker"], pos["entry_date"], today) or []
+        g = Growth(series, pos["entry_date"], _entry_open(conn, pos))
+        sb = next((x for x in series if x.date >= o["not_before"] and x.open and x.volume), None) if g.ok else None
+        fresh[key] = (pos, series, g, sb)
+    return fresh[key]
+
+
+def _first_fillable(conn: Connection, o, today: date, fresh: dict) -> date | None:
+    """The session this order will fill on - computed with exactly the execution's rule (fills.fillable on the same
+    history window for a BUY, the same cached series for an exit): the chronological processing key."""
+    from app.paper.fills import fillable
+    if o["side"] == "BUY":
+        bars, hist = _buy_sessions(conn, o, today)
+        return next((c.date for c in bars if fillable(_prior(hist, c), c)), None)
+    sb = _sell_session(conn, o, today, fresh)[3]
+    return sb.date if sb else None
 
 
 def fill_orders(conn: Connection, today: date) -> dict:
     out = {"filled": 0, "cancelled": 0, "waiting": 0}
+    # every pending order row is locked up front, always in id order (no lock-order inversion between concurrent runs,
+    # whatever their dates); a row a concurrent run already filled / cancelled drops out of the locked set
     rows = conn.execute(select(paper_orders).where(and_(paper_orders.c.status == "PENDING", paper_orders.c.not_before <= today))
-                        .order_by(paper_orders.c.id)).mappings().all()
+                        .order_by(paper_orders.c.id).with_for_update()).mappings().all()
     from app.paper.fills import quote
+    fresh: dict = {}
     # chronological: a catch-up run (after a halt or a missed day) fills in session order, so every sizing sees the
     # portfolio as it stood on that session - never a later session's fill
-    rows = sorted(rows, key=lambda o: (_first_fillable(conn, o, today) or date.max, o["id"]))
+    rows = sorted(rows, key=lambda o: (_first_fillable(conn, o, today, fresh) or date.max, o["id"]))
     for o in rows:
-        # the order row is locked and re-read: a concurrent run that already filled / cancelled it is never overwritten
-        cur = conn.execute(select(paper_orders.c.status).where(paper_orders.c.id == o["id"]).with_for_update()).scalar()
-        if cur != "PENDING":
-            continue
         fq = None
-        bars = [b for b in _bars(conn, o["ticker"], o["not_before"], today) if b.date >= o["not_before"]]
         if o["side"] == "BUY":  # only sessions inside the order's validity may fill it
-            bars = [b for b in bars if sessions_since(o["not_before"], b.date) <= ORDER_VALID_SESSIONS]
+            bars, hist = _buy_sessions(conn, o, today)
+        else:
+            bars = [b for b in _bars(conn, o["ticker"], o["not_before"], today) if b.date >= o["not_before"]]
         if not bars:
             if o["side"] == "BUY" and sessions_since(o["not_before"], today) > ORDER_VALID_SESSIONS:
                 conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(
@@ -251,9 +269,8 @@ def fill_orders(conn: Connection, today: date) -> dict:
                 continue
             # first session (within validity) with an opening trade and a prior-session liquidity estimate; the
             # sizing uses only what was known at that open (fills.v3). A session without one is skipped, not fatal.
-            hist = _bars(conn, o["ticker"], o["not_before"] - timedelta(days=45), today)
             for cand in bars:
-                prior = [x for x in hist if cand.date - timedelta(days=45) <= x.date < cand.date]
+                prior = _prior(hist, cand)
                 nav = nav_of(conn, o["account_id"], cand.date - timedelta(days=1))
                 want = min(o["target_pct"] * nav, cash_of(conn, o["account_id"]) - comm)
                 fq = quote(prior, cand, want / cand.open if cand.open else 0.0, bps)
@@ -291,11 +308,9 @@ def fill_orders(conn: Connection, today: date) -> dict:
             gross = notional
             _move_cash(conn, o["account_id"], b.date, -(notional + comm), "BUY", o["id"])
         else:
-            pos = dict(conn.execute(select(paper_positions).where(paper_positions.c.id == o["position_id"])).mappings().first())
-            series = fresh_bars(conn, o["ticker"], pos["entry_date"], today) or []
-            g = Growth(series, pos["entry_date"], _entry_open(conn, pos))
             # exits never expire, but a session without an opening trade cannot sell either: first one that has it
-            sb = next((x for x in series if x.date >= o["not_before"] and x.open and x.volume), None) if g.ok else None
+            # (the same cached series the chronological ordering used)
+            pos, series, g, sb = _sell_session(conn, o, today, fresh)
             if sb is None:  # no consistent series yet: the sale waits, it is never priced from the cache
                 out["waiting"] += 1
                 continue
