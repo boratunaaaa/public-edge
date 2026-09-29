@@ -308,3 +308,26 @@ def test_concurrent_runs_with_different_dates_lock_in_the_same_order(engine):
         fill_orders(c, date(2024, 3, 8))
         ra, rb = _row(c, a), _row(c, b)
     assert (ra["fill_date"], rb["fill_date"]) == (date(2024, 3, 8), date(2024, 3, 5))
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_ordering_and_fill_share_one_price_snapshot_when_the_cache_is_incomplete(engine, monkeypatch):
+    """Order 1's ticker is not cached yet: the first price read fetches it (fillable Tuesday). Order 2 (cached) fills
+    Wednesday. The catch-up run must fill order 1 first, exactly like daily runs."""
+    from app.paper.ledger import fill_orders
+    mon, tue, wed = date(2024, 3, 4), date(2024, 3, 5), date(2024, 3, 6)
+    late = _series(date(2024, 1, 2), 60, overrides={mon: (None, 0)})  # served by the provider only
+    cached = _series(date(2024, 1, 2), 60, price=20.0, overrides={mon: (None, 0), tue: (None, 0)})
+    _serve(monkeypatch, LATE=late, CACHED=cached)
+
+    with engine.begin() as c:
+        _store(c, "CACHED", cached)
+        late_id = _order(c, mon, ticker="LATE", target=0.6)  # same book: the first fill takes 60 % of the cash
+        cached_id = _order(c, mon, ticker="CACHED", target=0.6)
+        fill_orders(c, date(2024, 3, 8))  # one catch-up run; LATE's prices are fetched during it
+        a, b = _row(c, late_id), _row(c, cached_id)
+    assert (a["fill_date"], b["fill_date"]) == (tue, wed)
+    # Tuesday was sized first on the untouched book, Wednesday on what Tuesday left - never the reverse
+    assert a["shares"] * a["fill_price"] == pytest.approx(6000, rel=0.02)
+    assert b["shares"] * b["fill_price"] < 4100

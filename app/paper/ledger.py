@@ -191,11 +191,15 @@ def _proposal_info(conn: Connection, proposal_id: int | None) -> dict:
     return {"gate": (r[0] or {}) if r else {}, "cik": r[1] if r else None}
 
 
-def _buy_sessions(conn: Connection, o, today: date) -> tuple[list, list]:
-    """(candidate sessions inside the BUY's validity, price history) - the ONE selection used for ordering and fill."""
-    bars = [b for b in _bars(conn, o["ticker"], o["not_before"], today) if b.date >= o["not_before"]
-            and sessions_since(o["not_before"], b.date) <= ORDER_VALID_SESSIONS]
-    return bars, _bars(conn, o["ticker"], o["not_before"] - timedelta(days=45), today)
+def _buy_sessions(conn: Connection, o, today: date, snap: dict) -> tuple[list, list]:
+    """(candidate sessions inside the BUY's validity, price history) from ONE price read per order and run, kept in
+    `snap`: ordering and execution see the same snapshot even when that read filled a missing cache range."""
+    key = ("buy", o["id"])
+    if key not in snap:
+        hist = _bars(conn, o["ticker"], o["not_before"] - timedelta(days=45), today)
+        bars = [b for b in hist if b.date >= o["not_before"] and sessions_since(o["not_before"], b.date) <= ORDER_VALID_SESSIONS]
+        snap[key] = (bars, hist)
+    return snap[key]
 
 
 def _prior(hist: list, cand) -> list:
@@ -220,7 +224,7 @@ def _first_fillable(conn: Connection, o, today: date, fresh: dict) -> date | Non
     history window for a BUY, the same cached series for an exit): the chronological processing key."""
     from app.paper.fills import fillable
     if o["side"] == "BUY":
-        bars, hist = _buy_sessions(conn, o, today)
+        bars, hist = _buy_sessions(conn, o, today, fresh)
         return next((c.date for c in bars if fillable(_prior(hist, c), c)), None)
     sb = _sell_session(conn, o, today, fresh)[3]
     return sb.date if sb else None
@@ -240,7 +244,7 @@ def fill_orders(conn: Connection, today: date) -> dict:
     for o in rows:
         fq = None
         if o["side"] == "BUY":  # only sessions inside the order's validity may fill it
-            bars, hist = _buy_sessions(conn, o, today)
+            bars, hist = _buy_sessions(conn, o, today, fresh)
         else:
             bars = [b for b in _bars(conn, o["ticker"], o["not_before"], today) if b.date >= o["not_before"]]
         if not bars:
