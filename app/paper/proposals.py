@@ -235,6 +235,12 @@ def scan_new_events(engine: Engine, days: int = 2) -> dict:
             events.c.public_date >= date.today() - timedelta(days=days),
             ~select(proposed_trades.c.id).where(proposed_trades.c.event_id == events.c.id).exists())).order_by(events.c.id)).all()]
     out = {"checked": len(ids), "created": 0, "rejected": {}, "rejected_ids": {}}
+    try:  # RESEARCH-ONLY: proposals whose score write failed earlier are no longer rescanned - score them now
+        from app.scoring.engine import retry_missing
+        out["scores_retried"] = retry_missing(engine, list(EVENT_FAMILY), datetime.now(timezone.utc) - timedelta(days=days + 30))
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).exception("research score retry failed")
     for eid in ids:
         r = create_proposal(engine, eid)
         if r.get("created"):

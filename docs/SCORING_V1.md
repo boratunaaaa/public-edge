@@ -10,15 +10,13 @@ Probability points of beating SPY over 90 days, the event minus a matched contro
 (`app.backtest.research_v2` matched placebo, `docs/v2_placebo_results_2026-09-28.jsonl`).
 
     score  = edge of the most specific VALIDATED cell the event falls into
-           + VALIDATED risk adjustments that apply at the scoring moment
-    ci_low = score - 1.96 * sqrt(sum of the components' squared standard errors)
+           + VALIDATED risk adjustments that apply at the scoring moment (none validated yet)
 
-When several validated cells match, the smallest effect is used. Components are added and their errors combined as
-if independent (a V1 assumption, stated: the edge cell and the 10-K adjustment were measured on different events).
+When several validated cells match, the smallest effect is used.
 
-Standard errors are those IMPLIED by each measured test: the evidence is a paired, company-equal comparison tested
-with a two-sided sign test, so se = |difference| / z(p) under its normal approximation (a component's lower bound
-touches 0 exactly at p = 0.05). Marginal event / control rates are never used for the variance. Bucket membership
+**No confidence interval in V1.** The evidence carries the company-equal mean difference and a SIGN-test p-value;
+the sign test says nothing about the mean's variance, so no valid bound can be derived from it. A bound needs the
+company-level paired differences (a new evidence version); until then none is computed or stored. Bucket membership
 follows the research SQL exactly, including NULL semantics: a missing role flag never qualifies for a bucket. An
 event that is not public at the scoring moment (or has no public time) scores 0.
 
@@ -34,13 +32,17 @@ its test family (the 11 insider buckets are one family). Everything else weighs 
 | INSIDER_BUY: CEO / CFO / director / other officer / value / holdings increase buckets | p >= 0.03, none survives BH | 0 |
 | 10b5-1 pre-planned buys | outside the evidence (discretionary only) | 0 |
 | INSIDER_CLUSTER (matched control) | p 0.27 | 0 |
-| TENK_CHANGE in the 90 days before (risk adjustment) | -3.60 / -3.74 pp, p 0.0005 / 0.004 | **-3.60 pp** (smaller magnitude) |
+| TENK_CHANGE in the 90 days before (risk context) | -3.60 / -3.74 pp from the 10-K date, p 0.0005 / 0.004; the incremental effect on a LATER signal's 90-day window was not measured | 0 (context; evidence event recorded) |
 | 13D, HOUSE_BUY, MULTI_SIGNAL | not significant | 0 |
 | NEWS, GOV_CONTRACT, DISCOVERY, ACTIVIST_CROWDING | no matched-control result | 0 |
 | insider history profiles | not validated as a predictor | 0 (context only) |
 | all 21+ V2 families (13F, FDA, trials, FTD, short volume, TR, CA ...) | returns still filling, not measured | 0 |
 
 `family_status()` lists every declared family with its status - the audit view of what is wired.
+
+## Missing scores
+A score is written after the gate. If that write fails (or the process dies in between), the next scan retries it for
+events whose proposal already exists, at the proposal's creation time and with no vetoes (the gate passed then).
 
 ## Point in time
 Only events with `available_at <= scoring moment` count; the 10-K adjustment uses changes public in the 90 days

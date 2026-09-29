@@ -1493,7 +1493,6 @@ signal_scores = Table(
     Column("evidence_version", String(64), nullable=False),
     Column("scored_at", DateTime(timezone=True), nullable=False),
     Column("score_pp", Float, nullable=False),  # probability points of beating SPY over 90d vs a matched control
-    Column("ci_low_pp", Float, nullable=False),
     Column("cell", String(64), nullable=False),
     Column("components", JSONB, nullable=False),
     Column("vetoes", JSONB, nullable=False, server_default="[]"),  # the gate's failed rules, kept apart from the score

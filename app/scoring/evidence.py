@@ -12,7 +12,6 @@ and is reported with the reason. Nothing is fitted or tuned here: the numbers co
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -29,7 +28,6 @@ class Effect:
     name: str
     status: str
     effect: float  # probability points (0.019 = +1.9 pp); 0 unless VALIDATED
-    se: float
     companies: int | None
     p: float | None
     source: str
@@ -50,28 +48,20 @@ def bh_survivors(pvals: dict[str, float], q: float = Q) -> set[str]:
     return {n for n, _p in ranked[:cut]}
 
 
-def _se(cell: dict) -> float:
-    """Standard error IMPLIED by the measured test itself: the evidence is a paired, company-equal comparison tested with
-    a two-sided sign test, so marginal rates cannot give its variance (they would assume independent samples). Under
-    the normal approximation of that test, z = Phi^-1(1 - p/2) and se = |difference| / z - the interval whose lower
-    bound touches 0 exactly at p = 0.05. A missing or degenerate test gives an infinite SE (no usable interval)."""
-    from statistics import NormalDist
-    d, p = cell.get("difference"), cell.get("sign_test_p")
-    if d is None or p is None or not (0 < p < 1) or d == 0:
-        return math.inf
-    z = NormalDist().inv_cdf(1 - p / 2)
-    return abs(d) / z if z > 0 else math.inf
+# No confidence interval in V1: the evidence file carries the company-equal mean difference and a SIGN-test p-value,
+# which says nothing about the mean's variance. A valid bound needs the company-level paired differences (next
+# evidence version); until then no interval is computed or stored.
 
 
 def _effect(name: str, cell: dict, source: str, survives: bool) -> Effect:
     n, p, d = cell.get("companies"), cell.get("sign_test_p"), cell.get("difference")
     if n is None or p is None or d is None:
-        return Effect(name, NOT_MEASURED, 0.0, math.inf, n, p, source, "no measured result")
+        return Effect(name, NOT_MEASURED, 0.0, n, p, source, "no measured result")
     if n < MIN_COMPANIES:
-        return Effect(name, NOT_SIGNIFICANT, 0.0, _se(cell), n, p, source, f"sample {n} < {MIN_COMPANIES} companies")
+        return Effect(name, NOT_SIGNIFICANT, 0.0, n, p, source, f"sample {n} < {MIN_COMPANIES} companies")
     if not survives:
-        return Effect(name, NOT_SIGNIFICANT, 0.0, _se(cell), n, p, source, f"p={p:.3g} does not survive BH q={Q}")
-    return Effect(name, VALIDATED, float(d), _se(cell), n, p, source)
+        return Effect(name, NOT_SIGNIFICANT, 0.0, n, p, source, f"p={p:.3g} does not survive BH q={Q}")
+    return Effect(name, VALIDATED, float(d), n, p, source)
 
 
 @lru_cache(maxsize=1)
@@ -88,12 +78,13 @@ def registry() -> dict:
         "INSIDER_BUY_BUCKETS": {k: _effect(f"INSIDER_BUY:{k}", v, src, k in surv) for k, v in buckets.items()},
         "INSIDER_CLUSTER": _effect("INSIDER_CLUSTER", fam["INSIDER_CLUSTER"]["primary"], src, single(fam["INSIDER_CLUSTER"]["primary"])),
     }
-    # 10-K material change: both placebo directions must agree (sign and significance); the SMALLER magnitude is used
-    tk = fam["10K_NEGATIVE"]
-    a, b = tk["primary"], tk["sensitivity"]["pre_182d"]
-    agree = single(a) and single(b) and (a["difference"] < 0) == (b["difference"] < 0)
-    cell = a if abs(a["difference"]) <= abs(b["difference"]) else b
-    out["TENK_CHANGE_RECENT"] = _effect("TENK_CHANGE_RECENT", cell, src, agree)
+    # 10-K material change: measured NEGATIVE (both placebo directions), but on the 90 days starting AT the 10-K event.
+    # Its incremental effect on a later signal's 90-day window (delayed entry, alongside an insider cell) was never
+    # measured, so it is context with weight 0 until that design is measured.
+    tk = fam["10K_NEGATIVE"]["primary"]
+    out["TENK_CHANGE_RECENT"] = Effect("TENK_CHANGE_RECENT", NOT_MEASURED, 0.0, tk.get("companies"), tk.get("sign_test_p"),
+                                       src, f"measured {100 * tk['difference']:+.2f} pp from the 10-K date; the incremental "
+                                            "effect on a later signal's window is not measured")
     out["unmeasured"] = raw["not_significant_or_unmeasured"]
     out["version"] = src
     return out

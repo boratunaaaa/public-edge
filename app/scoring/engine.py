@@ -1,9 +1,9 @@
 """Investment scoring V1 (RESEARCH-ONLY): an evidence-weighted estimate, kept apart from the hard gate.
 
     score = edge of the most specific VALIDATED evidence cell the event falls into
-          + VALIDATED risk adjustments that apply at the scoring moment
+          + VALIDATED risk adjustments that apply at the scoring moment (none yet: see TENK_CHANGE_RECENT)
     unit  = probability points of beating SPY over 90 days vs a matched control of the same stock
-    ci_low = score - 1.96 * sqrt(sum of the components' squared standard errors)
+    No confidence interval in V1 (the evidence has no company-level paired differences; see app.scoring.evidence).
 
 The hard gate (app.paper.proposals.evaluate_gate: identity, duplicate, liquidity, severe financing risk, direction,
 family policy) is NOT part of the score and is never changed by it: the gate's failed rules are stored next to the
@@ -15,7 +15,6 @@ are listed with weight 0 and the reason - no chosen weights. When several valida
 is used (the conservative choice)."""
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
@@ -24,7 +23,6 @@ from sqlalchemy.engine import Connection, Engine
 from app.scoring.evidence import NOT_MEASURED, NOT_SIGNIFICANT, registry
 
 MODEL_VERSION = "score.v1-evidence"
-Z95 = 1.96
 TENK_WINDOW_DAYS = 90  # the 10-K effect was measured over the 90 days after the change
 
 # research_v2.INSIDER_BUCKETS as Python predicates with SQL three-valued logic: `(payload->>'x')::boolean` is NULL when
@@ -135,7 +133,7 @@ def score_event(conn: Connection, ev: dict, now: datetime | None = None) -> dict
     public = ev.get("available_at") or ev.get("public_at")
     if public is None or public > now:  # the event itself must be public at the scoring moment
         return {"model_version": MODEL_VERSION, "evidence_version": reg["version"], "scored_at": now, "score_pp": 0.0,
-                "ci_low_pp": 0.0, "cell": "NOT_PUBLIC_YET" if public else "NO_PUBLIC_TIME",
+                "cell": "NOT_PUBLIC_YET" if public else "NO_PUBLIC_TIME",
                 "components": [{"component": "EVENT", "applies": False, "status": NOT_MEASURED, "effect_pp": 0.0,
                                 "companies": None, "p": None,
                                 "why": "event not public at the scoring moment" if public else "event has no public time"}]}
@@ -153,10 +151,8 @@ def score_event(conn: Connection, ev: dict, now: datetime | None = None) -> dict
     if recent and tk.usable:
         parts.append(tk)
     score = sum(e.effect for e in parts)
-    se = math.sqrt(sum(e.se ** 2 for e in parts)) if parts else 0.0
     return {"model_version": MODEL_VERSION, "evidence_version": reg["version"], "scored_at": now,
-            "score_pp": round(100 * score, 3), "ci_low_pp": round(100 * (score - Z95 * se), 3) if parts else 0.0,
-            "cell": cell_name, "components": comps}
+            "score_pp": round(100 * score, 3), "cell": cell_name, "components": comps}
 
 
 def record(engine: Engine, event_id: int, vetoes: list[str] | None = None, now: datetime | None = None) -> dict | None:
@@ -170,14 +166,32 @@ def record(engine: Engine, event_id: int, vetoes: list[str] | None = None, now: 
         if ev is None:
             return None
         s = score_event(conn, dict(ev), now)
-        conn.execute(text("""INSERT INTO signal_scores (event_id, model_version, evidence_version, scored_at, score_pp, ci_low_pp,
+        conn.execute(text("""INSERT INTO signal_scores (event_id, model_version, evidence_version, scored_at, score_pp,
                                                         cell, components, vetoes, research_only)
-                             VALUES (:e, :mv, :ev, :at, :s, :lo, :cell, CAST(:comp AS jsonb), CAST(:veto AS jsonb), true)
+                             VALUES (:e, :mv, :ev, :at, :s, :cell, CAST(:comp AS jsonb), CAST(:veto AS jsonb), true)
                              ON CONFLICT (event_id, model_version) DO NOTHING"""),
                      {"e": event_id, "mv": s["model_version"], "ev": s["evidence_version"], "at": s["scored_at"],
-                      "s": s["score_pp"], "lo": s["ci_low_pp"], "cell": s["cell"], "comp": json.dumps(s["components"], default=str),
+                      "s": s["score_pp"], "cell": s["cell"], "comp": json.dumps(s["components"], default=str),
                       "veto": json.dumps(sorted(vetoes or []))})
     return s
+
+
+def retry_missing(engine: Engine, event_types: list[str], since: datetime) -> int:
+    """Score events whose proposal exists but whose score write failed (or the process died in between). They are no
+    longer rescanned (a proposal exists), so they are scored here at the ORIGINAL decision moment (the proposal's
+    creation time) with the gate outcome of that decision: a created proposal passed the gate - no vetoes."""
+    from app.db.models import proposed_trades, signal_scores
+    from sqlalchemy import and_, select
+    with engine.connect() as conn:
+        rows = conn.execute(select(proposed_trades.c.event_id, proposed_trades.c.proposal_created_at).where(and_(
+            proposed_trades.c.event_type.in_(event_types), proposed_trades.c.proposal_created_at >= since,
+            proposed_trades.c.event_id.isnot(None),
+            ~select(signal_scores.c.event_id).where(and_(signal_scores.c.event_id == proposed_trades.c.event_id,
+                                                         signal_scores.c.model_version == MODEL_VERSION)).exists()))
+            .order_by(proposed_trades.c.proposal_created_at)).all()
+    for eid, at in rows:
+        record(engine, eid, [], now=at)
+    return len(rows)
 
 
 def family_status() -> list[dict]:

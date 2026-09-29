@@ -23,7 +23,6 @@ def upgrade() -> None:
             evidence_version VARCHAR(64) NOT NULL,
             scored_at TIMESTAMP WITH TIME ZONE NOT NULL,
             score_pp DOUBLE PRECISION NOT NULL,
-            ci_low_pp DOUBLE PRECISION NOT NULL,
             cell VARCHAR(64) NOT NULL,
             components JSONB NOT NULL,
             vetoes JSONB DEFAULT '[]' NOT NULL,

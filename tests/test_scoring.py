@@ -30,8 +30,8 @@ def test_only_measured_significant_effects_get_a_weight():
     assert reg["INSIDER_BUY_BUCKETS"]["value_100k_1m"].status == NOT_SIGNIFICANT  # p 0.03 alone is not enough
     assert reg["INSIDER_BUY_BUCKETS"]["value_100k_1m"].effect == 0.0
     assert reg["INSIDER_CLUSTER"].status == NOT_SIGNIFICANT and reg["INSIDER_CLUSTER"].effect == 0.0
-    tk = reg["TENK_CHANGE_RECENT"]
-    assert tk.status == VALIDATED and tk.effect == pytest.approx(-0.036, abs=1e-3)  # the smaller of the two directions
+    tk = reg["TENK_CHANGE_RECENT"]  # measured from the 10-K date, not on a later signal's window: context only
+    assert tk.status == "NOT_MEASURED" and tk.effect == 0.0 and "incremental" in tk.why
 
 
 def test_every_declared_family_has_a_status_and_unvalidated_ones_weigh_zero():
@@ -41,7 +41,7 @@ def test_every_declared_family_has_a_status_and_unvalidated_ones_weigh_zero():
     rows = {r["family"]: r for r in family_status()}
     assert set(V1) | {f.signal_id for f in V2} <= set(rows)
     weighted = {k for k, r in rows.items() if r["weight_pp"]}
-    assert weighted == {"INSIDER_BUY", "TENK_CHANGE_RECENT (risk adjustment)"}
+    assert weighted == {"INSIDER_BUY"}
     assert all(r["weight_pp"] == 0.0 for k, r in rows.items() if k.startswith(("US_", "TR_", "CA_")))
 
 
@@ -63,7 +63,7 @@ def _score(engine, payload, et="INSIDER_OPEN_MARKET_BUY", now=NOW, tenk_at=None,
 def test_a_discretionary_insider_buy_gets_the_validated_base_edge(engine):
     s = _score(engine, {"is_ceo": True, "value": 50_000, "holdings_increase": 0.05})
     assert s["cell"] == "INSIDER_BUY" and s["score_pp"] == pytest.approx(1.893, abs=0.01)
-    assert s["ci_low_pp"] < s["score_pp"]
+    assert "ci_low_pp" not in s  # no unsupported interval
     ceo = next(c for c in s["components"] if c["component"] == "INSIDER_BUY:role_ceo")
     assert ceo["effect_pp"] == 0.0 and ceo["status"] == "NOT_SIGNIFICANT"  # matched, but not validated: no weight
 
@@ -87,13 +87,6 @@ def test_a_ten_percent_owner_buy_uses_the_more_specific_validated_cell(engine):
 def test_bucket_membership_follows_sql_null_semantics(flags, owner_cell):
     from app.scoring.engine import BUCKETS
     assert (BUCKETS["role_10pct_only"](flags) is True) is owner_cell
-
-
-def test_standard_errors_are_implied_by_the_measured_paired_test():
-    from app.scoring.evidence import _se
-    assert _se({"difference": 0.04, "sign_test_p": 0.05}) == pytest.approx(0.04 / 1.959964, rel=1e-4)
-    assert _se({"difference": 0.04, "sign_test_p": 0.05}) * 1.96 == pytest.approx(0.04, rel=1e-3)  # lower bound ~ 0
-    assert _se({"difference": 0.04, "sign_test_p": None}) == float("inf")
 
 
 @db
@@ -125,14 +118,14 @@ def test_planned_10b5_1_buys_and_unvalidated_families_score_zero(engine):
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_the_10k_adjustment_is_point_in_time_and_windowed(engine):
+def test_a_recent_10k_change_is_context_only_and_point_in_time(engine):
     base = {"is_ceo": True, "value": 50_000}
     recent = _score(engine, base, tenk_at=NOW - timedelta(days=20), cik="0000000011")
-    assert recent["score_pp"] == pytest.approx(1.893 - 3.601, abs=0.02)
+    tk = next(c for c in recent["components"] if c["component"] == "TENK_CHANGE_RECENT")
+    assert recent["score_pp"] == pytest.approx(1.893, abs=0.01)  # weight 0 until its incremental effect is measured
+    assert tk["evidence_event"] and tk["effect_pp"] == 0.0 and "incremental" in tk["why"]
     later = _score(engine, base, tenk_at=NOW + timedelta(days=5), cik="0000000012")  # public after the scoring moment
-    assert later["score_pp"] == pytest.approx(1.893, abs=0.01)
-    stale = _score(engine, base, tenk_at=NOW - timedelta(days=120), cik="0000000013")  # outside the measured window
-    assert stale["score_pp"] == pytest.approx(1.893, abs=0.01)
+    assert next(c for c in later["components"] if c["component"] == "TENK_CHANGE_RECENT")["evidence_event"] is None
 
 
 # ------------------------------------------------------------------ kept apart from the gate, research-only
@@ -173,9 +166,19 @@ def test_a_scoring_failure_never_stops_a_proposal(engine, monkeypatch):
     from app.paper.proposals import scan_new_events
     from app.scoring import engine as se
     _live_setup(engine, monkeypatch)
+    real = se.record
     monkeypatch.setattr(se, "record", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     out = scan_new_events(engine, days=5)
     assert out["created"] == 1 and out["score_errors"] == 1
+    monkeypatch.setattr(se, "record", real)
+    out = scan_new_events(engine, days=5)  # the event is no longer rescanned (a proposal exists) ...
+    assert out["checked"] == 0 and out["scores_retried"] == 1  # ... but its missing score is retried
+    from app.db.models import proposed_trades, signal_scores
+    with engine.connect() as c:
+        p = c.execute(select(proposed_trades)).mappings().all()
+        s = c.execute(select(signal_scores)).mappings().one()
+    assert len(p) == 1 and s["scored_at"] == p[0]["proposal_created_at"] and s["vetoes"] == []  # original decision
+    assert scan_new_events(engine, days=5)["scores_retried"] == 0
 
 
 @db
