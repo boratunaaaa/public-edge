@@ -243,7 +243,21 @@ def scan_new_events(engine: Engine, days: int = 2) -> dict:
             for f in r.get("failed", []):
                 out["rejected"][f] = out["rejected"].get(f, 0) + 1
                 out["rejected_ids"].setdefault(f, []).append(eid)
+        _record_score(engine, eid, r.get("failed", []), out)
     return out
+
+
+def _record_score(engine: Engine, event_id: int, vetoes: list[str], out: dict) -> None:
+    """RESEARCH-ONLY score record (app.scoring.engine), AFTER the gate decided: it never changes the gate, the size or
+    the approval, and a scoring failure never stops a proposal."""
+    import logging
+    try:
+        from app.scoring.engine import record
+        record(engine, event_id, vetoes)
+        out["scored"] = out.get("scored", 0) + 1
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("research score of event %s failed", event_id)
+        out["score_errors"] = out.get("score_errors", 0) + 1
 
 
 # paper_orders.note / decided_by wording per source_block_reason

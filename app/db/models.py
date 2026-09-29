@@ -1484,3 +1484,19 @@ hypothesis_log = Table(
     Column("params", JSONB, nullable=False, server_default="{}"),
 )
 Index("ix_hypothesis_log_family", hypothesis_log.c.family, hypothesis_log.c.run_at)
+
+# research-only investment score V1 (app.scoring.engine): one row per event and model version; never read by the gate
+signal_scores = Table(
+    "signal_scores", metadata,
+    Column("event_id", BigInteger, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True),
+    Column("model_version", String(32), primary_key=True),
+    Column("evidence_version", String(64), nullable=False),
+    Column("scored_at", DateTime(timezone=True), nullable=False),
+    Column("score_pp", Float, nullable=False),  # probability points of beating SPY over 90d vs a matched control
+    Column("ci_low_pp", Float, nullable=False),
+    Column("cell", String(64), nullable=False),
+    Column("components", JSONB, nullable=False),
+    Column("vetoes", JSONB, nullable=False, server_default="[]"),  # the gate's failed rules, kept apart from the score
+    Column("research_only", Boolean, nullable=False, server_default="true"),
+)
+Index("ix_signal_scores_scored_at", signal_scores.c.scored_at)

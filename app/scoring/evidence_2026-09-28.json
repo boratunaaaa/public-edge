@@ -1,0 +1,199 @@
+{
+ "evidence_version": "research_v2+placebo_2026-09-28",
+ "families": {
+  "10K_NEGATIVE": {
+   "note": "measured on all TENK_CHANGE; research_v2.tenk_negative: NEGATIVE company-equal SPY beat 35.3 %, NEW_GOING_CONCERN 29.3 %, delisting 27 % in 180d",
+   "primary": {
+    "companies": 3166,
+    "control": "same issuer +182d",
+    "difference": -0.036012844809433564,
+    "event_rate": 0.36007580543272266,
+    "placebo_rate": 0.3960886502421562,
+    "sign_test_p": 0.00045159695248686837
+   },
+   "sensitivity": {
+    "pre_182d": {
+     "companies": 3090,
+     "difference": -0.03741100323624595,
+     "event_rate": 0.3390884573894283,
+     "placebo_rate": 0.3764994606256742,
+     "sign_test_p": 0.004367107459938652
+    }
+   }
+  },
+  "INSIDER_BUY": {
+   "buckets": {
+    "incr_10_50pct": {
+     "companies": 2067,
+     "control_rate": 0.4307206594942444,
+     "difference": 0.03087171389058181,
+     "event_rate": 0.4615923733848262,
+     "sign_test_p": 0.10171257198647793
+    },
+    "incr_ge_50pct": {
+     "companies": 1740,
+     "control_rate": 0.4242022441160372,
+     "difference": 0.02242063492063492,
+     "event_rate": 0.44662287903667214,
+     "sign_test_p": 0.07969719623062552
+    },
+    "incr_lt_10pct": {
+     "companies": 2333,
+     "control_rate": 0.4415614342318157,
+     "difference": 0.0025382223624829696,
+     "event_rate": 0.4440996565942987,
+     "sign_test_p": 0.4251620141585839
+    },
+    "role_10pct_only": {
+     "companies": 620,
+     "control_rate": 0.34367959549411164,
+     "difference": 0.082547363031234,
+     "event_rate": 0.42622695852534564,
+     "sign_test_p": 7.901491777563255e-05
+    },
+    "role_ceo": {
+     "companies": 1589,
+     "control_rate": 0.41461825182718826,
+     "difference": 0.015003783364387516,
+     "event_rate": 0.4296220351915758,
+     "sign_test_p": 0.16843983426727632
+    },
+    "role_cfo": {
+     "companies": 917,
+     "control_rate": 0.45119913105191184,
+     "difference": 0.02504067784874764,
+     "event_rate": 0.4762398089006595,
+     "sign_test_p": 0.23775070725839742
+    },
+    "role_director_only": {
+     "companies": 2568,
+     "control_rate": 0.4357244002103815,
+     "difference": 0.013828706556510292,
+     "event_rate": 0.44955310676689186,
+     "sign_test_p": 0.21723650205558714
+    },
+    "role_other_officer": {
+     "companies": 1286,
+     "control_rate": 0.44926932623277877,
+     "difference": 0.0012946898444565623,
+     "event_rate": 0.45056401607723534,
+     "sign_test_p": 0.9134008501193046
+    },
+    "value_100k_1m": {
+     "companies": 2101,
+     "control_rate": 0.4421183257749179,
+     "difference": 0.026074541567164128,
+     "event_rate": 0.468192867342082,
+     "sign_test_p": 0.031711836403515464
+    },
+    "value_ge_1m": {
+     "companies": 1013,
+     "control_rate": 0.4172997069838136,
+     "difference": 0.02801908522540309,
+     "event_rate": 0.4453187922092167,
+     "sign_test_p": 0.06796356085628841
+    },
+    "value_lt_100k": {
+     "companies": 2572,
+     "control_rate": 0.4272472505462397,
+     "difference": 0.0022216713215935592,
+     "event_rate": 0.42946892186783325,
+     "sign_test_p": 0.4479657211523963
+    }
+   },
+   "primary": {
+    "companies": 3277,
+    "control": "prior-return matched, 60d lookback, same-family contamination excluded",
+    "control_rate": 0.4262509381406238,
+    "difference": 0.018929093318779004,
+    "event_rate": 0.4451800314594028,
+    "sign_test_p": 0.005441011407918793,
+    "where": "NOT COALESCE((payload->>'is_10b5_1')::boolean, false)"
+   },
+   "sensitivity": {
+    "insider_placebo_pre20_family": {
+     "companies": 3340,
+     "control_rate": 0.42259430417826865,
+     "difference": 0.027462884289011447,
+     "event_rate": 0.45005718846728004,
+     "sign_test_p": 0.0026237381664679883
+    },
+    "insider_placebo_pre60_any": {
+     "companies": 2951,
+     "control_rate": 0.43930700168839787,
+     "difference": 0.00591327325485238,
+     "event_rate": 0.44522027494325017,
+     "sign_test_p": 0.11605578716308627
+    },
+    "insider_placebo_pre90_family": {
+     "companies": 3236,
+     "control_rate": 0.44299681656758294,
+     "difference": 0.001335546835392322,
+     "event_rate": 0.44433236340297527,
+     "sign_test_p": 0.6381220978618631
+    }
+   }
+  },
+  "INSIDER_CLUSTER": {
+   "primary": {
+    "companies": 2061,
+    "control": "prior-return matched, 60d lookback",
+    "control_rate": 0.45511432136250185,
+    "difference": -0.013540146709724584,
+    "event_rate": 0.44157417465277726,
+    "sign_test_p": 0.2682596599860981
+   },
+   "sensitivity": {
+    "cluster_placebo_pre20_family": {
+     "companies": 2151,
+     "control_rate": 0.4268825618218513,
+     "difference": 0.018447780877020356,
+     "event_rate": 0.44533034269887173,
+     "sign_test_p": 0.12323180328940092
+    },
+    "cluster_placebo_pre60_any": {
+     "companies": 1573,
+     "control_rate": 0.44376325447526976,
+     "difference": -0.0030944650461497266,
+     "event_rate": 0.44066878942911997,
+     "sign_test_p": 0.35801971882281597
+    },
+    "cluster_placebo_pre90_family": {
+     "companies": 2014,
+     "control_rate": 0.4533132472184111,
+     "difference": -0.018953091209794288,
+     "event_rate": 0.43436015600861677,
+     "sign_test_p": 0.08763210699052187
+    }
+   }
+  }
+ },
+ "horizon_days": 90,
+ "metric": "company-equal share beating SPY over 90 days, event minus matched control of the SAME stock (probability points)",
+ "not_significant_or_unmeasured": {
+  "13D": {
+   "companies": 2576,
+   "difference": 0.0013004658385093169,
+   "sign_test_p": 0.6094156374241846
+  },
+  "ACTIVIST_CROWDING": "no result (all packs superseded)",
+  "DISCOVERY": "no result",
+  "GOV_CONTRACT": "no placebo / matched-control result",
+  "HOUSE_BUY": {
+   "companies": 913,
+   "difference": 0.028386272362175977,
+   "sign_test_p": 0.3071007888373524
+  },
+  "MULTI_SIGNAL": {
+   "companies": 641,
+   "difference": 0.014898595943837755,
+   "sign_test_p": 0.654720846018577
+  },
+  "NEWS": "placebo not run; 33 % SPY beat (master report)",
+  "V2_FAMILIES": "not measured yet (history ingested 2026-09-28, returns still filling)"
+ },
+ "sources": {
+  "placebo": "docs/v2_placebo_results_2026-09-28.jsonl (same-issuer +/-182 day control)",
+  "research_v2": "production read-only run 2026-09-28 05:32 UTC (app.backtest.research_v2), /opt/pe-crosscheck/research_v2.json"
+ }
+}

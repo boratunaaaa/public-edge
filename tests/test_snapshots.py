@@ -65,7 +65,7 @@ def test_migration_0014_widens_the_status_column_and_round_trips():
          "WHERE table_name = 'event_market_snapshots' AND column_name = 'status'")
     try:
         widths = []
-        for args in (["upgrade", "head"], ["downgrade", "0013"], ["upgrade", "head"]):
+        for args in (["upgrade", "0014"], ["downgrade", "0013"], ["upgrade", "0014"]):
             p = subprocess.run(["alembic", *args], cwd=root, env=env, capture_output=True, text=True, timeout=300)
             assert p.returncode == 0, p.stderr[-2000:]
             eng = create_engine(url)
