@@ -86,3 +86,19 @@ Republic Services' CUSIP, a manager's own name in the issuer column) or a prefix
 6. `pe_smoke.py` (expects migration 0013) + watch: `backfill returns batch` logs (candidates / processed /
    vendor_queued), `vendor lane batch`, `rate_limits` for tiingo (<= 50/h), new-event coverage per hour.
 7. Rollback: code rollback is enough (column/table unused by old code); `alembic downgrade 0012` only if required.
+
+## Paper source validity after the proposal (Codex audit of 94d0855)
+
+An event can become identity-unsafe or `needs_review` AFTER a paper proposal was built on it (identity repair,
+review). `event_policy.source_block_reason` is the single rule - superseded, identity unsafe (LOW / NONE,
+`identity_review`, `IDENTITY_REVIEW`) or under review - and it is checked at every step under the event row lock:
+
+| Step | Check | Result when blocked |
+|---|---|---|
+| proposal gate | `source_block_reason(ev)` | `UNRESOLVED_SECURITY_MAPPING` (also identity-unsafe events without a review flag) |
+| `decide()` approve | `source_block(..., lock=True, exclusive=True)` | proposal `EXPIRED`, `system:source_<reason>`, error `SOURCE_<reason>` |
+| `expire()` sweep | events with a PENDING proposal or PENDING BUY, locked FOR SHARE | proposal `EXPIRED`; BUY orders `CANCELLED` with the reason note |
+| `fill_orders()` BUY | `source_block(..., lock=True)` (FOR SHARE until the fill commits) | order `CANCELLED` with the reason note |
+
+SELL / exit orders of already open positions are exempt: an exit always fills. An identity repair that runs while a
+fill holds the row waits for it and is then seen by every later step.

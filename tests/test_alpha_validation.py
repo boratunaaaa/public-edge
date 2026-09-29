@@ -1099,6 +1099,137 @@ def test_superseded_source_cancels_unfilled_buys(engine, monkeypatch):
     assert expire(engine) == 1
 
 
+# ------------------------------------------------------------------ Codex audit 94d0855: the source can become
+# excluded AFTER the proposal (needs_review / identity-unsafe) - approval, expiry sweep and BUY fills re-check it
+
+EXCLUSIONS = {  # how an identity repair / review marks an event, and the resulting source_block reason
+    "needs_review": ("UPDATE events SET needs_review = true WHERE id = :i", "NEEDS_REVIEW", "source event under review"),
+    "identity_low": ("UPDATE events SET identity_confidence = 'LOW' WHERE id = :i", "IDENTITY_UNSAFE",
+                     "source event identity unsafe"),
+    "identity_review": ("""UPDATE events SET payload = coalesce(payload, '{}'::jsonb) || '{"identity_review": "x"}'::jsonb
+                           WHERE id = :i""", "IDENTITY_UNSAFE", "source event identity unsafe"),
+}
+
+
+@db
+@pytest.mark.parametrize("kind", sorted(EXCLUSIONS))
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_source_excluded_after_proposal_blocks_approval(engine, monkeypatch, kind):
+    from app.db.models import paper_orders, proposed_trades
+    from app.paper.proposals import decide
+    sql, reason, _ = EXCLUSIONS[kind]
+    eid, p, _ = _approved_setup(engine, monkeypatch, approve=False)
+    with engine.begin() as c:
+        c.execute(text(sql), {"i": eid})
+    r = decide(engine, p["code"], True, by="t", now=datetime(2024, 3, 1, 16, tzinfo=timezone.utc))
+    assert r == {"ok": False, "error": f"SOURCE_{reason}"}
+    with engine.connect() as c:
+        assert c.execute(select(paper_orders.c.id)).all() == []
+        st = c.execute(select(proposed_trades.c.approval_status, proposed_trades.c.decided_by)).one()
+    assert st == ("EXPIRED", f"system:source_{reason.lower()}")
+
+
+@db
+@pytest.mark.parametrize("kind", sorted(EXCLUSIONS))
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_source_excluded_after_approval_cancels_buy_fills(engine, monkeypatch, kind):
+    from app.db.models import paper_orders, paper_positions
+    from app.paper import ledger
+    sql, _, note = EXCLUSIONS[kind]
+    eid, p, r = _approved_setup(engine, monkeypatch)
+    assert r["ok"] and len(r["orders"]) == 5
+    with engine.begin() as c:
+        c.execute(text(sql), {"i": eid})
+        assert ledger.fill_orders(c, date(2024, 3, 10))["cancelled"] == 5  # guard at fill time, under the row lock
+        assert c.execute(select(paper_positions.c.id)).all() == []
+        assert {n for (n,) in c.execute(select(paper_orders.c.note)).all()} == {note}
+
+
+@db
+@pytest.mark.parametrize("kind", sorted(EXCLUSIONS))
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_expiry_sweep_stops_pending_proposals_and_unfilled_buys_of_excluded_sources(engine, monkeypatch, kind):
+    from app.db.models import paper_orders, proposed_trades
+    from app.paper.proposals import create_proposal, expire
+    sql, reason, note = EXCLUSIONS[kind]
+    eid, p, r = _approved_setup(engine, monkeypatch)  # approved: 5 PENDING BUY orders
+    with engine.begin() as c:
+        e2 = _event(c, ticker="OPRA", cik="0001737450", key="e-opra")
+        _universe(c, cik="0001737450", ticker="OPRA")
+        _bars(c, "OPRA", date.today() - timedelta(days=90), 80)
+    p2 = create_proposal(engine, e2, research_only=True)
+    assert p2["created"]
+    with engine.begin() as c:
+        c.execute(text(sql), {"i": eid})
+        c.execute(text(sql), {"i": e2})
+    assert expire(engine) == 1  # the PENDING proposal of e2
+    with engine.connect() as c:
+        orders = c.execute(select(paper_orders.c.status, paper_orders.c.note)).all()
+        st = c.execute(select(proposed_trades.c.approval_status, proposed_trades.c.decided_by)
+                       .where(proposed_trades.c.event_id == e2)).one()
+    assert orders and set(orders) == {("CANCELLED", note)}
+    assert st == ("EXPIRED", f"system:source_{reason.lower()}")
+    assert expire(engine) == 0  # idempotent
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_exits_of_open_positions_still_fill_after_the_source_is_excluded(engine, monkeypatch):
+    from app.db.models import paper_positions
+    from app.paper import ledger
+    from app.paper.proposals import expire
+    eid, p, r = _approved_setup(engine, monkeypatch)
+    with engine.begin() as c:
+        assert ledger.fill_orders(c, date(2024, 3, 10))["filled"] == 5
+        c.execute(text("UPDATE events SET needs_review = true, identity_confidence = 'LOW' WHERE id = :i"), {"i": eid})
+    expire(engine)  # the sweep never touches SELL orders or open positions
+    with engine.begin() as c:
+        assert ledger.check_exits(c, date(2024, 4, 15))["exit_orders"] >= 1
+        ledger.fill_orders(c, date(2024, 4, 15))
+        st = dict(c.execute(text("SELECT a.strategy, p.status FROM paper_positions p JOIN paper_accounts a "
+                                 "ON a.id = p.account_id")).all())
+        assert st["A_30D"] == "CLOSED"  # the 30-day time exit sold despite the excluded source
+        assert c.execute(text("SELECT count(*) FROM paper_orders WHERE side = 'SELL' AND status = 'CANCELLED'")).scalar() == 0
+        assert c.execute(select(paper_positions.c.id)).all()
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_gate_rejects_an_identity_unsafe_event_without_a_review_flag(engine, monkeypatch):
+    from app.paper.proposals import create_proposal
+    with engine.begin() as c:
+        _universe(c)
+        zb = _bars(c, "ZBIO", date(2024, 1, 2), 120, 10.0, 0.01)
+        spy = _bars(c, "SPY", date(2024, 1, 2), 120, 400.0, 0.5)
+        eid = _event(c)
+        c.execute(text("UPDATE events SET identity_confidence = 'LOW', needs_review = false WHERE id = :i"), {"i": eid})
+    _serve(monkeypatch, ZBIO=zb, SPY=spy)
+    r = create_proposal(engine, eid, research_only=True, now=datetime(2024, 3, 1, 15, tzinfo=timezone.utc))
+    assert not r["created"] and "UNRESOLVED_SECURITY_MAPPING" in r["failed"]
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_identity_repair_waits_for_an_in_flight_fill(engine, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    from app.paper import ledger
+    eid, p, r = _approved_setup(engine, monkeypatch)
+    conn_a = engine.connect()
+    tx = conn_a.begin()
+    try:
+        assert ledger.fill_orders(conn_a, date(2024, 3, 10))["filled"] == 5  # fill holds the source row (FOR SHARE)
+        with engine.connect() as conn_b:
+            conn_b.execute(text("SET lock_timeout = '300ms'"))
+            with pytest.raises(OperationalError):
+                conn_b.execute(text("UPDATE events SET needs_review = true, identity_confidence = 'LOW' WHERE id = :i"),
+                               {"i": eid})
+            conn_b.rollback()
+    finally:
+        tx.commit()
+        conn_a.close()
+
+
 # ------------------------------------------------------------------ review fixes, round 6
 
 NEG_LIQUIDITY = ["Our liquidity is insufficient to fund our operations for the next twelve months. ",

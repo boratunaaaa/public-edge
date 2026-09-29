@@ -100,8 +100,8 @@ def evaluate_gate(conn: Connection, ev: dict, *, family_ok: tuple[bool, str], pr
     g.data_quality = "OK" if ev.get("date_quality") == "exact" else "DATE_ONLY"
     # 2. ticker / security identity (V2: an event flagged needs_review - e.g. its ticker belonged to another issuer at
     # the event date - never feeds a proposal)
-    from app.core.event_policy import validation_excluded
-    if not ticker or price_basis not in VERIFIED_BASES or validation_excluded(ev):
+    from app.core.event_policy import source_block_reason
+    if not ticker or price_basis not in VERIFIED_BASES or source_block_reason(ev):
         g.failed.append("UNRESOLVED_SECURITY_MAPPING")
         g.data_quality = "BLOCKED"
     else:
@@ -246,34 +246,59 @@ def scan_new_events(engine: Engine, days: int = 2) -> dict:
     return out
 
 
-def source_valid(conn: Connection, event_id: int | None, lock: bool = False) -> bool:
-    """The signal a proposal was built on still stands (not superseded by a reclassification or a
-    late-arriving predecessor report). lock=True keeps the event row locked (FOR SHARE) until the
-    caller's transaction ends, so a concurrent supersession waits for the fill (and is then visible to
-    every later fill) instead of racing it."""
+# paper_orders.note / decided_by wording per source_block_reason
+SOURCE_NOTE = {"SUPERSEDED": "source event superseded", "IDENTITY_UNSAFE": "source event identity unsafe",
+               "NEEDS_REVIEW": "source event under review", "MISSING": "source event missing"}
+
+
+def source_block(conn: Connection, event_id: int | None, lock: bool = False, exclusive: bool = False) -> str | None:
+    """Why the signal a proposal was built on no longer stands (event_policy.source_block_reason: superseded by a
+    reclassification / late predecessor, identity unsafe, under review), None while it does. lock=True keeps the
+    event row locked (FOR SHARE, or FOR UPDATE with exclusive=True) until the caller's transaction ends, so a
+    concurrent supersession / identity repair waits for the fill or approval (and is then visible to every later
+    one) instead of racing it."""
+    from app.core.event_policy import SOURCE_COLUMNS, source_block_reason
     if event_id is None:
-        return True
-    q = select(events.c.superseded).where(events.c.id == event_id)
-    r = conn.execute(q.with_for_update(read=True) if lock else q).first()
-    return bool(r) and not r[0]
+        return None
+    q = select(*SOURCE_COLUMNS).where(events.c.id == event_id)
+    if lock:
+        q = q.with_for_update(read=not exclusive)
+    r = conn.execute(q).mappings().first()
+    return source_block_reason(r)
+
+
+def source_valid(conn: Connection, event_id: int | None, lock: bool = False) -> bool:
+    return source_block(conn, event_id, lock) is None
 
 
 def expire(engine: Engine, now: datetime | None = None) -> int:
-    """Time-outs, plus proposals / unfilled paper BUY orders whose source event was superseded."""
+    """Time-outs, plus PENDING proposals and unfilled paper BUY orders whose source event no longer stands
+    (source_block: superseded, identity unsafe or under review). The affected event rows are locked (FOR SHARE)
+    first, so the decision and the cancellation see one state. SELL orders are never touched here."""
+    from app.core.event_policy import SOURCE_COLUMNS, source_block_reason, source_blocked_clause
     from app.db.models import paper_orders
     now = now or datetime.now(timezone.utc)
     with engine.begin() as conn:
         n = conn.execute(proposed_trades.update().where(and_(
             proposed_trades.c.approval_status == "PENDING", proposed_trades.c.expires_at <= now))
             .values(approval_status="EXPIRED", decided_at=now, decided_by="system:expiry")).rowcount
-        dead = select(events.c.id).where(events.c.superseded.is_(True))
-        n += conn.execute(proposed_trades.update().where(and_(
-            proposed_trades.c.approval_status == "PENDING", proposed_trades.c.event_id.in_(dead)))
-            .values(approval_status="EXPIRED", decided_at=now, decided_by="system:source_superseded")).rowcount
-        conn.execute(paper_orders.update().where(and_(
-            paper_orders.c.status == "PENDING", paper_orders.c.side == "BUY",
-            paper_orders.c.proposal_id.in_(select(proposed_trades.c.id).where(proposed_trades.c.event_id.in_(dead)))))
-            .values(status="CANCELLED", note="source event superseded"))
+        open_ids = select(proposed_trades.c.event_id).where(proposed_trades.c.approval_status == "PENDING").union(
+            select(proposed_trades.c.event_id).join(paper_orders, paper_orders.c.proposal_id == proposed_trades.c.id)
+            .where(and_(paper_orders.c.status == "PENDING", paper_orders.c.side == "BUY")))
+        rows = conn.execute(select(events.c.id, *SOURCE_COLUMNS).where(and_(
+            events.c.id.in_(open_ids), source_blocked_clause())).order_by(events.c.id)
+            .with_for_update(read=True)).mappings().all()
+        by: dict[str, list[int]] = {}
+        for r in rows:
+            by.setdefault(source_block_reason(r), []).append(r["id"])
+        for reason, ids in sorted(by.items()):
+            n += conn.execute(proposed_trades.update().where(and_(
+                proposed_trades.c.approval_status == "PENDING", proposed_trades.c.event_id.in_(ids)))
+                .values(approval_status="EXPIRED", decided_at=now, decided_by=f"system:source_{reason.lower()}")).rowcount
+            conn.execute(paper_orders.update().where(and_(
+                paper_orders.c.status == "PENDING", paper_orders.c.side == "BUY",
+                paper_orders.c.proposal_id.in_(select(proposed_trades.c.id).where(proposed_trades.c.event_id.in_(ids)))))
+                .values(status="CANCELLED", note=SOURCE_NOTE[reason]))
         return n
 
 
@@ -294,13 +319,13 @@ def decide(engine: Engine, code: str, approve: bool, by: str, now: datetime | No
                 approval_status="EXPIRED", decided_at=now, decided_by="system:expiry"))
             return {"ok": False, "error": "EXPIRED"}
         if approve:
-            # re-validate the source signal inside the same transaction (row lock on the event)
-            ok = conn.execute(select(events.c.superseded).where(events.c.id == p["event_id"]).with_for_update()).first() \
-                if p["event_id"] else (False,)
-            if ok is None or ok[0]:
+            # re-validate the source signal inside the same transaction (row lock on the event): superseded,
+            # identity unsafe or under review since the proposal was created -> the proposal expires
+            why = source_block(conn, p["event_id"], lock=True, exclusive=True)
+            if why:
                 conn.execute(proposed_trades.update().where(proposed_trades.c.id == p["id"]).values(
-                    approval_status="EXPIRED", decided_at=now, decided_by="system:source_superseded"))
-                return {"ok": False, "error": "SOURCE_SUPERSEDED"}
+                    approval_status="EXPIRED", decided_at=now, decided_by=f"system:source_{why.lower()}"))
+                return {"ok": False, "error": f"SOURCE_{why}"}
         status = "APPROVED" if approve else "REJECTED"
         from app.marketdata.calendar import NY, first_tradable_session
         elig = datetime.combine(first_tradable_session(now.date(), now), datetime.min.time().replace(hour=9, minute=30), NY) \

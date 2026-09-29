@@ -195,12 +195,13 @@ def fill_orders(conn: Connection, today: date) -> dict:
         bps = slippage_bps(g.get("market_cap"), g.get("bucket"))
         comm = float(acct["commission_per_trade"])
         if o["side"] == "BUY":
-            from app.paper.proposals import source_valid
+            from app.paper.proposals import SOURCE_NOTE, source_block
             ev_id = conn.execute(select(proposed_trades.c.event_id).where(proposed_trades.c.id == o["proposal_id"])).scalar() \
                 if o["proposal_id"] else None
-            if not source_valid(conn, ev_id, lock=True):  # row stays locked until the fill commits
+            why = source_block(conn, ev_id, lock=True)  # superseded / identity unsafe / under review; row stays locked
+            if why:                                     # until the fill commits
                 conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
-                    status="CANCELLED", note="source event superseded"))
+                    status="CANCELLED", note=SOURCE_NOTE[why]))
                 out["cancelled"] += 1
                 continue
             from app.paper.fills import quote
