@@ -500,7 +500,7 @@ def test_migration_0013_upgrade_downgrade_reupgrade():
     env = {**os.environ, "DATABASE_URL": url}
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
-        for args in (["upgrade", "head"], ["downgrade", "0012"], ["upgrade", "head"]):
+        for args in (["upgrade", "0013"], ["downgrade", "0012"], ["upgrade", "0013"]):
             p = subprocess.run(["alembic", *args], cwd=root, env=env, capture_output=True, text=True, timeout=300)
             assert p.returncode == 0, p.stderr[-2000:]
         eng = create_engine(url)
@@ -550,13 +550,13 @@ def test_migration_0013_recovers_from_a_failed_concurrent_index_build():
             assert c.execute(text("""SELECT i.indisvalid FROM pg_index i JOIN pg_class x ON x.oid = i.indexrelid
                                      WHERE x.relname = 'ix_events_returns_queue'""")).scalar() is False
             assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0012"
-        alembic("upgrade", "head")  # the documented recovery: just run it again
+        alembic("upgrade", "0013")  # the documented recovery: just run it again
         with eng.connect() as c:
             assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0013"
             assert c.execute(text("""SELECT i.indisvalid AND NOT i.indisunique FROM pg_index i JOIN pg_class x
                                      ON x.oid = i.indexrelid WHERE x.relname = 'ix_events_returns_queue'""")).scalar() is True
         alembic("downgrade", "0012")
-        alembic("upgrade", "head")
+        alembic("upgrade", "0013")
         eng.dispose()
     finally:
         with admin.connect() as c:

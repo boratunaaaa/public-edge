@@ -28,7 +28,7 @@ def main() -> int:
     with eng.connect() as c:
         c.execute(text("SET TRANSACTION READ ONLY"))
         v = c.execute(text("SELECT version_num FROM alembic_version")).scalar()
-        check("migration_0013", v == "0013", v)
+        check("migration_0014", v == "0014", v)
         n, nulls = c.execute(text("SELECT count(*), count(*) FILTER (WHERE available_at IS NULL) FROM events")).one()
         check("available_at_populated", nulls == 0, f"{n} events, {nulls} null")
         bad = c.execute(text("""SELECT count(*) FROM events WHERE date_quality = 'exact' AND public_at IS NOT NULL

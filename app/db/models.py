@@ -1326,7 +1326,7 @@ event_market_snapshots = Table(
     Column("sector_price", Float),
     Column("provider", String(24)),
     Column("lag_seconds", Float),  # captured_at - available_at
-    Column("status", String(16), nullable=False),  # CAPTURED | NO_QUOTE | NOT_TRADEABLE | IDENTITY_UNRESOLVED
+    Column("status", String(24), nullable=False),  # CAPTURED | NO_QUOTE | NOT_TRADEABLE | IDENTITY_UNRESOLVED (19 chars: 0014)
     # forward gold dataset (V2 #22)
     _ts("available_at"),
     Column("security_id", String(48)),
