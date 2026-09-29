@@ -229,3 +229,39 @@ def test_migration_0015_round_trip():
     finally:
         with admin.connect() as c:
             c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+
+
+def test_family_audit_separates_tested_from_unmeasured():
+    from app.scoring.engine import family_status
+    rows = {r["family"]: r for r in family_status()}
+    for fam in ("13D", "HOUSE_BUY", "MULTI_SIGNAL"):
+        assert rows[fam]["status"] == "NOT_SIGNIFICANT" and "tested" in rows[fam]["why"], fam
+    for fam in ("NEWS", "GOV_CONTRACT", "DISCOVERY", "ACTIVIST_CROWDING"):
+        assert rows[fam]["status"] == "NOT_MEASURED", fam
+    assert "incremental" in rows["10K_CHANGE"]["why"] and "incremental" in rows["TENK_CHANGE_RECENT (risk context)"]["why"]
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_one_failing_retry_does_not_block_the_others(engine, monkeypatch):
+    from app.db.models import proposed_trades, signal_scores
+    from app.scoring import engine as se
+    with engine.begin() as c:
+        ids = [_event(c, key=f"r{i}", payload={"is_ceo": True, "value": 5e4}) for i in range(2)]
+        for i, eid in enumerate(ids):
+            c.execute(proposed_trades.insert().values(
+                code=f"PE00000{i}", ticker="ZBIO", cik="0001953926", event_id=eid, signal_family="INSIDER_BUY",
+                event_type="INSIDER_OPEN_MARKET_BUY", proposal_created_at=NOW + timedelta(minutes=i), reference_date=date(2024, 3, 1),
+                entry_reference_price=10.0, suggested_position_pct=0.03, max_position_pct=0.05, stop_reference=8.5, thesis="t",
+                risks=[], reasons=[], data_quality="OK", gate={}, approval_status="APPROVED", expires_at=NOW + timedelta(days=3),
+                research_only=True))
+    real = se.record
+
+    def flaky(engine_, event_id, vetoes=None, now=None):
+        if event_id == ids[0]:
+            raise RuntimeError("boom")
+        return real(engine_, event_id, vetoes, now)
+    monkeypatch.setattr(se, "record", flaky)
+    assert se.retry_missing(engine, ["INSIDER_OPEN_MARKET_BUY"], NOW - timedelta(days=1)) == 1  # the second still recovers
+    with engine.connect() as c:
+        assert [r[0] for r in c.execute(select(signal_scores.c.event_id))] == [ids[1]]

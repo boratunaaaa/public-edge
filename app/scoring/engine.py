@@ -121,10 +121,22 @@ def _edge_cell(ev: dict, reg: dict) -> tuple[object | None, str, list[dict]]:
         comps.append(_comp("INSIDER_CLUSTER", eff, eff.usable))
         return (eff if eff.usable else None), ("INSIDER_CLUSTER" if eff.usable else "NO_VALIDATED_CELL"), comps
     fam = UNVALIDATED_FAMILY.get(et)
-    why = reg["unmeasured"].get(fam.split(" ")[0], "no validated evidence") if fam else "V2 family: not measured yet"
-    comps.append({"component": fam or et, "applies": False, "status": NOT_SIGNIFICANT if fam else NOT_MEASURED,
-                  "effect_pp": 0.0, "companies": None, "p": None, "why": why if isinstance(why, str) else f"measured: {why}"})
+    status, why = _evidence_status(fam.split(" ")[0], reg) if fam else (NOT_MEASURED, "V2 family: not measured yet")
+    if et == "TENK_CHANGE":
+        status, why = reg["TENK_CHANGE_RECENT"].status, reg["TENK_CHANGE_RECENT"].why
+    comps.append({"component": fam or et, "applies": False, "status": status, "effect_pp": 0.0, "companies": None,
+                  "p": None, "why": why})
     return None, "NO_VALIDATED_CELL", comps
+
+
+def _evidence_status(family: str, reg: dict) -> tuple[str, str]:
+    """NOT_SIGNIFICANT only for a family that WAS tested (a measured result in the evidence file); a family without any
+    matched-control test is NOT_MEASURED - the two are never conflated."""
+    e = reg["unmeasured"].get(family)
+    if isinstance(e, dict) and e.get("sign_test_p") is not None:
+        return NOT_SIGNIFICANT, (f"tested: {100 * e['difference']:+.2f} pp, p={e['sign_test_p']:.3g}, "
+                                 f"{e.get('companies')} companies - not significant")
+    return NOT_MEASURED, (e if isinstance(e, str) else "no matched-control result")
 
 
 def score_event(conn: Connection, ev: dict, now: datetime | None = None) -> dict:
@@ -189,9 +201,15 @@ def retry_missing(engine: Engine, event_types: list[str], since: datetime) -> in
             ~select(signal_scores.c.event_id).where(and_(signal_scores.c.event_id == proposed_trades.c.event_id,
                                                          signal_scores.c.model_version == MODEL_VERSION)).exists()))
             .order_by(proposed_trades.c.proposal_created_at)).all()
-    for eid, at in rows:
-        record(engine, eid, [], now=at)
-    return len(rows)
+    done = 0
+    for eid, at in rows:  # one failing event never blocks the others: each is retried on its own
+        try:
+            record(engine, eid, [], now=at)
+            done += 1
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception("research score retry of event %s failed", eid)
+    return done
 
 
 def family_status() -> list[dict]:
@@ -209,13 +227,15 @@ def family_status() -> list[dict]:
             e = reg["INSIDER_CLUSTER"]
             rows.append({"family": fam, "status": e.status, "weight_pp": round(100 * e.effect, 2), "why": e.why})
         elif fam == "10K_CHANGE":
-            rows.append({"family": fam, "status": reg["TENK_CHANGE_RECENT"].status, "weight_pp": 0.0,
-                         "why": "measured NEGATIVE: used only as the TENK_CHANGE_RECENT risk adjustment, never as a buy cell"})
+            tk = reg["TENK_CHANGE_RECENT"]
+            rows.append({"family": fam, "status": tk.status, "weight_pp": 0.0,
+                         "why": "never a buy cell; as risk context (TENK_CHANGE_RECENT): " + tk.why})
         else:
-            rows.append({"family": fam, "status": NOT_SIGNIFICANT if fam in reg["unmeasured"] else NOT_MEASURED,
-                         "weight_pp": 0.0, "why": str(reg["unmeasured"].get(fam, "no validated evidence"))})
+            st, why = _evidence_status(fam, reg)
+            rows.append({"family": fam, "status": st, "weight_pp": 0.0, "why": why})
     tk = reg["TENK_CHANGE_RECENT"]
-    rows.append({"family": "TENK_CHANGE_RECENT (risk adjustment)", "status": tk.status, "weight_pp": round(100 * tk.effect, 2)})
+    rows.append({"family": "TENK_CHANGE_RECENT (risk context)", "status": tk.status, "weight_pp": round(100 * tk.effect, 2),
+                 "why": tk.why})
     seen = {r["family"] for r in rows}
     for f in V2:
         if f.signal_id not in seen:
