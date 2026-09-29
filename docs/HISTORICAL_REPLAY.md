@@ -77,6 +77,31 @@ acceptance timestamp (never today's run time), store the rows with provenance (a
 separate history table, and publish `risk_coverage` = the first date from which every detector's inputs are complete.
 Until that exists, pre-2026-09-24 replays are `RISK_HISTORY_UNAVAILABLE` / LIMITED.
 
+## Point-in-time risk reconstruction (V1, `app/replay/risk_history.py`)
+
+Production risk inputs and what the replay can rebuild (production database, 2026-09-29):
+
+| family (production consumer) | production detector | its time anchor | reconstructable source | coverage (pilot scope) |
+|---|---|---|---|---|
+| GOING_CONCERN (gate SEVERE, financing score, D_THESIS) | `scan_text_risks`: EDGAR full-text phrases on 10-K/10-Q, `today-365..today`, `detected_at = run time` | run time (not PIT) | EDGAR full-text over a historical window (network) + 10-K profiles (`tenk_filings`, SEC acceptance, 2021+ complete, 3.2k older-classifier profiles skipped) | COMPLETE 2021-03-01..2021-06-30 |
+| FINANCING_TEXT (ATM, registered direct, reverse split, min bid, convertible, warrants, weakness, late filing) | same scan | run time | EDGAR full-text, filing date, 365-day validity like production | COMPLETE same window |
+| FINANCING_ACTIONS (shelf 730d, 424B x3 365d, 3.02, 3.01) | `financing._count` on `corporate_actions` | `date.today()` -> now the replay clock | `corporate_actions` filing dates (2004+) | COMPLETE from 2006-08-25 |
+| DILUTION (share growth >= 20 %) | `derived_risks` on frames `fundamentals_quarterly` (no filed date) | run time | `shares_outstanding_facts` (filed, 2009+) with the production formula | COMPLETE from 2014-07-18 |
+| CASH_RUNWAY (gate SEVERE when HIGH) | `derived_risks` from frames cash / OCF | run time | none in the database (no filed-date cash / OCF facts) | UNAVAILABLE |
+| THESIS_INVALIDATION (D_THESIS) | `thesis.on_material_news` (tracked companies' news) + 10-K going concern events | news first-seen | news only since 2026-09-25; 10-K part from 2022 | PARTIAL |
+| HIGH_FINANCING_RISK (size cap) | `financing.assess` | run time | recomputed in the replay with the production flags / weights / `is_high` on the point-in-time inputs above | follows its inputs |
+| LOW_LIQUIDITY / NASDAQ_MIN_BID labels | `derived_risks` from price / ADV | run time | the gate already measures ADV point in time (prior sessions) | covered by the gate |
+
+Every label: risk type, issuer, source document (accession) + URL, source kind, acceptance time when known,
+`available_at` (acceptance, else end of the filing day in New York), `valid_from >= available_at`, `valid_to` (next
+report / production 365-day window), detector + version, rule version (hash of the production rule table or the
+10-K classifier version), confidence, `reconstructed_at`, run id. Stored in `risk_hist` of the REPLAY database
+(production refused), idempotent (unique label key), restartable (per issuer checkpoint in the same transaction).
+
+**FULL policy**: every family in `REQUIRED_FOR_FULL` (all six) COMPLETE over the replayed sessions. With CASH_RUNWAY
+unavailable and THESIS_INVALIDATION partial, no historical replay can be FULL yet - it is recorded as LIMITED with
+the production decisions that ran on missing history (`gates_not_applied`).
+
 ## Findings about the production pipeline at 4193e20 (items 1-3 and 5 fixed in 9fbc72e, 4 flagged per run)
 
 1. **Zero-volume first bar -> order stuck forever**: `fill_orders` always prices the first bar on/after `not_before`;
