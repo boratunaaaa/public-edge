@@ -46,7 +46,7 @@ class Matcher:
         self.conn, self.lookback = conn, lookback
         self.excl = _exclusion(conn, event_type, contamination)
         self.spy_d, self.spy_p = _series(conn, "SPY")
-        self.series: dict[str, tuple] = {}
+        self.series: dict[str, tuple] = {}  # ONE issuer at a time (callers pass events grouped by issuer): bounded memory
         self.cache: dict[int, tuple | None] = {}
 
     def match(self, e: dict) -> tuple[float, float] | None:
@@ -54,6 +54,7 @@ class Matcher:
             return self.cache[e["id"]]
         cik = e["issuer_cik"]
         if cik not in self.series:
+            self.series.clear()
             self.series[cik] = _series(self.conn, e["price_symbol"])
         ds, px = self.series[cik]
         out = None
@@ -92,7 +93,7 @@ class Matcher:
 
 def company_diffs(m: Matcher, events: list[dict]) -> dict[str, float]:
     per = defaultdict(lambda: [[], []])
-    for e in events:
+    for e in sorted(events, key=lambda e: (e["issuer_cik"], e["public_date"], e["id"])):  # one series in memory
         r = m.match(e)
         if r is None:
             continue
@@ -277,8 +278,8 @@ def run_expansion(conn: Connection) -> dict:
     for k in DERIVED:
         preds[k] = lambda r, k=k: k in flags.get(r["id"], ())
     out: dict = {"events_priced": len(rows), "discretionary": len(disc)}
+    m = Matcher(conn, et, 60)  # a match depends only on the event: shared by both samples
     for sample, thin in (("per_quarter", per_quarter), ("all_events", lambda x: x)):
-        m = Matcher(conn, et, 60)
         res = {"primary": summarize(company_diffs(m, thin(disc)), rng)}
         fam = {}
         for k, pr in preds.items():
