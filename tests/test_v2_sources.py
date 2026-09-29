@@ -131,28 +131,89 @@ def test_trial_mapped_sponsor_creates_results_event_at_posting_date(engine, clea
     assert ev["available_at"] == end_of_local_day(ev["public_date"])
 
 
-@pytest.mark.parametrize("seen_after_days, results_live", [(1, True), (30, False)])
-def test_trial_event_already_old_when_first_seen_goes_to_the_backfill_lane(engine, clean, seen_after_days, results_live):
-    """The 2000+ historical load ran through run_live with a `since` date and stored ~51k old registrations as LIVE
-    events. An event whose public time is more than LIVE_MAX_AGE before we first see it is history (backfill lane)."""
+def _pfizer(c):
+    c.execute(text("INSERT INTO security_master (cik, name) VALUES ('0000078003', 'PFIZER INC') ON CONFLICT DO NOTHING"))
+
+
+def test_delayed_live_status_change_stays_in_the_live_lane(engine, clean):
+    """A live run that sees a status change days after it was posted (outage, delayed poll) keeps it LIVE: the lane is
+    decided by provenance (historical load or not), never by event age."""
+    import copy
     from datetime import timedelta
 
     from app.markets import identity
-    from app.sources.us.clinical import parse_study, process_study
+    from app.sources.us.clinical import process_study
     with engine.begin() as c:
-        c.execute(text("INSERT INTO security_master (cik, name) VALUES ('0000078003', 'PFIZER INC')"))
+        _pfizer(c)
     identity.reset_cache()
-    d = json.loads((FX / "us" / "ctgov_pfizer_results_2026-08.json").read_text())
-    res_day = parse_study(d["studies"][0])["results_first_post_date"]
-    seen = end_of_local_day(res_day) + timedelta(days=seen_after_days)
+    cur = json.loads((FX / "us" / "ctgov_pfizer_terminated.json").read_text())["studies"][0]
+    prev = copy.deepcopy(cur)
+    prev["protocolSection"]["statusModule"]["overallStatus"] = "RECRUITING"
+    prev["protocolSection"]["statusModule"]["lastUpdatePostDateStruct"] = {"date": "2009-01-05", "type": "ACTUAL"}
     try:
         with engine.begin() as c:
-            assert process_study(c, d["studies"][0], first_seen=seen, is_backfill=False)["status"] == "STORED"
-            rows = dict(c.execute(text("SELECT event_type, is_backfill FROM events")).all())
+            process_study(c, prev, first_seen=end_of_local_day(date(2009, 1, 5)), is_backfill=False)
+            posted = date.fromisoformat(cur["protocolSection"]["statusModule"]["lastUpdatePostDateStruct"]["date"])
+            out = process_study(c, cur, first_seen=end_of_local_day(posted) + timedelta(days=10), is_backfill=False)
+            row = c.execute(text("SELECT is_backfill FROM events WHERE event_type = 'TRIAL_TERMINATED'")).scalar()
     finally:
         identity.reset_cache()
-    assert rows["TRIAL_REGISTERED"] is True  # registered long before it was first seen
-    assert rows["RESULTS_POSTED"] is (not results_live)
+    assert out["status"] == "STORED" and row is False
+
+
+@pytest.mark.parametrize("historical", [True, False])
+def test_only_the_explicit_historical_load_goes_to_the_backfill_lane(engine, clean, monkeypatch, historical):
+    from app.markets import identity
+    from app.sources.us import clinical
+    page = json.loads((FX / "us" / "ctgov_pfizer_results_2026-08.json").read_text())
+    page.pop("nextPageToken", None)
+    monkeypatch.setattr(clinical, "fetch_page", lambda since=None, token=None, page_size=500: page)
+    with engine.begin() as c:
+        _pfizer(c)
+    identity.reset_cache()
+    try:
+        clinical.ClinicalTrialsSource().run_live(engine, since=date(2000, 1, 1), historical=historical)
+    finally:
+        identity.reset_cache()
+    with engine.connect() as c:
+        flags = {r[0] for r in c.execute(text("SELECT is_backfill FROM events"))}
+    assert flags == {historical}  # a live run with a watermark stays live even for an old registration
+
+
+def test_trial_lane_repair_moves_only_the_verified_historical_cohort(engine, clean):
+    from datetime import datetime, timedelta, timezone
+
+    from app.backtest.jobs import select_queue
+    from app.db.store import create_event
+    from app.jobs.trial_lane_repair import run
+    w0, w1 = datetime(2026, 9, 28, 12, 5, 48, tzinfo=timezone.utc), datetime(2026, 9, 28, 12, 18, 41, tzinfo=timezone.utc)
+    ids = {}
+    with engine.begin() as c:
+        for key, created in (("hist", w0 + timedelta(minutes=3)), ("live_old", datetime(2026, 9, 28, 5, 26, tzinfo=timezone.utc)),
+                             ("live_delayed", datetime(2026, 9, 29, 17, 5, tzinfo=timezone.utc))):
+            ids[key] = create_event(c, event_type="TRIAL_REGISTERED", dedupe_key=key, public_date=date(2024, 1, 10),
+                                    ticker="ZBIO", issuer_cik="0001953926", title="t", payload={}, source_url="u",
+                                    is_backfill=False, event_family="US_TRIAL_CATALYST")
+            c.execute(text("UPDATE events SET created_at = :t WHERE id = :i"), {"t": created, "i": ids[key]})
+        # an earlier age-based apply also moved the 05:26 live-run event
+        c.execute(text("UPDATE events SET is_backfill = true WHERE id = :i"), {"i": ids["live_old"]})
+        c.execute(text("""INSERT INTO data_cleanup_audit (run_id, action, table_name, row_id, reason, dry_run)
+                          VALUES ('apply-old', 'RECLASSIFY', 'events', :i, 'age', false)"""), {"i": ids["live_old"]})
+    with engine.begin() as c:
+        dry = run(c, apply=False, undo_run="apply-old", window=(w0, w1))
+        assert (dry["to_backfill"], dry["undo_to_live"]) == (1, 1)
+    with engine.begin() as c:
+        out = run(c, apply=True, undo_run="apply-old", window=(w0, w1))
+    assert (out["moved"], out["reverted"], out["audited"]) == (1, 1, 2)
+    with engine.connect() as c:
+        flags = dict(c.execute(text("SELECT dedupe_key, is_backfill FROM events")).all())
+        now = datetime.now(timezone.utc)
+        backfill_lane = {r[0] for r in select_queue(c, now, backfill=True, limit=100)}
+        live_lane = {r[0] for r in select_queue(c, now, backfill=False, limit=100)}
+    assert flags == {"hist": True, "live_old": False, "live_delayed": False}
+    assert backfill_lane == {ids["hist"]} and live_lane == {ids["live_old"], ids["live_delayed"]}
+    with engine.begin() as c:  # idempotent
+        assert run(c, apply=True, undo_run="apply-old", window=(w0, w1))["audited"] == 0
 
 
 # ------------------------------------------------------------------ openFDA / CFTC

@@ -26,9 +26,6 @@ from app.sources.base import RunResult, Source
 log = logging.getLogger(__name__)
 PARSER_VERSION = "ctgov-v2-1"
 API = "https://clinicaltrials.gov/api/v2/studies"
-# an event whose public time is already older than this when we first see it is history, not a live signal (same 2-day
-# rule as the FINRA source): the 2000+ historical load and old registrations re-posted today go to the backfill lane
-LIVE_MAX_AGE = timedelta(days=2)
 FIELDS = ("protocolSection.identificationModule,protocolSection.statusModule,protocolSection.sponsorCollaboratorsModule,"
           "protocolSection.designModule,protocolSection.conditionsModule,protocolSection.armsInterventionsModule,hasResults")
 TERMINAL = {"TERMINATED": "TRIAL_TERMINATED", "SUSPENDED": "TRIAL_SUSPENDED", "WITHDRAWN": "TRIAL_TERMINATED",
@@ -121,13 +118,12 @@ def process_study(conn, s: dict, *, first_seen: datetime | None = None, is_backf
         if prev is not None and et not in ("RESULTS_POSTED",):
             ev_avail = avail  # a change is known when the version that shows it is posted
         pub = d or ev_avail.astimezone(NY).date()
-        old = first_seen is not None and ev_avail < first_seen - LIVE_MAX_AGE
         eid = create_event(conn, event_type=et, dedupe_key=f"CTG:{cur['nct_id']}:{et}:{d or ver}", public_date=pub,
                            ticker=resolver.ticker_for_cik(cik), issuer_cik=cik, company_name=cur["lead_sponsor"],
                            title=f"{cur['lead_sponsor']}: {et.replace('_', ' ').lower()} {cur['nct_id']} ({'/'.join(cur['phases']) or 'n/a'})",
                            payload={**info, "nct_id": cur["nct_id"], "phases": cur["phases"], "status": cur["overall_status"],
                                     "conditions": cur["conditions"], "interventions": cur["interventions"]},
-                           source_url=f"https://clinicaltrials.gov/study/{cur['nct_id']}", is_backfill=is_backfill or old,
+                           source_url=f"https://clinicaltrials.gov/study/{cur['nct_id']}", is_backfill=is_backfill,
                            event_family="US_TRIAL_CATALYST", identity_confidence=conf, parser_version=PARSER_VERSION,
                            available_at_override=ev_avail, date_quality="date")
         if eid:
@@ -152,7 +148,10 @@ class ClinicalTrialsSource(Source):
     country, dataset, license_status, parser_version = "US", "us_clinical_trials", "PUBLIC_WITH_TERMS", PARSER_VERSION
     stale_after = timedelta(days=2)
 
-    def run_live(self, engine: Engine, since: date | None = None, max_pages: int = 40) -> RunResult:
+    def run_live(self, engine: Engine, since: date | None = None, max_pages: int = 40, historical: bool = False) -> RunResult:
+        """historical=True: an explicit historical load (v2_steps.backfill_health_gov) - every event goes to the backfill
+        lane. Otherwise only the very first run (no watermark yet) is backfill; a live run never guesses from event age
+        (a delayed poll or an outage must not turn genuine live events into history)."""
         with engine.connect() as c:
             wm = since or c.execute(text("SELECT max(as_of_date) FROM dataset_records WHERE dataset = 'us_clinical_trials'")).scalar()
         since = (wm - timedelta(days=1)) if wm else date.today() - timedelta(days=3)
@@ -163,7 +162,7 @@ class ClinicalTrialsSource(Source):
             page = fetch_page(since, token)
             for s in page.get("studies", []):
                 with engine.begin() as c:
-                    out = process_study(c, s, first_seen=now, is_backfill=wm is None)
+                    out = process_study(c, s, first_seen=now, is_backfill=historical or wm is None)
                 stats[out["status"]] = stats.get(out["status"], 0) + 1
                 res.items += 1
                 res.events += out.get("events", [])

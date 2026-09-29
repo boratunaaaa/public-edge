@@ -155,7 +155,8 @@ def backfill_health_gov(engine: Engine) -> dict:
     with engine.connect() as c:
         st = job_state(c, "v2_health_gov")
     out, done = {}, dict(st)
-    jobs = (("trials_done", "trials", lambda: ClinicalTrialsSource().run_live(engine, since=date(2000, 1, 1), max_pages=400).items),
+    jobs = (("trials_done", "trials", lambda: ClinicalTrialsSource().run_live(engine, since=date(2000, 1, 1), max_pages=400,
+                                                                          historical=True).items),
             ("openfda_done", "openfda", lambda: OpenFdaSource().run_backfill(engine).items),
             ("cftc_done", "cftc", lambda: CftcCotSource().run_backfill(engine).items))
     for flag, name, fn in jobs:
