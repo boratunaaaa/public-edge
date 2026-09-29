@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import and_, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
@@ -147,7 +147,8 @@ class Stager:
         self._cos: set[str] = set()
         self._sm: dict[str, date | None] = {}  # cik -> staged delisting_date
         self._acts: set[tuple] = set()
-        self._risks: set[tuple] = set()
+        self._risk_rows: dict[tuple, dict] = {}
+        self.risk_provenance: dict[tuple, list] = {}
         self.writes = 0
 
     def stage_events(self, conn: Connection, now: datetime, event_types: tuple[str, ...] | None = None) -> list[int]:
@@ -157,19 +158,53 @@ class Stager:
             self.staged.add(e["id"])
         return [e["id"] for e in new if event_types is None or e["event_type"] in event_types]
 
-    def stage_risks(self, conn: Connection, now: datetime) -> int:
-        """Risk labels exist only where the source has their history (risk_coverage); each appears at detected_at."""
-        n = 0
-        for r in self.src.discovery_risks:
-            key = (r["cik"], r["risk"], r["detected_at"])
-            if key in self._risks or r["detected_at"] > now:
+    def stage_risks(self, conn: Connection, now: datetime, today: date) -> int:
+        """discovery_risks exactly as production would hold them at `now`, from the reconstructed labels public by then
+        (risk_history.active_risks: production severity / escalation rules) plus HIGH_FINANCING_RISK from the production
+        financing rules on those point-in-time inputs. Written as a diff; every row keeps its evidence
+        (self.risk_provenance) - a row without it fails the run (check_state)."""
+        from app.replay.risk_history import active_risks
+        want: dict[tuple, dict] = {}
+        for cik in sorted({x.cik for x in self.src.risk_labels}):
+            rows = active_risks(self.src.risk_labels, cik, now)
+            fin = self._financing(conn, cik, rows, now)
+            if fin:
+                rows["HIGH_FINANCING_RISK"] = fin
+            for risk, r in rows.items():
+                want[(cik, risk)] = r
+        w = 0
+        for key in sorted(set(self._risk_rows) - set(want)):
+            conn.execute(discovery_risks.delete().where(and_(discovery_risks.c.cik == key[0], discovery_risks.c.risk == key[1])))
+            del self._risk_rows[key]
+            w += 1
+        for key, r in sorted(want.items()):
+            row = {k: r[k] for k in ("severity", "value", "source_url", "detected_at")}
+            if self._risk_rows.get(key) == row:
                 continue
-            vals = {"severity": r["severity"], "value": r.get("value"), "detected_at": r["detected_at"]}
-            conn.execute(pg_insert(discovery_risks).values(cik=r["cik"], risk=r["risk"], **vals)
-                         .on_conflict_do_update(index_elements=["cik", "risk"], set_=vals))
-            self._risks.add(key)
-            n += 1
-        return n
+            conn.execute(pg_insert(discovery_risks).values(cik=key[0], risk=key[1], **row)
+                         .on_conflict_do_update(index_elements=["cik", "risk"], set_=row))
+            self._risk_rows[key] = row
+            w += 1
+        self.risk_provenance = {k: want[k]["evidence"] for k in want}
+        return w
+
+    def _financing(self, conn: Connection, cik: str, rows: dict, now: datetime) -> dict | None:
+        """Production financing.financing_flags / financing_score / is_high on point-in-time inputs (clock-aware
+        corporate-action windows, staged risks, dilution from its label; runway stays unknown)."""
+        from app.discovery.financing import SUB_BILLION, financing_flags, financing_score, is_high
+        mcap = conn.execute(text("""SELECT market_cap FROM universe_snapshots WHERE cik = :c AND as_of <= :t
+                                    ORDER BY as_of DESC LIMIT 1"""), {"c": cik, "t": now.date()}).scalar()
+        if mcap is not None and mcap >= SUB_BILLION:
+            return None
+        dil = rows.get("DILUTION")
+        metrics = {"share_growth_yoy": (0.5 if dil["severity"] == "HIGH" else 0.2) if dil else None, "runway_months": None}
+        flags = financing_flags(conn, cik, metrics, [{"risk": k, "severity": v["severity"]} for k, v in rows.items()])
+        score = financing_score(flags)
+        if not is_high(flags, score):
+            return None
+        ev = sorted({d for v in rows.values() for d in v["evidence"]} | {f"flag:{f}" for f in flags})
+        return {"severity": "HIGH", "value": f"score {score}/10: {', '.join(flags)}", "source_url": "derived:financing_flags",
+                "detected_at": max([v["detected_at"] for v in rows.values()] or [now]), "evidence": ev}
 
     def desired_reference(self, today: date) -> dict:
         """The point-in-time reference state on `today` (pure; used by the incremental stager and by the tests)."""
@@ -296,7 +331,8 @@ def identity_check(conn: Connection, ev: dict, on: date) -> str | None:
     return "AMBIGUOUS_SYMBOL_OWNER" if owners else "NO_ISSUER_IDENTITY"
 
 
-def check_state(conn: Connection, guards: Guards, now: datetime, today: date, cap: date | None) -> None:
+def check_state(conn: Connection, guards: Guards, now: datetime, today: date, cap: date | None,
+                risk_provenance: dict | None = None) -> None:
     """Structural leakage audit of the run's schema after every step."""
     q = lambda sql, **p: conn.execute(text(sql), p).scalar()  # noqa: E731
     if q("SELECT count(*) FROM events WHERE available_at > :n", n=now):
@@ -321,6 +357,9 @@ def check_state(conn: Connection, guards: Guards, now: datetime, today: date, ca
         guards.fail("AVAILABLE_AT_VIOLATION", "a proposal was created before its event was available")
     if q("SELECT count(*) FROM paper_orders WHERE status = 'FILLED' AND fill_date < not_before"):
         guards.fail("EARLY_FILL", "an order filled before its first eligible session")
+    for cik, risk in conn.execute(text("SELECT cik, risk FROM discovery_risks")).all():
+        if not (risk_provenance or {}).get((cik, risk)):
+            guards.fail("RISK_WITHOUT_PROVENANCE", f"{cik} {risk}: no reconstructed source document behind it")
 
 
 def dump(obj) -> str:

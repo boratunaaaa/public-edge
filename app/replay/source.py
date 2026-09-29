@@ -32,9 +32,10 @@ class SourceData:
     # ({"series", "cik", "valid_from", "valid_to"}; None = open-ended). PriceIndex adds a symbol-period entry for every
     # (issuer, stored symbol) the catalog does not list explicitly (derive_series).
     series: list[dict] = field(default_factory=list)
-    # first date each risk-label history exists in the source database (None = no history at all)
-    risk_coverage: dict = field(default_factory=dict)  # {"discovery_risks": date|None, "thesis_changes": date|None}
-    discovery_risks: list[dict] = field(default_factory=list)  # cik, risk, severity, value, detected_at (if covered)
+    # point-in-time reconstructed risk labels (app.replay.risk_history.RiskLabel, each with source provenance) and
+    # the per-family coverage of the reconstruction for this snapshot's issuers (risk_history.Coverage; None = none)
+    risk_labels: list = field(default_factory=list)
+    risk_cov: object | None = None
     label: str = "fixture"
 
     def __post_init__(self) -> None:
@@ -68,7 +69,8 @@ def derive_series(symbols: list[dict], bars: dict) -> list[dict]:
 
 def _plain(src: SourceData) -> dict:
     return {"events": src.events, "symbols": src.symbols, "companies": src.companies, "series": src.series,
-            "risk_coverage": src.risk_coverage, "discovery_risks": src.discovery_risks,
+            "risk_labels": sorted(tuple(str(v) for v in x.__dict__.values()) for x in src.risk_labels),
+            "risk_cov": getattr(src.risk_cov, "families", None),
             "security_master": src.security_master, "corporate_actions": src.corporate_actions,
             "bars": {s: [list(b.__dict__.values()) for b in bs] for s, bs in sorted(src.bars.items())},
             "share_facts": {c: [list(f.__dict__.values()) for f in fs] for c, fs in sorted(src.share_facts.items())}}
@@ -99,8 +101,5 @@ def load_snapshot(path: str | Path) -> SourceData:
     sm = [{**r, "delisting_date": _d(r.get("delisting_date"))} for r in raw.get("security_master", [])]
     ca = [{**r, "action_date": _d(r["action_date"])} for r in raw.get("corporate_actions", [])]
     series = [{**x, "valid_from": _d(x.get("valid_from")), "valid_to": _d(x.get("valid_to"))} for x in raw.get("series", [])]
-    cov = {k: _d(v) for k, v in (raw.get("risk_coverage") or {}).items()}
-    risks = [{**r, "detected_at": _dt(r["detected_at"])} for r in raw.get("discovery_risks", [])]
     return SourceData(events=events, bars=bars, symbols=symbols, companies=raw.get("companies", {}), share_facts=facts,
-                      security_master=sm, corporate_actions=ca, series=series, risk_coverage=cov, discovery_risks=risks,
-                      label=raw.get("label", Path(path).name))
+                      security_master=sm, corporate_actions=ca, series=series, label=raw.get("label", Path(path).name))

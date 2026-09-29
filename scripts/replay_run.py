@@ -25,6 +25,7 @@ def main() -> int:
     ap.add_argument("--event-types", default="INSIDER_OPEN_MARKET_BUY")
     ap.add_argument("--cash", type=float, default=10_000.0)
     ap.add_argument("--role", default="development")
+    ap.add_argument("--risk-run", help="load point-in-time risk labels + coverage of this reconstruction run")
     a = ap.parse_args()
     url = os.environ.get("REPLAY_DATABASE_URL")
     if not url:
@@ -34,7 +35,14 @@ def main() -> int:
                        end=datetime.fromisoformat(a.end).replace(hour=23, tzinfo=timezone.utc),
                        event_types=tuple(t for t in a.event_types.split(",") if t), initial_cash=a.cash, period_role=a.role)
     t0 = time.time()
-    run = ReplayRun(cfg, load_snapshot(a.snapshot), url)
+    src = load_snapshot(a.snapshot)
+    if a.risk_run:
+        from app.replay.risk_history import RiskHistoryStore
+        # the issuer scope the reconstruction ran with = the snapshot's export parameters (coverage is per scope)
+        ciks = sorted(json.load(open(a.snapshot)).get("params", {}).get("ciks") or
+                      {e["issuer_cik"] for e in src.events if e.get("issuer_cik")})
+        src.risk_labels, src.risk_cov = RiskHistoryStore(url).load(ciks, cfg.end, a.risk_run)
+    run = ReplayRun(cfg, src, url)
     res = run.run()
     out = run.summary() | {"wall_seconds": round(time.time() - t0, 1), "price_requests": run.provider.requests,
                            "reviews": res.reviews[:20], "leakage": res.leakage}

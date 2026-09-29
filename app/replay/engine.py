@@ -34,26 +34,26 @@ from app.replay.visibility import (Guards, PriceIndex, ReplayPriceProvider, Stag
 PRE_OPEN, OPEN_T = time(9, 0), time(9, 30)
 EOD_LAG = timedelta(hours=2)
 RESEARCH_APPROVER = "replay:research_auto"
-RISK_COMPLETE, RISK_PARTIAL, RISK_UNAVAILABLE = "RISK_HISTORY_COMPLETE", "RISK_HISTORY_PARTIAL", "RISK_HISTORY_UNAVAILABLE"
-# production decisions that read risk-label history (discovery_risks / thesis_changes); without that history they
-# silently see "no risk" - the run is then not comparable with a live verdict
-RISK_DEPENDENT_GATES = ("gate:SEVERE_FINANCING_RISK", "gate:LOW_LIQUIDITY(risk label LOW_LIQUIDITY=HIGH)",
-                        "sizing:HIGH_FINANCING_RISK cap", "exit:D_THESIS thesis invalidation")
+# production decisions that read each risk family (a family that is not COMPLETE means these ran on missing history)
+FAMILY_CONSUMERS = {
+    "GOING_CONCERN": ("gate:SEVERE_FINANCING_RISK", "sizing:HIGH_FINANCING_RISK cap", "exit:D_THESIS thesis invalidation"),
+    "CASH_RUNWAY": ("gate:SEVERE_FINANCING_RISK", "sizing:HIGH_FINANCING_RISK cap"),
+    "FINANCING_TEXT": ("sizing:HIGH_FINANCING_RISK cap",),
+    "FINANCING_ACTIONS": ("sizing:HIGH_FINANCING_RISK cap",),
+    "DILUTION": ("sizing:HIGH_FINANCING_RISK cap",),
+    "THESIS_INVALIDATION": ("exit:D_THESIS thesis invalidation",),
+}
 
 
 def risk_history(cfg: ReplayConfig, src: SourceData) -> dict:
-    """Explicit coverage of the risk-label history over the run's window (the replay never invents past labels)."""
+    """Explicit risk-history coverage of the run (app.replay.risk_history.coverage_policy): FULL only when every
+    required family is COMPLETE over the window. Past labels are never invented."""
+    from app.replay.risk_history import Coverage, coverage_policy
     s, e = cfg.start.astimezone(NY).date(), cfg.end.astimezone(NY).date()
-    starts = {k: src.risk_coverage.get(k) for k in ("discovery_risks", "thesis_changes")}
-    if all(v is not None and v <= s for v in starts.values()):
-        flag = RISK_COMPLETE
-    elif any(v is not None and v <= e for v in starts.values()):
-        flag = RISK_PARTIAL
-    else:
-        flag = RISK_UNAVAILABLE
-    return {"flag": flag, "history_starts": starts,
-            "gates_not_applied": [] if flag == RISK_COMPLETE else list(RISK_DEPENDENT_GATES),
-            "comparability": "FULL" if flag == RISK_COMPLETE else "LIMITED"}
+    pol = coverage_policy(src.risk_cov if isinstance(src.risk_cov, Coverage) else Coverage(), s, e)
+    pol["gates_not_applied"] = sorted({g for fam in pol["not_complete"] for g in FAMILY_CONSUMERS.get(fam, ())})
+    pol["labels"] = len(src.risk_labels)
+    return pol
 
 
 def sessions(start: date, end: date) -> list[date]:
@@ -127,13 +127,13 @@ class ReplayRun:
 
     def _check(self) -> None:
         with self.store.engine.connect() as c:
-            check_state(c, self.guards, self.clock.now(), self.clock.today(), self.vis.cap)
+            check_state(c, self.guards, self.clock.now(), self.clock.today(), self.vis.cap, self.stager.risk_provenance)
 
     def _refresh(self, today: date, cap: date | None, new_ids: list[int]) -> None:
         from app.entities.registry import resolver
         with self.store.engine.begin() as c:
             self.stager.stage_reference(c, today)
-            self.stager.stage_risks(c, self.clock.now())
+            self.stager.stage_risks(c, self.clock.now(), today)
             ciks = set(c.execute(select(events.c.issuer_cik).where(events.c.id.in_(new_ids))).scalars()) if new_ids else set()
             if ciks and cap is not None:
                 self.stager.build_universe(c, today, ciks, cap)

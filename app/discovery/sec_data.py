@@ -21,13 +21,18 @@ BROWSER_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebK
 
 
 # ------------------------------------------------------------------ full-text search
-def efts_search(phrase: str, forms: list[str], start: date, end: date, max_hits: int = 500) -> list[dict]:
-    """EDGAR full-text search for an exact phrase. Returns [{adsh, cik, form, file_date, filename, name}]."""
+def efts_search(phrase: str, forms: list[str], start: date, end: date, max_hits: int = 500,
+                ciks: list[str] | None = None) -> list[dict]:
+    """EDGAR full-text search for an exact phrase. Returns [{adsh, cik, form, file_date, filename, name}].
+    ciks: optional entity filter (EDGAR full-text search `ciks` parameter); callers still filter the result."""
     out: list[dict] = []
     frm = 0
     while frm < max_hits:
-        r = http.get(EFTS_URL, params={"q": f'"{phrase}"', "forms": ",".join(forms), "dateRange": "custom",
-                                       "startdt": start.isoformat(), "enddt": end.isoformat(), "from": frm}, retries=2).json()
+        params = {"q": f'"{phrase}"', "forms": ",".join(forms), "dateRange": "custom",
+                  "startdt": start.isoformat(), "enddt": end.isoformat(), "from": frm}
+        if ciks:
+            params["ciks"] = ",".join(c.zfill(10) for c in ciks)
+        r = http.get(EFTS_URL, params=params, retries=2).json()
         hits = r.get("hits", {}).get("hits", [])
         if not hits:
             break

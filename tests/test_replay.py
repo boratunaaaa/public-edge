@@ -429,13 +429,17 @@ def test_missing_risk_history_marks_the_run_limited_and_names_the_gates():
     assert q("replay_meta", "SELECT comparability FROM replay_runs WHERE replay_id = 't_risk_none'") == [("LIMITED",)]
 
 
+def _cov(status_by_family: dict, lo=date(2015, 1, 1)):
+    from app.replay.risk_history import FAMILIES, Coverage
+    return Coverage({f: {"status": status_by_family.get(f, "COMPLETE"), "from": lo, "to": None} for f in FAMILIES})
+
+
 @db
 def test_incomplete_risk_replay_is_never_a_fully_comparable_holdout():
     from app.replay.campaign import holdout_verdict_inputs
-    full = source()
-    full.risk_coverage = {"discovery_risks": date(2015, 1, 1), "thesis_changes": date(2015, 1, 1)}
-    partial = source()
-    partial.risk_coverage = {"discovery_risks": date(2021, 2, 10), "thesis_changes": None}
+    full, partial = source(), source()
+    full.risk_cov = _cov({})
+    partial.risk_cov = _cov({"CASH_RUNWAY": "PARTIAL"})
     _, a = run(cfg("t_hold_full", end=date(2021, 2, 12), period_role="holdout"), full)
     _, b = run(cfg("t_hold_part", end=date(2021, 2, 12), period_role="holdout"), partial)
     assert a.provenance["risk_history"]["flag"] == "RISK_HISTORY_COMPLETE"

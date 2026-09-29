@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection
 
+from app.core import clock as _clock
 from app.db.models import corporate_actions
 from app.discovery.risks import upsert_risk
 
@@ -27,7 +28,7 @@ WEIGHTS = {"GOING_CONCERN": 4.0, "RUNWAY_UNDER_9M": 3.0, "RUNWAY_UNDER_18M": 1.5
 def _count(conn: Connection, cik: str, action: str, days: int) -> int:
     return len(conn.execute(select(corporate_actions.c.accession).where(and_(
         corporate_actions.c.cik == cik, corporate_actions.c.action == action,
-        corporate_actions.c.action_date >= date.today() - timedelta(days=days)))).all())
+        corporate_actions.c.action_date >= _clock.today() - timedelta(days=days)))).all())
 
 
 def financing_flags(conn: Connection, cik: str, metrics: dict, risks: list[dict]) -> list[str]:
