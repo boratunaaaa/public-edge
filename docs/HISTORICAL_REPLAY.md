@@ -28,7 +28,7 @@ Step model `SESSION_3STEP`, per NYSE session D:
 
 Point-in-time reference data (re-staged every step): symbol periods observed up to the date (last_seen clipped), a
 **registry built from those periods** (each issuer's most recently used symbol - never today's SEC ticker file),
-security master delisting fields only once dated, corporate actions by action date, and a universe snapshot built
+security master delisting fields only once dated, corporate actions from the day after their filing date, and a universe snapshot built
 with the production formulas (`shares_as_of` on facts filed by then, `mcap_bucket`, 30-day $ volume for MICRO /
 EARLY_SMALL like `build_universe`).
 
@@ -95,8 +95,38 @@ Production risk inputs and what the replay can rebuild (production database, 202
 Every label: risk type, issuer, source document (accession) + URL, source kind, acceptance time when known,
 `available_at` (acceptance, else end of the filing day in New York), `valid_from >= available_at`, `valid_to` (next
 report / production 365-day window), detector + version, rule version (hash of the production rule table or the
-10-K classifier version), confidence, `reconstructed_at`, run id. Stored in `risk_hist` of the REPLAY database
-(production refused), idempotent (unique label key), restartable (per issuer checkpoint in the same transaction).
+10-K classifier version), confidence, `reconstructed_at`, run id, related documents. Stored in `risk_hist_v3` of the
+REPLAY database (production refused) as **run-scoped immutable snapshots**, one row per assessment interval (unique
+per run + label key + `valid_from`: a run with a longer source history never changes or hides another run's labels,
+and an amendment that re-decides with the same documents opens its own interval), restartable (per issuer
+checkpoint in the same transaction). A DILUTION label's source document is the filing that triggered the assessment;
+the two compared share facts are its related documents (both in the risk row's evidence).
+
+**Run fingerprint**: a run id is pinned to sha256(source file digest + detector / rule versions + window) in
+`reconstruction_runs`; resuming it with another export, detector version or window raises `RunInputChanged` (use a
+new run id), so old labels and new coverage can never mix.
+
+**Export completion**: the exporter's last line is a trailer (issuer count + digest, batches, finished batches per
+full-text phrase), written only after every issuer. The job rejects a missing trailer, missing / duplicate /
+undeclared issuers and unfinished phrase scans (`SourceIncomplete`, CLI exit 3); coverage is published - and loaded
+by a replay - only for a run whose export verified (`source_verified_at`).
+
+Source format: issuer-partitioned JSON lines (metadata line + one issuer per line) written in batches by
+`scripts/risk_source_export.py` and read lazily by the job - memory holds one issuer (tested: 12x the issuers stays
+under 2x the peak). The export's full-text scan runs with a database-free HTTP limiter (`PE_SHARED_RATELIMIT=0` set
+before any app import; the command refuses to run if the shared limiter is still on).
+
+Coverage is issuer-specific and bounded by the export horizon: DILUTION needs a 300-430-day comparison pair and no
+filing gap > 430 days for every issuer; FINANCING_ACTIONS needs every issuer's submissions inventory (earliest action
++ 730 days .. fetch date); GOING_CONCERN is COMPLETE only with an untruncated full-text scan AND no older-classifier
+10-K profile in range.
+
+Financing assessment in the replay covers the point-in-time issuer universe (issuers of events visible so far), not
+only issuers with labels - corporate actions alone can reach the production threshold (shelf 0.5 + 3x424B 1.5 + PIPE
+1.5 + 3.01 2.0 = 5.5 >= 5.0) - and reads today's capitalisation, built right before it; its evidence lists the
+actual filings behind each action flag. Corporate actions carry only a filing DATE, so they are staged from the end
+of that day in New York (`action_date < today` at every step of `today`): an afternoon 8-K / 424B / S-3 cannot move
+that morning's sizing (tested); `check_state` fails a run on any same-day or later action.
 
 **FULL policy**: every family in `REQUIRED_FOR_FULL` (all six) COMPLETE over the replayed sessions. With CASH_RUNWAY
 unavailable and THESIS_INVALIDATION partial, no historical replay can be FULL yet - it is recorded as LIMITED with

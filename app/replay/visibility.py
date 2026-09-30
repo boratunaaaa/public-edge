@@ -148,6 +148,7 @@ class Stager:
         self._sm: dict[str, date | None] = {}  # cik -> staged delisting_date
         self._acts: set[tuple] = set()
         self._risk_rows: dict[tuple, dict] = {}
+        self.issuers: set[str] = set()
         self.risk_provenance: dict[tuple, list] = {}
         self.writes = 0
 
@@ -156,16 +157,21 @@ class Stager:
         for e in new:
             conn.execute(events.insert().values(**_row(e)))
             self.staged.add(e["id"])
+            if e.get("issuer_cik"):
+                self.issuers.add(e["issuer_cik"])  # the point-in-time issuer universe (grows only with visible events)
         return [e["id"] for e in new if event_types is None or e["event_type"] in event_types]
 
     def stage_risks(self, conn: Connection, now: datetime, today: date) -> int:
         """discovery_risks exactly as production would hold them at `now`, from the reconstructed labels public by then
         (risk_history.active_risks: production severity / escalation rules) plus HIGH_FINANCING_RISK from the production
-        financing rules on those point-in-time inputs. Written as a diff; every row keeps its evidence
-        (self.risk_provenance) - a row without it fails the run (check_state)."""
+        financing rules on those point-in-time inputs. Every issuer of the point-in-time universe (issuers of events
+        visible so far) is assessed - whether or not it has any label - so corporate actions alone can make it HIGH,
+        and a label published later can never change an earlier step. Written as a diff; every row keeps its
+        evidence (self.risk_provenance) - a row without it fails the run (check_state). Call after build_universe for
+        `today` (the financing rule needs today's market capitalisation)."""
         from app.replay.risk_history import active_risks
         want: dict[tuple, dict] = {}
-        for cik in sorted({x.cik for x in self.src.risk_labels}):
+        for cik in sorted(self.issuers):
             rows = active_risks(self.src.risk_labels, cik, now)
             fin = self._financing(conn, cik, rows, now)
             if fin:
@@ -192,8 +198,9 @@ class Stager:
         """Production financing.financing_flags / financing_score / is_high on point-in-time inputs (clock-aware
         corporate-action windows, staged risks, dilution from its label; runway stays unknown)."""
         from app.discovery.financing import SUB_BILLION, financing_flags, financing_score, is_high
-        mcap = conn.execute(text("""SELECT market_cap FROM universe_snapshots WHERE cik = :c AND as_of <= :t
-                                    ORDER BY as_of DESC LIMIT 1"""), {"c": cik, "t": now.date()}).scalar()
+        # today's point-in-time capitalisation only (built just before); unknown -> assessed, like production assess()
+        mcap = conn.execute(text("SELECT market_cap FROM universe_snapshots WHERE cik = :c AND as_of = :t"),
+                            {"c": cik, "t": now.date()}).scalar()
         if mcap is not None and mcap >= SUB_BILLION:
             return None
         dil = rows.get("DILUTION")
@@ -202,7 +209,7 @@ class Stager:
         score = financing_score(flags)
         if not is_high(flags, score):
             return None
-        ev = sorted({d for v in rows.values() for d in v["evidence"]} | {f"flag:{f}" for f in flags})
+        ev = sorted({d for v in rows.values() for d in v["evidence"]} | set(_action_evidence(conn, cik, flags)))
         return {"severity": "HIGH", "value": f"score {score}/10: {', '.join(flags)}", "source_url": "derived:financing_flags",
                 "detected_at": max([v["detected_at"] for v in rows.values()] or [now]), "evidence": ev}
 
@@ -223,8 +230,11 @@ class Stager:
         return {"symbols": sym, "registry": {k: v[0] for k, v in reg.items()}, "companies": {k[0] for k in sym},
                 "delistings": {m["cik"]: (m["delisting_date"] if m.get("delisting_date") and m["delisting_date"] <= today
                                           else None) for m in self.src.security_master},
+                # a filing known only by its DATE is public at the end of that day in New York (end_of_public_day):
+                # no step of `today` (the last one is 18:00 ET) may see today's filings, so an afternoon 8-K / 424B
+                # can never move that morning's financing decision
                 "actions": {(a["cik"], a["action"], a.get("accession") or "", a["action_date"])
-                            for a in self.src.corporate_actions if a["action_date"] <= today}}
+                            for a in self.src.corporate_actions if a["action_date"] < today}}
 
     def stage_reference(self, conn: Connection, today: date) -> int:
         if self.ref_day == today:
@@ -313,6 +323,22 @@ class Stager:
         return n
 
 
+ACTION_FLAGS = {"SHELF_S3": ("SHELF_REGISTRATION", 730, 1), "PROSPECTUS_424B_3PLUS": ("PROSPECTUS_424B", 365, 3),
+                "PIPE_3_02": ("UNREGISTERED_SALE", 365, 1), "EXCHANGE_COMPLIANCE_3_01": ("LISTING_DEFICIENCY", 365, 1)}
+
+
+def _action_evidence(conn: Connection, cik: str, flags: list[str]) -> list[str]:
+    """The SEC filings behind each corporate-action flag (same windows as production financing_flags)."""
+    out = []
+    for f in flags:
+        if f in ACTION_FLAGS:
+            action, days, _n = ACTION_FLAGS[f]
+            out += [f"{action}:{a}" for a in conn.execute(text(
+                """SELECT accession FROM corporate_actions WHERE cik = :c AND action = :a AND action_date >= :d
+                   ORDER BY action_date, accession"""), {"c": cik, "a": action, "d": clock.today() - timedelta(days=days)}).scalars()]
+    return out
+
+
 def identity_check(conn: Connection, ev: dict, on: date) -> str | None:
     """None = the event's security identity holds at the event date; else a REVIEW reason (the event is not traded).
     Point in time: only symbol periods observed up to the simulated date exist in the schema."""
@@ -342,7 +368,7 @@ def check_state(conn: Connection, guards: Guards, now: datetime, today: date, ca
     if q("SELECT count(*) FROM event_returns"):
         guards.fail("FUTURE_OUTCOME", "event_returns rows exist during the run (outcomes are evaluated after it)")
     for sql, kind in (("SELECT count(*) FROM security_master WHERE delisting_date > :t", "FUTURE_DELISTING"),
-                      ("SELECT count(*) FROM corporate_actions WHERE action_date > :t", "FUTURE_CORPORATE_ACTION"),
+                      ("SELECT count(*) FROM corporate_actions WHERE action_date >= :t", "FUTURE_CORPORATE_ACTION"),
                       ("SELECT count(*) FROM universe_snapshots WHERE as_of > :t", "FUTURE_UNIVERSE"),
                       ("SELECT count(*) FROM security_symbols WHERE last_seen > :t OR first_seen > :t", "FUTURE_SYMBOL_PERIOD"),
                       ("SELECT count(*) FROM discovery_risks WHERE detected_at::date > :t", "FUTURE_REGULATORY_LABEL"),

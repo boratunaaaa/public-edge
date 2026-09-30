@@ -1,16 +1,17 @@
-"""Offline point-in-time risk reconstruction into the REPLAY database (schema risk_hist; production refused).
+"""Offline point-in-time risk reconstruction into the REPLAY database (schema risk_hist_v3; production refused).
 
     REPLAY_DATABASE_URL=... python scripts/risk_reconstruct.py --source risk_src.json --run-id pilot1
-Idempotent and restartable: re-running the same --run-id skips checkpointed issuers and never duplicates a label."""
+Idempotent and restartable: re-running the same --run-id skips checkpointed issuers and never duplicates a label; a
+run id is pinned to its source digest + detector configuration (a changed input needs a new run id). Coverage is
+published only for an export whose completion trailer verifies (exit 3 otherwise)."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import sys
-from datetime import date
 
-from app.replay.risk_history import RiskHistoryStore, load_risk_source, reconstruct
+from app.replay.risk_history import RiskHistoryStore, RunInputChanged, SourceIncomplete, reconstruct
 
 
 def main() -> int:
@@ -22,9 +23,11 @@ def main() -> int:
     if not url:
         print("REPLAY_DATABASE_URL is required (never the production database)", file=sys.stderr)
         return 2
-    src = load_risk_source(a.source)
-    res = reconstruct(RiskHistoryStore(url), a.run_id, src, src["ciks"], date.fromisoformat(src["start"]),
-                      date.fromisoformat(src["end"]))
+    try:
+        res = reconstruct(RiskHistoryStore(url), a.run_id, a.source)
+    except (RunInputChanged, SourceIncomplete) as e:
+        print(f"{type(e).__name__}: {e}", file=sys.stderr)
+        return 3
     print(json.dumps(res, indent=1, default=str))
     return 0
 

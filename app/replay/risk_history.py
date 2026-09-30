@@ -33,7 +33,7 @@ from sqlalchemy.pool import NullPool
 
 from app.replay.store import guard_isolation
 
-SCHEMA = "risk_hist"
+SCHEMA = "risk_hist_v3"  # v3: run-scoped labels keyed per assessment interval, related documents, run fingerprints
 COMPLETE, PARTIAL, UNAVAILABLE = "COMPLETE", "PARTIAL", "UNAVAILABLE"
 FAMILIES = ("GOING_CONCERN", "FINANCING_TEXT", "FINANCING_ACTIONS", "DILUTION", "CASH_RUNWAY", "THESIS_INVALIDATION")
 # every production decision that reads risk history needs these to be complete for a FULL replay
@@ -44,7 +44,7 @@ GC_DETECTOR_VERSION = "1"
 TEXT_DETECTOR = "efts_text_phrase"
 TEXT_DETECTOR_VERSION = "1"
 DILUTION_DETECTOR = "cover_page_share_growth"
-DILUTION_DETECTOR_VERSION = "1"
+DILUTION_DETECTOR_VERSION = "2"  # v2: one label per assessment (triggering filing)
 
 
 def _rule_version_text() -> str:
@@ -82,6 +82,7 @@ class RiskLabel:
     confidence: str
     value: str | None = None
     security_id: str | None = None
+    related_documents: tuple[str, ...] = ()  # further documents the decision rests on (e.g. the compared share facts)
 
     def __post_init__(self) -> None:
         if not self.source_document_id or not self.source_url:
@@ -90,7 +91,10 @@ class RiskLabel:
             raise ValueError("valid_from can never precede the document's public time")
 
     def key(self) -> tuple:
-        return (self.risk_type, self.cik, self.source_document_id, self.detector_version, self.rule_version)
+        """One persisted row per assessment interval: the same document can open several intervals (a later
+        amendment re-decides with it), so the interval start is part of the identity."""
+        return (self.risk_type, self.cik, self.source_document_id, self.valid_from, self.detector_version,
+                self.rule_version)
 
 
 # ------------------------------------------------------------------ detectors (pure, versioned)
@@ -149,9 +153,13 @@ def detect_text_hits(hits: list[dict]) -> list[RiskLabel]:
 
 def detect_dilution(cik: str, facts: list[tuple]) -> list[RiskLabel]:
     """facts: (accession, end_date, filed, form, val). At each new filing the production formula is applied to what
-    was filed by then: last cover-page count vs the one 300-430 days earlier (discovery.metrics.compute)."""
+    was filed by then: last cover-page count vs the one 300-430 days earlier (discovery.metrics.compute). Every
+    assessment is its own interval: the triggering filing (the one filed that day) is the source document, the two
+    compared facts are related documents - so an amendment that restates the base opens a new interval even though
+    the latest count (and its accession) is unchanged."""
     out = []
     for filed in sorted({f[2] for f in facts}):
+        trigger = sorted({f[0] for f in facts if f[2] == filed})
         known: dict[date, tuple] = {}
         for f in sorted((f for f in facts if f[2] <= filed), key=lambda f: (f[1], f[2])):
             known[f[1]] = f  # an end date re-reported later replaces the earlier value (latest filed wins)
@@ -167,11 +175,14 @@ def detect_dilution(cik: str, facts: list[tuple]) -> list[RiskLabel]:
             continue
         nxt = min((x[2] for x in facts if x[2] > filed), default=None)
         avail = end_of_public_day(filed)
-        out.append(RiskLabel("DILUTION", cik, "HIGH" if g >= 0.5 else "MEDIUM", last[0],
-                             f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{last[0].replace('-', '')}/",
+        base = ya[0]
+        out.append(RiskLabel("DILUTION", cik, "HIGH" if g >= 0.5 else "MEDIUM", trigger[0],
+                             f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{trigger[0].replace('-', '')}/",
                              "cover-page share fact", None, avail, avail, end_of_public_day(nxt) if nxt else None,
                              DILUTION_DETECTOR, DILUTION_DETECTOR_VERSION, "metrics.share_growth_yoy>=0.2", "HIGH",
-                             f"shares outstanding +{g:.0%} YoY"))
+                             f"shares outstanding +{g:.0%} YoY: {last[4]} ({last[0]}, {last[1]}) vs {base[4]} "
+                             f"({base[0]}, {base[1]})",
+                             related_documents=tuple(sorted({last[0], base[0], *trigger[1:]} - {trigger[0]}))))
     return out
 
 
@@ -189,7 +200,8 @@ def active_risks(labels: list[RiskLabel], cik: str, at: datetime) -> dict[str, d
         if risk in ("ATM_OFFERING", "REGISTERED_DIRECT") and len({x.source_document_id for x in xs}) >= 3:
             sev = "HIGH"
         out[risk] = {"severity": sev, "value": latest.value, "source_url": latest.source_url,
-                     "detected_at": latest.available_at, "evidence": sorted(x.source_document_id for x in xs)}
+                     "detected_at": latest.available_at,
+                     "evidence": sorted({d for x in xs for d in (x.source_document_id, *x.related_documents)})}
     raises = {x.source_document_id for r in ("ATM_OFFERING", "REGISTERED_DIRECT") for x in by.get(r, [])}
     if len(raises) >= 3:
         ev = [x for r in ("ATM_OFFERING", "REGISTERED_DIRECT") for x in by.get(r, [])]
@@ -235,16 +247,27 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.risk_labels (
   value TEXT, source_document_id TEXT NOT NULL, source_url TEXT NOT NULL, source_kind TEXT NOT NULL,
   accepted_at TIMESTAMPTZ, available_at TIMESTAMPTZ NOT NULL, valid_from TIMESTAMPTZ NOT NULL, valid_to TIMESTAMPTZ,
   detector TEXT NOT NULL, detector_version TEXT NOT NULL, rule_version TEXT NOT NULL, confidence TEXT NOT NULL,
-  reconstructed_at TIMESTAMPTZ NOT NULL, run_id TEXT NOT NULL,
+  reconstructed_at TIMESTAMPTZ NOT NULL, run_id TEXT NOT NULL, related_documents TEXT NOT NULL DEFAULT '',
   CHECK (valid_from >= available_at),
-  UNIQUE (risk_type, cik, source_document_id, detector_version, rule_version));
+  UNIQUE (run_id, risk_type, cik, source_document_id, valid_from, detector_version, rule_version));
 CREATE TABLE IF NOT EXISTS {SCHEMA}.risk_coverage (
   family TEXT NOT NULL, scope TEXT NOT NULL, status TEXT NOT NULL, covered_from DATE, covered_to DATE, why TEXT,
   run_id TEXT NOT NULL, computed_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (family, scope, run_id));
 CREATE TABLE IF NOT EXISTS {SCHEMA}.reconstruction_progress (
   run_id TEXT NOT NULL, family TEXT NOT NULL, done_cik TEXT NOT NULL, done_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (run_id, family, done_cik));
+CREATE TABLE IF NOT EXISTS {SCHEMA}.reconstruction_runs (
+  run_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, source_digest TEXT NOT NULL, config JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL, source_verified_at TIMESTAMPTZ);
 """
+
+
+class RunInputChanged(RuntimeError):
+    """A run id was resumed with a different source file or detector / rule configuration."""
+
+
+class SourceIncomplete(RuntimeError):
+    """The export is not verifiably complete (no trailer, missing / duplicate issuers, unfinished phrase scans)."""
 
 
 class RiskHistoryStore:
@@ -264,24 +287,47 @@ class RiskHistoryStore:
                                  {"r": run_id, "f": family}).scalars())
 
     def write(self, run_id: str, family: str, cik: str, labels: list[RiskLabel]) -> int:
-        """Idempotent per (label key); the issuer is checkpointed in the same transaction (restartable)."""
+        """Run-scoped and idempotent per (run, label key): every run holds its complete, immutable label set (a later
+        run with a longer source history - e.g. a new report that ends an earlier label's validity - writes its own
+        rows and never changes or hides another run's). The issuer is checkpointed in the same transaction."""
         now = datetime.now(timezone.utc)
         n = 0
         with self.engine.begin() as c:
             for x in labels:
                 n += c.execute(text(f"""INSERT INTO {SCHEMA}.risk_labels (risk_type, cik, security_id, severity, value,
                     source_document_id, source_url, source_kind, accepted_at, available_at, valid_from, valid_to, detector,
-                    detector_version, rule_version, confidence, reconstructed_at, run_id)
-                    VALUES (:rt, :cik, :sid, :sev, :val, :doc, :url, :kind, :acc, :av, :vf, :vt, :det, :dv, :rv, :conf, :now, :run)
-                    ON CONFLICT (risk_type, cik, source_document_id, detector_version, rule_version) DO NOTHING"""),
+                    detector_version, rule_version, confidence, reconstructed_at, run_id, related_documents)
+                    VALUES (:rt, :cik, :sid, :sev, :val, :doc, :url, :kind, :acc, :av, :vf, :vt, :det, :dv, :rv, :conf, :now,
+                            :run, :rel)
+                    ON CONFLICT (run_id, risk_type, cik, source_document_id, valid_from, detector_version, rule_version)
+                    DO NOTHING"""),
                     {"rt": x.risk_type, "cik": x.cik, "sid": x.security_id, "sev": x.severity, "val": x.value,
                      "doc": x.source_document_id, "url": x.source_url, "kind": x.source_kind, "acc": x.accepted_at,
                      "av": x.available_at, "vf": x.valid_from, "vt": x.valid_to, "det": x.detector,
-                     "dv": x.detector_version, "rv": x.rule_version, "conf": x.confidence, "now": now, "run": run_id}).rowcount
+                     "dv": x.detector_version, "rv": x.rule_version, "conf": x.confidence, "now": now, "run": run_id,
+                     "rel": ",".join(x.related_documents)}).rowcount
             c.execute(text(f"""INSERT INTO {SCHEMA}.reconstruction_progress (run_id, family, done_cik, done_at)
                                VALUES (:r, :f, :c, :now) ON CONFLICT DO NOTHING"""),
                       {"r": run_id, "f": family, "c": cik, "now": now})
         return n
+
+    def begin_run(self, run_id: str, fingerprint: str, source_digest: str, config: dict) -> None:
+        """Pins the run's immutable inputs: a restart must present the SAME source and configuration, otherwise its
+        labels (written from the old inputs) and the new coverage would describe different data."""
+        with self.engine.begin() as c:
+            c.execute(text(f"""INSERT INTO {SCHEMA}.reconstruction_runs (run_id, fingerprint, source_digest, config, created_at)
+                               VALUES (:r, :f, :d, CAST(:c AS jsonb), :now) ON CONFLICT (run_id) DO NOTHING"""),
+                      {"r": run_id, "f": fingerprint, "d": source_digest, "c": json.dumps(config, sort_keys=True),
+                       "now": datetime.now(timezone.utc)})
+            have = c.execute(text(f"SELECT fingerprint FROM {SCHEMA}.reconstruction_runs WHERE run_id = :r"),
+                             {"r": run_id}).scalar()
+        if have != fingerprint:
+            raise RunInputChanged(f"run {run_id} was started with other inputs ({have} != {fingerprint}); use a new run id")
+
+    def mark_verified(self, run_id: str) -> None:
+        with self.engine.begin() as c:
+            c.execute(text(f"UPDATE {SCHEMA}.reconstruction_runs SET source_verified_at = :now WHERE run_id = :r"),
+                      {"r": run_id, "now": datetime.now(timezone.utc)})
 
     def set_coverage(self, run_id: str, scope: str, cov: Coverage) -> None:
         now = datetime.now(timezone.utc)
@@ -300,13 +346,15 @@ class RiskHistoryStore:
             rows = c.execute(text(f"""SELECT * FROM {SCHEMA}.risk_labels WHERE cik = ANY(:c) AND available_at <= :u
                                         AND (CAST(:r AS text) IS NULL OR run_id = CAST(:r AS text)) ORDER BY available_at, id"""),
                              {"c": ciks, "u": until, "r": run_id}).mappings().all()
-            covs = c.execute(text(f"""SELECT family, status, covered_from, covered_to, why FROM {SCHEMA}.risk_coverage
-                                        WHERE scope = :s AND (CAST(:r AS text) IS NULL OR run_id = CAST(:r AS text)) ORDER BY computed_at"""),
+            covs = c.execute(text(f"""SELECT v.family, v.status, v.covered_from, v.covered_to, v.why
+                                        FROM {SCHEMA}.risk_coverage v JOIN {SCHEMA}.reconstruction_runs u USING (run_id)
+                                        WHERE v.scope = :s AND u.source_verified_at IS NOT NULL
+                                          AND (CAST(:r AS text) IS NULL OR v.run_id = CAST(:r AS text)) ORDER BY v.computed_at"""),
                              {"s": scope_key(ciks), "r": run_id}).mappings().all()
         labels = [RiskLabel(r["risk_type"], r["cik"], r["severity"], r["source_document_id"], r["source_url"],
                             r["source_kind"], r["accepted_at"], r["available_at"], r["valid_from"], r["valid_to"],
                             r["detector"], r["detector_version"], r["rule_version"], r["confidence"], r["value"],
-                            r["security_id"]) for r in rows]
+                            r["security_id"], tuple(d for d in r["related_documents"].split(",") if d)) for r in rows]
         cov = Coverage({r["family"]: {"status": r["status"], "from": r["covered_from"], "to": r["covered_to"],
                                       "why": r["why"]} for r in covs})
         return labels, cov
@@ -330,73 +378,207 @@ def tenk_full_from(by_year: dict[int, int]) -> date | None:
     return None
 
 
-def compute_coverage(src: dict, ciks: list[str], start: date, end: date) -> Coverage:
-    """Data-driven per-family coverage for this issuer set and window (nothing assumed)."""
+def dilution_inventory(facts: list[tuple]) -> dict:
+    """What the dilution detector can decide for ONE issuer: the first filing date at which a 300-430-day comparison
+    pair exists, the largest gap between consecutive filings after it (a gap > 430 days leaves the rule undecidable)
+    and the last filing (nothing is known beyond last + 430 days)."""
+    filed = sorted({f[2] for f in facts})
+    first = None
+    for d in filed:
+        ends = sorted({f[1] for f in facts if f[2] <= d})
+        if ends and any(300 <= (ends[-1] - e).days <= 430 for e in ends):
+            first = d
+            break
+    after = [d for d in filed if first and d >= first]
+    gap = max(((b - a).days for a, b in zip(after, after[1:])), default=0)
+    return {"from": first, "max_gap_days": gap, "last": filed[-1] if filed else None}
+
+
+def _bounded(lo, hi, horizon):
+    return lo, (min(hi, horizon) if hi else horizon)
+
+
+def compute_coverage(meta: dict, inv: dict[str, dict], ciks: list[str]) -> Coverage:
+    """Issuer-specific, bounded coverage from the verified source inventories and detector prerequisites. The scope is
+    COMPLETE only when EVERY issuer is; nothing extends past the export horizon (meta["end"])."""
+    horizon = date.fromisoformat(meta["end"])
     fam: dict[str, dict] = {}
-    efts = src.get("efts_scan") or {}
+    efts = meta.get("efts_scan") or {}
     scanned = bool(efts.get("done")) and not efts.get("truncated")
-    efts_lo = date.fromisoformat(efts["from"]) + timedelta(days=TEXT_LOOKBACK_DAYS) if scanned else None
-    efts_hi = date.fromisoformat(efts["to"]) if scanned else None
-    gc_from = tenk_full_from({int(k): v for k, v in (src.get("tenk_by_year") or {}).items()})
-    if scanned:
-        fam["GOING_CONCERN"] = {"status": COMPLETE, "from": efts_lo, "to": efts_hi,
-                                "why": "EDGAR full-text scan of the production phrases on 10-K and 10-Q (+ 10-K profiles)"}
-    elif gc_from:
-        fam["GOING_CONCERN"] = {"status": PARTIAL, "from": gc_from, "to": None,
-                                "why": "10-K profiles only (production also reads 10-Q phrase hits)"}
-    fam["FINANCING_TEXT"] = ({"status": COMPLETE, "from": efts_lo, "to": efts_hi, "why": "EDGAR full-text scan"}
-                             if scanned else {"status": UNAVAILABLE, "why": "no full-text scan for this scope"})
-    acts = src.get("actions_from")
-    fam["FINANCING_ACTIONS"] = ({"status": COMPLETE, "from": date.fromisoformat(acts) + timedelta(days=730), "to": None,
-                                 "why": "SEC submissions filing dates (shelf, 424B, 3.02, 3.01)"}
-                                if acts else {"status": UNAVAILABLE, "why": "no corporate-action history"})
-    shares = src.get("shares") or {}
-    have = [c for c in ciks if shares.get(c)]
-    first = [min(date.fromisoformat(str(f[2])[:10]) for f in shares[c]) for c in have]
-    fam["DILUTION"] = ({"status": COMPLETE if len(have) == len(ciks) else PARTIAL,
-                        "from": max(first) + timedelta(days=430) if first else None, "to": None,
-                        "why": f"cover-page share facts for {len(have)}/{len(ciks)} issuers"}
-                       if have else {"status": UNAVAILABLE, "why": "no share facts"})
+    e_lo = date.fromisoformat(efts["from"]) + timedelta(days=TEXT_LOOKBACK_DAYS) if scanned else None
+    e_hi = date.fromisoformat(efts["to"]) if scanned else None
+    outdated = sorted(c for c in ciks if (inv.get(c) or {}).get("outdated_profiles"))
+    gc_from = tenk_full_from({int(k): v for k, v in (meta.get("tenk_by_year") or {}).items()})
+    if scanned and not outdated:
+        lo, hi = _bounded(e_lo, e_hi, horizon)
+        fam["GOING_CONCERN"] = {"status": COMPLETE, "from": lo, "to": hi,
+                                "why": "full-text scan of the production phrases + current-classifier 10-K profiles"}
+    elif scanned or gc_from:
+        fam["GOING_CONCERN"] = {"status": PARTIAL, "from": e_lo or gc_from, "to": min(e_hi, horizon) if e_hi else horizon,
+                                "why": (f"10-K profiles with an older classifier for {outdated}" if outdated
+                                        else "no full-text scan: 10-K profiles only")}
+    fam["FINANCING_TEXT"] = ({"status": COMPLETE, "from": e_lo, "to": min(e_hi, horizon), "why": "full-text scan"}
+                             if scanned else {"status": UNAVAILABLE, "why": "no untruncated full-text scan for this scope"})
+    act = [inv.get(c, {}).get("actions") or {} for c in ciks]
+    if all(a.get("earliest") and a.get("fetched") for a in act) and act:
+        lo = max(date.fromisoformat(a["earliest"]) for a in act) + timedelta(days=730)
+        hi = min(date.fromisoformat(a["fetched"]) for a in act)
+        fam["FINANCING_ACTIONS"] = {"status": COMPLETE, "from": lo, "to": min(hi, horizon),
+                                    "why": "each issuer's SEC submissions (recent list) from its earliest action + 730d"}
+    else:
+        miss = [c for c, a in zip(ciks, act) if not (a.get("earliest") and a.get("fetched"))]
+        fam["FINANCING_ACTIONS"] = {"status": PARTIAL if len(miss) < len(ciks) else UNAVAILABLE,
+                                    "why": f"no submissions inventory for {miss}"}
+    dil = [inv.get(c, {}).get("dilution") or {} for c in ciks]
+    ok = [d for d in dil if d.get("from")]
+    if dil and len(ok) == len(dil) and all(d["max_gap_days"] <= 430 for d in ok):
+        lo = max(date.fromisoformat(str(d["from"])) for d in ok)
+        hi = min(date.fromisoformat(str(d["last"])) + timedelta(days=430) for d in ok)
+        fam["DILUTION"] = {"status": COMPLETE, "from": lo, "to": min(hi, horizon), "why": "comparison pair for every issuer"}
+    else:
+        bad = [c for c, d in zip(ciks, dil) if not d.get("from") or d.get("max_gap_days", 0) > 430]
+        fam["DILUTION"] = {"status": PARTIAL if ok else UNAVAILABLE,
+                           "why": f"no 300-430-day comparison pair or a filing gap > 430 days for {bad}"}
     fam["CASH_RUNWAY"] = {"status": UNAVAILABLE, "why": "no filed-date cash / operating-cash-flow facts in the database"}
-    thesis = src.get("thesis_changes_from")
-    fam["THESIS_INVALIDATION"] = ({"status": PARTIAL, "from": gc_from, "to": None,
+    thesis = meta.get("thesis_changes_from")
+    fam["THESIS_INVALIDATION"] = ({"status": PARTIAL, "from": gc_from, "to": horizon,
                                    "why": f"news thesis_changes only since {thesis}; 10-K going concern before"}
                                   if gc_from else {"status": UNAVAILABLE, "why": "no thesis inputs"})
     return Coverage(fam)
 
 
-def reconstruct(store: RiskHistoryStore, run_id: str, src: dict, ciks: list[str], start: date, end: date) -> dict:
-    """Idempotent, restartable (per-issuer checkpoint), one issuer in memory at a time."""
+TRAILER = "_trailer"
+
+
+def read_source(path):
+    """Issuer-partitioned JSON lines (scripts/risk_source_export.py): the first line is the metadata, every further
+    line ONE issuer, the last line the exporter's completion trailer - read lazily, so memory holds one issuer."""
+    with open(path) as fh:
+        meta = json.loads(fh.readline())
+        yield "meta", meta
+        for line in fh:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            yield ("trailer", rec[TRAILER]) if TRAILER in rec else ("issuer", _issuer(rec))
+
+
+def _dt(v):
+    return v if isinstance(v, datetime) or v is None else datetime.fromisoformat(str(v))
+
+
+def _d(v):
+    return v.date() if isinstance(v, datetime) else v if isinstance(v, date) else date.fromisoformat(str(v)[:10])
+
+
+def _issuer(rec: dict) -> dict:
+    for f in rec.get("tenk", []):
+        f["accepted_at"] = _dt(f.get("accepted_at")) if f.get("accepted_at") else None
+        f["filing_date"] = _d(f["filing_date"])
+    rec["shares"] = [(f[0], _d(f[1]), _d(f[2]), f[3], int(f[4])) for f in rec.get("shares", [])]
+    return rec
+
+
+def issuer_inventory(rec: dict, start: date, end: date) -> dict:
+    from app.tenk.diff import CLASSIFIER_VERSION
+    lo = start - timedelta(days=400)
+    outdated = [f["accession"] for f in rec.get("tenk", []) if lo <= f["filing_date"] <= end
+                and ((f.get("profile") or {}).get("_meta") or {}).get("v", 1) != CLASSIFIER_VERSION]
+    d = dilution_inventory(rec.get("shares", []))
+    return {"outdated_profiles": outdated, "actions": rec.get("actions") or {},
+            "dilution": {k: (str(v) if isinstance(v, date) else v) for k, v in d.items()}}
+
+
+def source_digest(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def run_config() -> dict:
+    """Everything besides the source that decides a label: detector + rule versions."""
+    return {"gc": [GC_DETECTOR, GC_DETECTOR_VERSION, _rule_version_gc()],
+            "text": [TEXT_DETECTOR, TEXT_DETECTOR_VERSION, _rule_version_text(), TEXT_LOOKBACK_DAYS],
+            "dilution": [DILUTION_DETECTOR, DILUTION_DETECTOR_VERSION, "metrics.share_growth_yoy>=0.2"]}
+
+
+def verify_export(meta: dict, trailer: dict | None, seen: list[str]) -> list[str]:
+    """Problems that make the export unverifiable (empty = complete): every declared issuer exactly once, the
+    trailer written after the last issuer, and every declared phrase scanned over every issuer batch."""
+    bad = []
+    declared = sorted(meta.get("ciks") or [])
+    if trailer is None:
+        bad.append("no completion trailer: the export stopped early")
+    dup = sorted({c for c in seen if seen.count(c) > 1})
+    if dup:
+        bad.append(f"duplicate issuer records {dup}")
+    miss = sorted(set(declared) - set(seen))
+    if miss:
+        bad.append(f"missing issuers {miss[:10]}{'...' if len(miss) > 10 else ''} ({len(miss)})")
+    extra = sorted(set(seen) - set(declared))
+    if extra:
+        bad.append(f"undeclared issuers {extra[:10]}")
+    if trailer is not None:
+        if trailer.get("issuers") != len(declared) or trailer.get("ciks_digest") != scope_key(declared):
+            bad.append("trailer does not match the declared issuer list")
+        efts = meta.get("efts_scan")
+        if efts:
+            done = trailer.get("efts_batches") or {}
+            short = [p for p in efts.get("phrases", []) if done.get(p) != trailer.get("batches")]
+            if short:
+                bad.append(f"phrase scans not finished for every batch: {short}")
+    return bad
+
+
+def reconstruct(store: RiskHistoryStore, run_id: str, path) -> dict:
+    """Streams the issuer-partitioned source: one issuer in memory, labels + checkpoint in one transaction per
+    (issuer, family); idempotent and restartable under the run's pinned input fingerprint. Coverage is computed
+    from the per-issuer inventories and published only once the export is verified complete."""
     store.create()
-    out = {"labels_written": 0, "skipped_done": 0, "by_family": {}}
-    fams = (("GOING_CONCERN_10K", lambda c: detect_going_concern_10k((src.get("tenk") or {}).get(c, []))),
-            ("TEXT", lambda c: detect_text_hits([h for h in (src.get("efts_hits") or []) if h["cik"] == c])),
-            ("DILUTION", lambda c: detect_dilution(c, [tuple(f) for f in (src.get("shares") or {}).get(c, [])])))
-    for fam, detect in fams:
-        done = store.done(run_id, fam)
-        for cik in sorted(ciks):
-            if cik in done:
+    digest, conf = source_digest(path), run_config()
+    it = read_source(path)
+    _, meta = next(it)
+    window = {"start": meta["start"], "end": meta["end"]}
+    fp = hashlib.sha256(json.dumps({"source": digest, "config": conf, "window": window}, sort_keys=True).encode()).hexdigest()
+    store.begin_run(run_id, fp, digest, {**conf, **window})
+    start, end = date.fromisoformat(meta["start"]), date.fromisoformat(meta["end"])
+    out = {"labels_written": 0, "skipped_done": 0, "by_family": {}, "issuers": 0, "fingerprint": fp[:16]}
+    inv: dict[str, dict] = {}
+    seen: list[str] = []
+    trailer = None
+    done = {f: store.done(run_id, f) for f in ("GOING_CONCERN_10K", "TEXT", "DILUTION")}
+    for kind, rec in it:
+        if kind == "trailer":
+            trailer = rec
+            continue
+        if trailer is not None:
+            raise SourceIncomplete("an issuer record after the completion trailer")
+        cik = rec["cik"]
+        seen.append(cik)
+        out["issuers"] += 1
+        if rec.get("efts_truncated") and meta.get("efts_scan"):
+            meta["efts_scan"]["truncated"] = True  # an incomplete query leaves its scope's text coverage incomplete
+        inv[cik] = issuer_inventory(rec, start, end)
+        for fam, detect in (("GOING_CONCERN_10K", lambda r: detect_going_concern_10k(r.get("tenk", []))),
+                            ("TEXT", lambda r: detect_text_hits(r.get("efts_hits", []))),
+                            ("DILUTION", lambda r: detect_dilution(r["cik"], r.get("shares", [])))):
+            if cik in done[fam]:
                 out["skipped_done"] += 1
                 continue
-            labels = detect(cik)
-            n = store.write(run_id, fam, cik, labels)
-            out["labels_written"] += n
+            labels = detect(rec)
+            out["labels_written"] += store.write(run_id, fam, cik, labels)
             out["by_family"][fam] = out["by_family"].get(fam, 0) + len(labels)
-    cov = compute_coverage(src, ciks, start, end)
+        del rec
+    problems = verify_export(meta, trailer, seen)
+    if problems:
+        # the labels written are correct for the issuers they cover, but no coverage is claimed for the scope
+        raise SourceIncomplete("; ".join(problems))
+    store.mark_verified(run_id)
+    ciks = sorted(meta["ciks"])
+    cov = compute_coverage(meta, inv, ciks)
     store.set_coverage(run_id, scope_key(ciks), cov)
     out["coverage"] = {k: v["status"] for k, v in cov.families.items()}
     out["policy"] = coverage_policy(cov, start, end)["flag"]
     return out
-
-
-def load_risk_source(path) -> dict:
-    """JSON from scripts/risk_source_export.py with dates / timestamps restored."""
-    from pathlib import Path
-    raw = json.loads(Path(path).read_text())
-    for cik, fs in (raw.get("tenk") or {}).items():
-        for f in fs:
-            f["accepted_at"] = datetime.fromisoformat(f["accepted_at"]) if f.get("accepted_at") else None
-            f["filing_date"] = date.fromisoformat(str(f["filing_date"])[:10])
-    raw["shares"] = {c: [[f[0], date.fromisoformat(str(f[1])[:10]), date.fromisoformat(str(f[2])[:10]), f[3], int(f[4])]
-                         for f in fs] for c, fs in (raw.get("shares") or {}).items()}
-    return raw

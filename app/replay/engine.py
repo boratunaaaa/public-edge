@@ -133,12 +133,17 @@ class ReplayRun:
 
     def _refresh(self, today: date, cap: date | None, new_ids: list[int]) -> None:
         from app.entities.registry import resolver
+        from app.marketdata.calendar import is_trading_day
+        price_cap = cap
+        if price_cap is None:  # first step of a run: the last session before today is known history
+            price_cap = today - timedelta(days=1)
+            while not is_trading_day(price_cap):
+                price_cap -= timedelta(days=1)
         with self.store.engine.begin() as c:
             self.stager.stage_reference(c, today)
+            # today's point-in-time capitalisation for every issuer seen so far, BEFORE the financing assessment
+            self.stager.build_universe(c, today, self.stager.issuers, price_cap)
             self.stager.stage_risks(c, self.clock.now(), today)
-            ciks = set(c.execute(select(events.c.issuer_cik).where(events.c.id.in_(new_ids))).scalars()) if new_ids else set()
-            if ciks and cap is not None:
-                self.stager.build_universe(c, today, ciks, cap)
             resolver.load(c, force=True)  # the point-in-time registry of this moment, not today's ticker file
 
     def _signals(self, today: date, cap: date | None) -> None:
