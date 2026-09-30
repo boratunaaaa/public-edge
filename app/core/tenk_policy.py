@@ -18,9 +18,12 @@ committed before the decision's read is therefore always seen; one being written
 committed (it then happened before the 10-K was known, and the next stage re-checks). A transaction holding several
 issuer locks takes them all up front in CIK order (lock_issuers): no deadlock cycle.
 
-Supersession: a live decision uses today's state (superseded changes are ignored). A retry at an earlier decision
-moment cannot know that moment's supersession state (no timestamp), so it counts superseded changes too - the
-conservative side of a veto."""
+Supersession: a live decision uses today's state (superseded changes are ignored). A decision at an earlier moment -
+a score retry, a catch-up BUY fill on an earlier session - cannot know that moment's supersession state (no timestamp),
+so it counts superseded changes too - the conservative side of a veto.
+
+Global lock order: proposal rows -> paper order rows (id order) -> issuer 10-K locks (CIK order) -> filing / event
+rows. decide, expire, fill_orders and every 10-K writer follow it."""
 from __future__ import annotations
 
 from dataclasses import dataclass

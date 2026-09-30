@@ -391,3 +391,57 @@ def test_the_expiry_sweep_and_an_approval_never_deadlock(engine):
     assert done.is_set()
     with engine.connect() as c:
         assert _p(c, pid)["approval_status"] == "EXPIRED"
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+@pytest.mark.parametrize("run_day, cancelled", [(date(2024, 3, 8), True),  # catch-up: D0 is an earlier session
+                                                (D0, False)])  # D0 is today's session: today's state
+def test_a_catch_up_fill_counts_a_10k_superseded_after_that_session(engine, run_day, cancelled):
+    from app.paper.ledger import fill_orders
+    with engine.begin() as c:
+        _store(c, "ZBIO", _series(date(2024, 1, 2), 60))
+        oid = _buy(c, _proposal(c))
+        tid = _tenk(c, OPEN0 - timedelta(days=2))  # valid at D0's open ...
+        c.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": tid})  # ... superseded since
+        out = fill_orders(c, run_day)
+        o = _row(c, oid)
+    assert (o["status"] == "CANCELLED") is cancelled and (out["filled"] == 1) is (not cancelled)
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_the_expiry_sweep_takes_order_rows_before_event_rows(engine):
+    """A fill run holds its order rows and next needs the issuer lock; a 10-K writer holds that and next needs the
+    event row. The sweep must wait on the order row WITHOUT holding the event row, or the three would deadlock."""
+    import threading
+    import time as _t
+
+    from app.db.models import paper_orders
+    from app.paper.proposals import expire
+    with engine.begin() as c:
+        pid = _proposal(c)
+        c.execute(text("UPDATE proposed_trades SET approval_status = 'APPROVED' WHERE id = :i"), {"i": pid})
+        oid = _buy(c, pid)
+        src = _p(c, pid)["event_id"]
+        c.execute(text("UPDATE events SET needs_review = true WHERE id = :i"), {"i": src})  # the sweep will act on it
+    fill = engine.connect()
+    tx = fill.begin()
+    done = threading.Event()
+    try:
+        fill.execute(select(paper_orders.c.id).where(paper_orders.c.id == oid).with_for_update()).all()
+        t = threading.Thread(target=lambda: (expire(engine, now=CREATED + timedelta(hours=1)), done.set()))
+        t.start()
+        _t.sleep(1.0)
+        assert not done.is_set()
+        with engine.connect() as writer:  # the writer's event update must not wait on the sweep
+            with writer.begin():
+                writer.execute(text("SET LOCAL lock_timeout = '3s'"))
+                writer.execute(text("UPDATE events SET superseded = superseded WHERE id = :i"), {"i": src})
+    finally:
+        tx.commit()
+        fill.close()
+    t.join(10)
+    assert done.is_set()
+    with engine.connect() as c:
+        assert _row(c, oid)["status"] == "CANCELLED"

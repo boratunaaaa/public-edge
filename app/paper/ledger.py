@@ -300,7 +300,10 @@ def fill_orders(conn: Connection, today: date) -> dict:
             # fill commits, so no 10-K write can interleave. SELL / exit orders never reach this check.
             from app.core.tenk_policy import tenk_risk
             from app.marketdata.calendar import NY
-            tk = tenk_risk(conn, info.get("cik"), datetime.combine(b.date, time(9, 30), NY), lock=True)
+            # a catch-up fill (an earlier session) cannot know that session's supersession state: like a retry, it
+            # counts superseded changes too (the conservative side); today's session uses today's state
+            tk = tenk_risk(conn, info.get("cik"), datetime.combine(b.date, time(9, 30), NY), lock=True,
+                           include_superseded=b.date < today)
             if tk.vetoes:
                 conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING"))
                              .values(status="CANCELLED", note=tk.note))

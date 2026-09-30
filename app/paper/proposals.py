@@ -336,6 +336,10 @@ def expire(engine: Engine, now: datetime | None = None) -> int:
         # sweep can never hold one each and wait for the other
         conn.execute(select(proposed_trades.c.id).where(proposed_trades.c.approval_status == "PENDING")
                      .order_by(proposed_trades.c.id).with_for_update()).all()
+        # then the pending BUY order rows (id order, as fill_orders locks them), still before any event row: the
+        # global order is proposal -> order -> issuer 10-K lock -> event, so no cycle with a fill run or a 10-K writer
+        conn.execute(select(paper_orders.c.id).where(and_(paper_orders.c.status == "PENDING", paper_orders.c.side == "BUY"))
+                     .order_by(paper_orders.c.id).with_for_update()).all()
         n = conn.execute(proposed_trades.update().where(and_(
             proposed_trades.c.approval_status == "PENDING", proposed_trades.c.expires_at <= now))
             .values(approval_status="EXPIRED", decided_at=now, decided_by="system:expiry")).rowcount
