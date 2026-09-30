@@ -16,6 +16,7 @@ from app.core import clock
 from app.db.models import (companies, corporate_actions, discovery_risks, events, security_master, security_symbols,
                            tickers, universe_snapshots)
 from app.entities.names import normalize_company
+from app.marketdata.calendar import NY
 from app.marketdata.provider import Bar, MarketDataProvider, shares_as_of
 from app.replay.errors import ReplayLeakage
 from app.replay.source import BENCHMARK_SERIES, SourceData
@@ -294,17 +295,19 @@ class Stager:
         self.writes += w
         return w
 
-    def build_universe(self, conn: Connection, today: date, ciks: set[str], price_cap: date) -> int:
+    def build_universe(self, conn: Connection, today: date, ciks: set[str], price_cap: date, now: datetime) -> int:
         """Point-in-time universe_snapshots row per issuer (what the production gate reads): production formulas -
-        shares_as_of (facts FILED on/before today), mcap_bucket, 30-day mean $ volume for MICRO / EARLY_SMALL like
-        build_universe (the gate measures every other class itself from prior sessions) - on the issuer's own price
-        series (PriceIndex) up to price_cap."""
+        shares_as_of over the share facts VISIBLE at `now` (share_fact_visible: exact acceptance time, else the day
+        after the filing date - a PRE_OPEN step never sees a filing of that same day), mcap_bucket, 30-day mean $
+        volume for MICRO / EARLY_SMALL like build_universe (the gate measures every other class itself from prior
+        sessions) - on the issuer's own price series (PriceIndex) up to price_cap. Share count, market cap, bucket,
+        the financing assessment and position sizing all read this row."""
         from app.news.classify import mcap_bucket
         n = 0
         reg = dict(conn.execute(text("SELECT c.cik, t.symbol FROM tickers t JOIN companies c ON c.id = t.company_id")).all())
         for cik in sorted(c for c in ciks if c):
             sym = reg.get(cik)
-            facts = self.src.share_facts.get(cik) or []
+            facts = [f for f in (self.src.share_facts.get(cik) or []) if share_fact_visible(f, self.src.acceptance, now)]
             got = self.index.bars(sym, price_cap - timedelta(days=60), price_cap, today) if sym else None
             bars = [b for b in (got or []) if b.close]
             sh = shares_as_of(facts, today)
@@ -321,6 +324,16 @@ class Stager:
                          .on_conflict_do_update(index_elements=["as_of", "cik"], set_=vals))
             n += 1
         return n
+
+
+def share_fact_visible(f, acceptance: dict, now: datetime) -> bool:
+    """A cover-page share fact is known from its filing's exact acceptance time when the snapshot has it; a fact
+    known only by its filing DATE counts from the next day (acceptance could be as late as 22:00 ET, after every step
+    of that day), never on the filing day itself."""
+    at = acceptance.get(f.accession)
+    if at is not None:
+        return at <= now
+    return f.filed < now.astimezone(NY).date()
 
 
 ACTION_FLAGS = {"SHELF_S3": ("SHELF_REGISTRATION", 730, 1), "PROSPECTUS_424B_3PLUS": ("PROSPECTUS_424B", 365, 3),

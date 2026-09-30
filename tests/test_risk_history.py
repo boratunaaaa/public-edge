@@ -121,12 +121,13 @@ def test_a_staged_risk_row_without_provenance_fails_the_replay():
 def _meta(**kw):
     m = {"ciks": [CIK], "start": "2021-03-01", "end": "2021-06-30", "tenk_by_year": {"2020": 1900, "2021": 5400, "2022": 6300},
          "thesis_changes_from": "2026-09-25",
-         "efts_scan": {"done": True, "from": "2020-03-01", "to": "2021-06-30", "truncated": False}}
+         "efts_scan": {"done": True, "from": "2020-03-01", "to": "2021-06-30", "truncated": False},
+         "tenk_jobs": {"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {}}}
     m.update(kw)
     return m
 
 
-def _issuer(cik=CIK, tenk=None, shares=None, hits=None, actions=None):
+def _issuer(cik=CIK, tenk=None, shares=None, hits=None, actions=None, tenk_other=None, delisting_date=None):
     shares = shares if shares is not None else [["s0", "2019-06-30", "2019-08-10", "10-Q", 9_000_000],
                                                 ["s1", "2019-12-31", "2020-02-20", "10-K", 10_000_000],
                                                 ["s1b", "2020-06-30", "2020-08-10", "10-Q", 12_000_000],
@@ -135,6 +136,7 @@ def _issuer(cik=CIK, tenk=None, shares=None, hits=None, actions=None):
                                            "form": "8-K", "file_date": f"2021-0{i}-10", "filename": "d.htm"} for i in (1, 2, 3)]
     return {"cik": cik, "tenk": tenk if tenk is not None else [_tenk("a-2020", datetime(2020, 3, 10, 20, tzinfo=UTC), 0),
                                                                _tenk("a-2021", GC_2021, 3)],
+            "tenk_other": tenk_other if tenk_other is not None else [], "delisting_date": delisting_date,
             "shares": shares, "efts_hits": hits,
             "actions": actions if actions is not None else {"earliest": "2005-01-10", "fetched": "2026-09-20"}}
 
@@ -506,3 +508,149 @@ def test_a_run_id_cannot_resume_with_changed_inputs(tmp_path, monkeypatch):
                                      [_issuer(), _issuer(cik="0000000202")]))  # another window
     res = reconstruct(st, "fp", a)  # the original input resumes
     assert res["skipped_done"] == 3 and res["coverage"]
+
+
+# ------------------------------------------------------------------ GOING_CONCERN coverage: every 10-K, not only the profiled ones
+
+def _gc(meta=None, **issuer_kw):
+    from app.replay.risk_history import _issuer as parse
+    from app.replay.risk_history import compute_coverage, issuer_inventory
+    s, e = date(2021, 3, 1), date(2021, 6, 30)
+    m = meta if meta is not None else _meta()
+    rec = parse(_issuer(**issuer_kw))
+    return compute_coverage(m, {CIK: issuer_inventory(rec, s, e, m.get("tenk_jobs"))}, [CIK])
+
+
+def _other(acc, d, status):
+    return {"accession": acc, "cik": CIK, "form": "10-K", "filing_date": d, "status": status}
+
+
+@pytest.mark.parametrize("kw, complete", [
+    ({}, True),
+    ({"tenk_other": [_other("b-2021", "2021-03-20", "no_sections")]}, False),  # a report whose GC state is unknown
+    ({"tenk_other": [_other("b-2021", "2021-03-20", "not_found")]}, False),
+    ({"tenk_other": [_other("b-2021", "2021-03-20", "fetch_failed")]}, False),
+    ({"tenk_other": [_other("a-2021", "2021-03-15", "superseded")]}, True),  # superseded, re-created as ok
+    ({"tenk_other": [_other("c-2021", "2021-03-15", "superseded")]}, False),  # superseded, never re-created
+    ({"tenk_other": [_other("old", "2015-03-01", "no_sections")]}, True),  # outside the window's reach
+    ({"tenk": [_tenk("a-2019", datetime(2019, 3, 10, 20, tzinfo=UTC), 0), _tenk("a-2021", GC_2021, 3)]}, False),  # 2020 missing
+    ({"tenk": [_tenk("a-2019", datetime(2019, 3, 10, 20, tzinfo=UTC), 0)], "delisting_date": None}, False),  # none since
+])
+def test_going_concern_is_complete_only_when_every_10k_was_profiled(kw, complete):
+    from app.replay.risk_history import coverage_policy
+    cov = _gc(**kw)
+    assert (cov.status("GOING_CONCERN") == "COMPLETE") is complete, cov.families["GOING_CONCERN"]
+    if not complete:
+        assert cov.families["GOING_CONCERN"]["missing_issuers"] == [CIK]
+        assert "GOING_CONCERN" in coverage_policy(cov, date(2021, 3, 1), date(2021, 6, 30))["not_complete"]
+
+
+@pytest.mark.parametrize("jobs, complete", [
+    ({"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {}}, True),
+    ({"backfill_done": [], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {}}, False),  # not processed yet
+    ({"backfill_done": [CIK], "backfill_gave_up": [CIK], "live_gave_up": [], "live_queue": {}}, False),
+    ({"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [CIK], "live_queue": {}}, False),
+    ({"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {CIK: "2021-05-01"}}, False),
+    ({"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {CIK: "2026-09-29"}}, True),
+    (None, False),  # an export without the ingestion state proves nothing
+])
+def test_unprocessed_or_abandoned_10k_ingestion_is_never_complete(jobs, complete):
+    m = _meta(tenk_jobs=jobs)
+    if jobs is None:
+        del m["tenk_jobs"]
+    assert (_gc(meta=m).status("GOING_CONCERN") == "COMPLETE") is complete
+
+
+def test_an_export_without_the_failed_10k_inventory_is_not_complete():
+    from app.replay.risk_history import _issuer as parse
+    from app.replay.risk_history import compute_coverage, issuer_inventory
+    rec = _issuer()
+    del rec["tenk_other"]  # an export from before this inventory existed
+    inv = issuer_inventory(parse(rec), date(2021, 3, 1), date(2021, 6, 30), _meta()["tenk_jobs"])
+    cov = compute_coverage(_meta(), {CIK: inv}, [CIK])
+    assert cov.status("GOING_CONCERN") == "PARTIAL" and "inventory" in cov.families["GOING_CONCERN"]["why"]
+    assert compute_coverage(_meta(), {}, [CIK]).status("GOING_CONCERN") == "PARTIAL"  # no inventory at all
+
+
+def test_incomplete_going_concern_lists_its_gates_as_not_applied():
+    from app.replay.engine import FAMILY_CONSUMERS
+    from app.replay.risk_history import coverage_policy
+    cov = _gc(tenk_other=[_other("b-2021", "2021-03-20", "no_sections")])
+    pol = coverage_policy(cov, date(2021, 3, 1), date(2021, 6, 30))
+    gates = sorted({g for fam in pol["not_complete"] for g in FAMILY_CONSUMERS.get(fam, ())})
+    assert {"gate:SEVERE_FINANCING_RISK", "sizing:HIGH_FINANCING_RISK cap", "exit:D_THESIS thesis invalidation"} <= set(gates)
+    assert pol["flag"] != "RISK_HISTORY_COMPLETE"
+
+
+@db
+def test_the_reconstruction_job_stores_partial_going_concern_for_a_failed_10k(tmp_path):
+    st = _fresh_store()
+    bad = _issuer(tenk_other=[_other("b-2021", "2021-03-20", "no_sections")])
+    reconstruct(st, "run_gc_bad", _write(tmp_path / "bad.jsonl", _meta(), [bad]))
+    reconstruct(st, "run_gc_ok", _write(tmp_path / "ok.jsonl", _meta(), [_issuer()]))
+    _, cov_bad = st.load([CIK], datetime(2023, 1, 1, tzinfo=UTC), "run_gc_bad")
+    _, cov_ok = st.load([CIK], datetime(2023, 1, 1, tzinfo=UTC), "run_gc_ok")
+    assert cov_bad.status("GOING_CONCERN") == "PARTIAL" and "no_sections" in cov_bad.families["GOING_CONCERN"]["why"]
+    assert cov_ok.status("GOING_CONCERN") == "COMPLETE"
+
+
+# ------------------------------------------------------------------ share facts: no same-day filing before it was public
+
+def test_share_fact_visibility_uses_acceptance_else_the_next_day():
+    from app.marketdata.calendar import NY
+    from app.marketdata.provider import ShareFact
+    from app.replay.visibility import share_fact_visible
+    f = ShareFact("q1", date(2021, 3, 31), date(2021, 5, 10), "10-Q", 1)
+    pre_open = datetime(2021, 5, 10, 9, 0, tzinfo=NY)
+    close = datetime(2021, 5, 10, 18, 0, tzinfo=NY)
+    assert not share_fact_visible(f, {}, pre_open) and not share_fact_visible(f, {}, close)  # date only: not that day
+    assert share_fact_visible(f, {}, datetime(2021, 5, 11, 9, 0, tzinfo=NY))
+    early = {"q1": datetime(2021, 5, 10, 7, 30, tzinfo=NY)}  # accepted before the open
+    assert share_fact_visible(f, early, pre_open)
+    late = {"q1": datetime(2021, 5, 10, 16, 45, tzinfo=NY)}  # accepted after the close
+    assert not share_fact_visible(f, late, pre_open) and share_fact_visible(f, late, close)
+
+
+def _same_day_source(acceptance=None):
+    from app.marketdata.provider import ShareFact
+    src = _actions_source(10_000_000)  # ~$230M: sub-billion -> HIGH_FINANCING_RISK -> 1 % cap
+    # a filing ON the decision day (event 1 is public 2021-02-05 16:30 ET) reporting 10x the shares (> $1B)
+    src.share_facts[CIK].append(ShareFact("big", date(2020, 12, 31), date(2021, 2, 5), "10-K", 100_000_000))
+    src.acceptance = acceptance or {}
+    return src
+
+
+@db
+def test_a_same_day_date_only_share_filing_cannot_move_that_days_decision():
+    from tests.test_replay import cfg, q, run
+    _, res = run(cfg("t_sd_date", end=date(2021, 2, 5)), _same_day_source())
+    assert res.status == "COMPLETED", res.leakage
+    assert q("replay_t_sd_date", "SELECT shares FROM universe_snapshots WHERE as_of = '2021-02-05'") == [(10_000_000,)]
+    assert q("replay_t_sd_date", "SELECT risk FROM discovery_risks") == [("HIGH_FINANCING_RISK",)]
+    assert q("replay_t_sd_date", "SELECT max_position_pct FROM proposed_trades") == [(0.01,)]
+
+
+@db
+def test_an_exact_acceptance_time_decides_the_share_facts_visibility():
+    from app.marketdata.calendar import NY
+    from tests.test_replay import cfg, q, run
+    before = {"big": datetime(2021, 2, 5, 10, 0, tzinfo=NY)}  # public in the morning: known at the 18:00 step
+    _, res = run(cfg("t_sd_acc", end=date(2021, 2, 5)), _same_day_source(before))
+    assert res.status == "COMPLETED", res.leakage
+    assert q("replay_t_sd_acc", "SELECT shares FROM universe_snapshots WHERE as_of = '2021-02-05'") == [(100_000_000,)]
+    assert q("replay_t_sd_acc", "SELECT risk FROM discovery_risks") == []  # > $1B: no financing flag
+    late = {"big": datetime(2021, 2, 5, 22, 0, tzinfo=NY)}  # after every step of that day
+    _, res = run(cfg("t_sd_late", end=date(2021, 2, 5)), _same_day_source(late))
+    assert q("replay_t_sd_late", "SELECT shares FROM universe_snapshots WHERE as_of = '2021-02-05'") == [(10_000_000,)]
+
+
+def test_the_snapshot_round_trips_the_acceptance_times(tmp_path):
+    import json
+
+    from app.replay.source import load_snapshot
+    raw = {"events": [], "bars": {}, "share_facts": {CIK: [["big", "2020-12-31", "2021-02-05", "10-K", 5]]},
+           "share_fact_acceptance": {"big": "2021-02-05T15:00:00+00:00"}}
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps(raw))
+    src = load_snapshot(p)
+    assert src.acceptance == {"big": datetime(2021, 2, 5, 15, 0, tzinfo=UTC)}

@@ -33,10 +33,19 @@ def ensure_db_free_http() -> None:
 
 
 def _batch_rows(c, ciks: list[str]) -> dict[str, dict]:
-    recs = {cik: {"cik": cik, "tenk": [], "shares": [], "efts_hits": [], "actions": {}} for cik in ciks}
+    recs = {cik: {"cik": cik, "tenk": [], "tenk_other": [], "shares": [], "efts_hits": [], "actions": {},
+                  "delisting_date": None} for cik in ciks}
     for r in c.execute(text("""SELECT accession, cik, form, accepted_at, filing_date, source_url, profile FROM tenk_filings
                                WHERE cik = ANY(:c) AND status = 'ok' ORDER BY cik, filing_date"""), {"c": ciks}).mappings():
         recs[r["cik"]]["tenk"].append(dict(r))
+    # every other 10-K the ingestion saw (no sections, not found, fetch/extract failure, superseded): the coverage
+    # must know about reports whose going-concern state was NOT profiled (a superseded row keeps its original
+    # accession in the first 20 characters; one with an ok re-creation is matched there)
+    for r in c.execute(text("""SELECT left(accession, 20) accession, cik, form, filing_date, status FROM tenk_filings
+                               WHERE cik = ANY(:c) AND status <> 'ok' ORDER BY cik, filing_date"""), {"c": ciks}).mappings():
+        recs[r["cik"]]["tenk_other"].append(dict(r))
+    for cik, dd in c.execute(text("SELECT cik, delisting_date FROM security_master WHERE cik = ANY(:c)"), {"c": ciks}):
+        recs[cik]["delisting_date"] = dd
     for cik, acc, e, f, form, val in c.execute(text("""SELECT cik, accession, end_date, filed, form, val
                                                       FROM shares_outstanding_facts WHERE cik = ANY(:c)
                                                       ORDER BY cik, filed, end_date"""), {"c": ciks}):
@@ -67,6 +76,14 @@ def main() -> int:
         meta["tenk_by_year"] = {str(int(y)): n for y, n in c.execute(text(
             "SELECT extract(year FROM filing_date), count(*) FROM tenk_filings GROUP BY 1 ORDER BY 1")).all()}
         meta["thesis_changes_from"] = c.execute(text("SELECT min(created_at)::date FROM thesis_changes")).scalar()
+        # 10-K ingestion state per issuer (app.tenk.engine job states): not completed / given up / still queued
+        st = dict(c.execute(text("SELECT name, state FROM processing_jobs WHERE name IN ('tenk_backfill', 'tenk_live_queue')")).all())
+        bf, lq = st.get("tenk_backfill") or {}, st.get("tenk_live_queue") or {}
+        want = set(ciks)
+        meta["tenk_jobs"] = {"backfill_done": sorted(want & set(bf.get("done_ciks") or [])),
+                             "backfill_gave_up": sorted(want & set(bf.get("gave_up") or [])),
+                             "live_gave_up": sorted(want & set(lq.get("gave_up") or {})),
+                             "live_queue": {k: v.get("first_seen") for k, v in (lq.get("queue") or {}).items() if k in want}}
         c.rollback()
     lo = start - timedelta(days=365)
     if a.efts:

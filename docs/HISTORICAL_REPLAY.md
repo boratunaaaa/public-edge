@@ -144,3 +144,15 @@ the production decisions that ran on missing history (`gates_not_applied`).
    of 2020-2021 sees no financing / dilution risk flags - the historical gate is more permissive than today's.
 5. **Renamed securities**: price bars are cached under the vendor's current symbol (QXO) while the point-in-time
    registry says SSNT in 2021 -> the replay refuses (no universe row / reference price) instead of using today's ticker.
+
+## Share facts and GOING_CONCERN completeness (Codex follow-up, 2026-09-30)
+* **Share facts** (share count -> market cap -> bucket -> financing assessment -> position cap) are visible from the
+  filing's exact acceptance time when the snapshot has it (`share_fact_acceptance`, from `tenk_filings.accepted_at`
+  for 10-K accessions), otherwise from the day AFTER the filing date. A PRE_OPEN (09:00 ET) step never sees a filing
+  of that same day; a date-only filing is not visible on its filing day at all (`visibility.share_fact_visible`).
+* **GOING_CONCERN coverage** is COMPLETE only if, for every issuer, every 10-K that matters was profiled: the export
+  now carries the non-ok 10-Ks (`tenk_other`: no_sections / not_found / fetch or extract failure / superseded without
+  an ok re-creation) and the ingestion job state (`meta.tenk_jobs`: backfill not completed, given up, still queued);
+  an annual-report gap > 460 days at any moment of the window also counts. Any of these -> PARTIAL with the issuers
+  and reasons, so the GOING_CONCERN consumers appear in `gates_not_applied`. An export without these inventories
+  (older format) is never COMPLETE.

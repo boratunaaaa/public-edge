@@ -75,6 +75,10 @@ def main() -> int:
                                                           FROM shares_outstanding_facts WHERE cik = ANY(:c)
                                                           ORDER BY cik, filed, end_date"""), {"c": ciks}):
             out["share_facts"].setdefault(cik, []).append([acc, e, f, form, val])
+        # exact acceptance time of the filings behind those facts, where production has it (10-K: tenk_filings)
+        out["share_fact_acceptance"] = dict(c.execute(text("""
+            SELECT tf.accession, tf.accepted_at FROM tenk_filings tf WHERE tf.accepted_at IS NOT NULL
+              AND tf.accession IN (SELECT accession FROM shares_outstanding_facts WHERE cik = ANY(:c))"""), {"c": ciks}).all())
         out["security_master"] = [dict(r) for r in c.execute(text("""SELECT cik, name, sector, delisting_date, delisting_reason
                                                                       FROM security_master WHERE cik = ANY(:c)"""), {"c": ciks}).mappings()]
         out["corporate_actions"] = [dict(r) for r in c.execute(text("""SELECT cik, action, action_date, accession, source

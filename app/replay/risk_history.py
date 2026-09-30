@@ -408,15 +408,21 @@ def compute_coverage(meta: dict, inv: dict[str, dict], ciks: list[str]) -> Cover
     e_lo = date.fromisoformat(efts["from"]) + timedelta(days=TEXT_LOOKBACK_DAYS) if scanned else None
     e_hi = date.fromisoformat(efts["to"]) if scanned else None
     outdated = sorted(c for c in ciks if (inv.get(c) or {}).get("outdated_profiles"))
+    # an issuer without an inventory at all counts as missing; so does any failed / unprocessed / absent 10-K
+    missing = {c: (inv.get(c) or {}).get("gc_missing", ["no inventory for this issuer"]) for c in ciks}
+    missing = {c: w for c, w in missing.items() if w}
     gc_from = tenk_full_from({int(k): v for k, v in (meta.get("tenk_by_year") or {}).items()})
-    if scanned and not outdated:
+    if scanned and not outdated and not missing:
         lo, hi = _bounded(e_lo, e_hi, horizon)
         fam["GOING_CONCERN"] = {"status": COMPLETE, "from": lo, "to": hi,
                                 "why": "full-text scan of the production phrases + current-classifier 10-K profiles"}
     elif scanned or gc_from:
+        reasons = ([f"10-K profiles with an older classifier for {outdated}"] if outdated else []) + \
+                  ([f"missing / failed / unprocessed 10-K profiles for {len(missing)} issuer(s): "
+                    + "; ".join(f"{c}: {', '.join(w[:3])}" for c, w in sorted(missing.items())[:5])] if missing else []) + \
+                  ([] if scanned else ["no full-text scan: 10-K profiles only"])
         fam["GOING_CONCERN"] = {"status": PARTIAL, "from": e_lo or gc_from, "to": min(e_hi, horizon) if e_hi else horizon,
-                                "why": (f"10-K profiles with an older classifier for {outdated}" if outdated
-                                        else "no full-text scan: 10-K profiles only")}
+                                "why": " | ".join(reasons), "missing_issuers": sorted(missing)}
     fam["FINANCING_TEXT"] = ({"status": COMPLETE, "from": e_lo, "to": min(e_hi, horizon), "why": "full-text scan"}
                              if scanned else {"status": UNAVAILABLE, "why": "no untruncated full-text scan for this scope"})
     act = [inv.get(c, {}).get("actions") or {} for c in ciks]
@@ -475,17 +481,65 @@ def _issuer(rec: dict) -> dict:
     for f in rec.get("tenk", []):
         f["accepted_at"] = _dt(f.get("accepted_at")) if f.get("accepted_at") else None
         f["filing_date"] = _d(f["filing_date"])
+    for f in rec.get("tenk_other") or []:
+        f["filing_date"] = _d(f["filing_date"])
+    if rec.get("delisting_date"):
+        rec["delisting_date"] = _d(rec["delisting_date"])
     rec["shares"] = [(f[0], _d(f[1]), _d(f[2]), f[3], int(f[4])) for f in rec.get("shares", [])]
     return rec
 
 
-def issuer_inventory(rec: dict, start: date, end: date) -> dict:
+ANNUAL_GAP_DAYS = 460  # a 10-K is due every fiscal year (+ filing deadline slack); a longer silence = a report is missing
+
+
+def gc_missing(rec: dict, start: date, end: date, jobs: dict | None) -> list[str]:
+    """Why the GOING_CONCERN state of ONE issuer cannot be known over [start, end] from the exported profiles (empty =
+    every 10-K that matters was profiled). The export lists only status='ok' profiles in rec['tenk']; everything else
+    must be declared: rec['tenk_other'] (failed / unparsable / not-found / superseded-without-replacement 10-Ks) and
+    meta['tenk_jobs'] (issuers whose 10-K ingestion never completed or was given up). An export without these
+    inventories cannot prove completeness."""
+    lo = start - timedelta(days=400)
+    why = []
+    if "tenk_other" not in rec:
+        why.append("export has no failed/unprocessed 10-K inventory")
+    if jobs is None:
+        why.append("export has no 10-K ingestion job state")
+    else:
+        cik = rec["cik"]
+        if cik not in set(jobs.get("backfill_done") or []):
+            why.append("10-K backfill not completed for this issuer")
+        if cik in set(jobs.get("backfill_gave_up") or []) or cik in set(jobs.get("live_gave_up") or []):
+            why.append("10-K ingestion gave up on this issuer")
+        q = (jobs.get("live_queue") or {}).get(cik)
+        if q and str(q) <= end.isoformat():
+            why.append(f"10-K queued since {q}, not yet processed")
+    ok = {f["accession"][:20] for f in rec.get("tenk", [])}
+    for f in rec.get("tenk_other") or []:
+        if lo <= f["filing_date"] <= end and f["accession"][:20] not in ok:
+            why.append(f"10-K {f['accession'][:20]} {f['filing_date']}: {f['status']}")
+    # at every moment of [start, end] the latest report must be at most ANNUAL_GAP_DAYS old (a new issuer with no
+    # report yet is not flagged here; its first report is covered by the status checks above)
+    known = sorted({f["filing_date"] for f in rec.get("tenk", []) + (rec.get("tenk_other") or []) if f["filing_date"] <= end})
+    upto_start = [d for d in known if d <= start]
+    if upto_start and (start - upto_start[-1]).days > ANNUAL_GAP_DAYS:
+        why.append(f"no 10-K between {upto_start[-1]} and the window start {start}")
+    inside = upto_start[-1:] + [d for d in known if d > start]
+    for a, b in zip(inside, inside[1:]):
+        if (b - a).days > ANNUAL_GAP_DAYS:
+            why.append(f"no 10-K between {a} and {b}")
+    gone = rec.get("delisting_date")
+    if known and (end - known[-1]).days > ANNUAL_GAP_DAYS and not (gone and gone <= known[-1] + timedelta(days=ANNUAL_GAP_DAYS)):
+        why.append(f"no 10-K after {known[-1]}")
+    return why
+
+
+def issuer_inventory(rec: dict, start: date, end: date, jobs: dict | None = None) -> dict:
     from app.tenk.diff import CLASSIFIER_VERSION
     lo = start - timedelta(days=400)
     outdated = [f["accession"] for f in rec.get("tenk", []) if lo <= f["filing_date"] <= end
                 and ((f.get("profile") or {}).get("_meta") or {}).get("v", 1) != CLASSIFIER_VERSION]
     d = dilution_inventory(rec.get("shares", []))
-    return {"outdated_profiles": outdated, "actions": rec.get("actions") or {},
+    return {"outdated_profiles": outdated, "gc_missing": gc_missing(rec, start, end, jobs), "actions": rec.get("actions") or {},
             "dilution": {k: (str(v) if isinstance(v, date) else v) for k, v in d.items()}}
 
 
@@ -560,7 +614,7 @@ def reconstruct(store: RiskHistoryStore, run_id: str, path) -> dict:
         out["issuers"] += 1
         if rec.get("efts_truncated") and meta.get("efts_scan"):
             meta["efts_scan"]["truncated"] = True  # an incomplete query leaves its scope's text coverage incomplete
-        inv[cik] = issuer_inventory(rec, start, end)
+        inv[cik] = issuer_inventory(rec, start, end, meta.get("tenk_jobs"))
         for fam, detect in (("GOING_CONCERN_10K", lambda r: detect_going_concern_10k(r.get("tenk", []))),
                             ("TEXT", lambda r: detect_text_hits(r.get("efts_hits", []))),
                             ("DILUTION", lambda r: detect_dilution(r["cik"], r.get("shares", [])))):

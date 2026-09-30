@@ -142,7 +142,7 @@ class ReplayRun:
         with self.store.engine.begin() as c:
             self.stager.stage_reference(c, today)
             # today's point-in-time capitalisation for every issuer seen so far, BEFORE the financing assessment
-            self.stager.build_universe(c, today, self.stager.issuers, price_cap)
+            self.stager.build_universe(c, today, self.stager.issuers, price_cap, self.clock.now())
             self.stager.stage_risks(c, self.clock.now(), today)
             resolver.load(c, force=True)  # the point-in-time registry of this moment, not today's ticker file
 

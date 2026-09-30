@@ -26,6 +26,9 @@ class SourceData:
     symbols: list[dict] = field(default_factory=list)  # security_symbols rows: cik, symbol, first_seen, last_seen, source
     companies: dict[str, str] = field(default_factory=dict)  # cik -> name
     share_facts: dict[str, list[ShareFact]] = field(default_factory=dict)
+    # exact acceptance time of the filing behind a share fact (accession -> aware datetime), where known (10-K
+    # filings: tenk_filings.accepted_at). A fact without one is known by its filing DATE only (visibility.share_fact_visible)
+    acceptance: dict[str, datetime] = field(default_factory=dict)
     security_master: list[dict] = field(default_factory=list)  # cik, name, sector, delisting_date, delisting_reason
     corporate_actions: list[dict] = field(default_factory=list)  # cik, action, action_date, accession, source
     # price identity catalog: which stored vendor series holds WHICH issuer's prices for WHICH dates
@@ -73,7 +76,8 @@ def _plain(src: SourceData) -> dict:
             "risk_cov": getattr(src.risk_cov, "families", None),
             "security_master": src.security_master, "corporate_actions": src.corporate_actions,
             "bars": {s: [list(b.__dict__.values()) for b in bs] for s, bs in sorted(src.bars.items())},
-            "share_facts": {c: [list(f.__dict__.values()) for f in fs] for c, fs in sorted(src.share_facts.items())}}
+            "share_facts": {c: [list(f.__dict__.values()) for f in fs] for c, fs in sorted(src.share_facts.items())},
+            "acceptance": {k: str(v) for k, v in sorted(src.acceptance.items())}}
 
 
 def _d(x):
@@ -101,5 +105,7 @@ def load_snapshot(path: str | Path) -> SourceData:
     sm = [{**r, "delisting_date": _d(r.get("delisting_date"))} for r in raw.get("security_master", [])]
     ca = [{**r, "action_date": _d(r["action_date"])} for r in raw.get("corporate_actions", [])]
     series = [{**x, "valid_from": _d(x.get("valid_from")), "valid_to": _d(x.get("valid_to"))} for x in raw.get("series", [])]
+    acceptance = {k: _dt(v) for k, v in (raw.get("share_fact_acceptance") or {}).items() if v}
     return SourceData(events=events, bars=bars, symbols=symbols, companies=raw.get("companies", {}), share_facts=facts,
-                      security_master=sm, corporate_actions=ca, series=series, label=raw.get("label", Path(path).name))
+                      acceptance=acceptance, security_master=sm, corporate_actions=ca, series=series,
+                      label=raw.get("label", Path(path).name))
