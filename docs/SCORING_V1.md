@@ -54,7 +54,9 @@ The veto is re-checked after creation with the same `tenk_risk()`: at approval (
 `decided_by = system:tenk_...`, no order is queued), in the expiry sweep (PENDING proposals), and at every BUY fill
 at that fill's session open (the order is CANCELLED with the veto as note). SELL / exit orders are never checked.
 Every TENK_CHANGE write takes the issuer's exclusive advisory lock; approvals and fills read under its shared lock
-until they commit, so a 10-K write and a decision never interleave.
+until they commit, so a 10-K write and a decision never interleave. A catch-up fill on an earlier session also counts
+superseded changes (that session's supersession state is unknown). Global lock order: proposal -> paper order ->
+issuer 10-K lock (CIK order) -> filing / event rows.
 
 ## Missing scores
 A score is written after the gate. If that write fails (or the process dies in between), the next scan retries it for
