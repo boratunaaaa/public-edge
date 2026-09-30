@@ -18,6 +18,7 @@ from app.parsers.house_ptr import parse_ptr_text, pdf_text
 from app.parsers.sec_common import to_date
 from app.signals import priority as P
 from app.signals.detect import multi_signal_check
+from app.sources.congress.identity import resolve as resolve_identity
 from app.sources.base import RunResult, Source
 
 log = logging.getLogger(__name__)
@@ -66,35 +67,43 @@ def process_ptr(conn: Connection, meta: dict, pdf: bytes, *, is_backfill: bool =
     insert_rows(conn, congress_transactions, rows, ["chamber", "doc_id", "line_no"])
     mark_filing(conn, fid, "ok")
     created: list[int] = []
-    tickers_bought = set()
+    bought: set[tuple[str, str]] = set()  # (issuer, ticker) of identity-safe purchases
     for r in rows:
         if r["transaction_type"] != "PURCHASE" or not r["ticker"] or r["asset_type"] != "ST":
             continue
-        tickers_bought.add(r["ticker"])
+        # the issuer that used the symbol ON THE TRADE DATE; ambiguous / merged / unresolved -> review, never guessed
+        ident = resolve_identity(conn, r["ticker"], r["asset_name"], r["transaction_date"] or filed)
+        if not ident.review:
+            bought.add((ident.cik, r["ticker"]))
         eid = create_event(
             conn, event_type="CONGRESS_BUY", dedupe_key=f"CONG:house:{meta['doc_id']}:{r['line_no']}", public_date=filed,
             transaction_date=r["transaction_date"], ticker=r["ticker"],
-            company_name=resolver.cik_to_name.get(resolver.ticker_to_cik.get(r["ticker"], ""), None) or r["asset_name"][:120],
-            issuer_cik=resolver.ticker_to_cik.get(r["ticker"]), priority=P.congress_buy_priority(r["amount_min"]),
+            company_name=(resolver.cik_to_name.get(ident.cik) if ident.cik and not ident.review else None) or r["asset_name"][:120],
+            issuer_cik=None if ident.review else ident.cik, identity_confidence="LOW" if ident.review else ident.confidence,
+            needs_review=ident.review, priority=P.congress_buy_priority(r["amount_min"]),
             title=f"Rep. {meta['name']} bought ${r['ticker']} ({r['amount_range'] or 'amount n/a'})",
             payload={"politician": meta["name"], "chamber": "house", "state_district": meta["state_district"],
                      "transaction_type": r["transaction_type"], "transaction_date": r["transaction_date"],
                      "filing_date": filed, "disclosure_delay_days": r["disclosure_delay_days"], "amount_range": r["amount_range"],
-                     "amount_min": r["amount_min"], "amount_max": r["amount_max"], "owner": r["owner"], "asset": r["asset_name"]},
+                     "amount_min": r["amount_min"], "amount_max": r["amount_max"], "owner": r["owner"], "asset": r["asset_name"],
+                     ("identity_review" if ident.review else "identity"): ident.reason},
             source_url=url, is_backfill=is_backfill,
         )
         if eid:
             created.append(eid)
-    for t in tickers_bought:
-        created += congress_cluster_check(conn, t, filed, is_backfill=is_backfill)
+    for cik, t in sorted(bought):
+        created += congress_cluster_check(conn, t, filed, is_backfill=is_backfill, cik=cik)
         m = multi_signal_check(conn, t, filed, is_backfill=is_backfill)
         if m:
             created.append(m)
     return created
 
 
-def congress_cluster_check(conn: Connection, ticker: str, as_of: date, *, is_backfill: bool = False) -> list[int]:
-    """Several members bought the same ticker (by transaction date) - known once the latest report is public."""
+def congress_cluster_check(conn: Connection, ticker: str, as_of: date, *, is_backfill: bool = False,
+                           cik: str | None = None) -> list[int]:
+    """Several members bought the same ISSUER (by transaction date) - known once the latest report is public. With
+    `cik`, only purchases whose ticker resolves to that issuer at their own trade date count (a reused symbol or a
+    merged / ambiguous PTR line never joins a cluster), and the cluster event carries the issuer."""
     created = []
     best = 1
     for w in CLUSTER_WINDOWS:
@@ -103,6 +112,8 @@ def congress_cluster_check(conn: Connection, ticker: str, as_of: date, *, is_bac
             congress_transactions.c.ticker == ticker, congress_transactions.c.transaction_type == "PURCHASE",
             congress_transactions.c.filing_date <= as_of, congress_transactions.c.transaction_date >= lo,
         ))).mappings().all()
+        if cik is not None:
+            rows = [r for r in rows if _safe_cik(conn, r) == cik]
         if not rows:
             continue
         rows = sorted(rows, key=lambda r: r["transaction_date"] or date.min)
@@ -118,6 +129,7 @@ def congress_cluster_check(conn: Connection, ticker: str, as_of: date, *, is_bac
             eid = create_event(
                 conn, event_type="CONGRESS_CLUSTER_BUY", dedupe_key=f"CONGCL:{ticker}:{w}:{min(r['transaction_date'] for r in inwin)}:{len(members)}",
                 public_date=as_of, transaction_date=end, ticker=ticker, priority=P.congress_cluster_priority(len(members)),
+                issuer_cik=cik, identity_confidence="MEDIUM" if cik else None,
                 title=f"{len(members)} members of Congress bought ${ticker} within {w}d",
                 payload={"window_days": w, "members": members, "n_members": len(members), "aggregate_min": total_min,
                          "trades": [{"politician": r["politician"], "chamber": r["chamber"], "date": r["transaction_date"],
@@ -127,6 +139,11 @@ def congress_cluster_check(conn: Connection, ticker: str, as_of: date, *, is_bac
             if eid:
                 created.append(eid)
     return created
+
+
+def _safe_cik(conn: Connection, r) -> str | None:
+    i = resolve_identity(conn, r["ticker"], r["asset_name"], r["transaction_date"] or r["filing_date"])
+    return None if i.review else i.cik
 
 
 class HousePtrSource(Source):
