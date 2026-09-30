@@ -1499,3 +1499,55 @@ signal_scores = Table(
     Column("research_only", Boolean, nullable=False, server_default="true"),
 )
 Index("ix_signal_scores_scored_at", signal_scores.c.scored_at)
+
+# ------------------------------------------------------------------ point-in-time sources for historical replay (0016)
+# XBRL facts with the filing that disclosed them (cash, operating cash flow, debt, shares). Replay-only data: no live
+# production decision reads this table.
+pit_facts = Table(
+    "pit_facts", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False),
+    Column("family", String(16), nullable=False),  # CASH | OCF | DEBT | SHARES_DEI | SHARES_GAAP
+    Column("concept", String(96), nullable=False),
+    Column("period_start", Date),
+    Column("period_end", Date, nullable=False),
+    Column("val", Float, nullable=False),
+    Column("filed", Date, nullable=False),
+    Column("accession", String(25), nullable=False),
+    Column("form", String(16)),
+    Column("run_id", String(40), nullable=False),  # provenance: the backfill run that stored it
+    _created(),
+)
+Index("ix_pit_facts_cik_family", pit_facts.c.cik, pit_facts.c.family, pit_facts.c.filed)
+Index("uq_pit_facts_fact", pit_facts.c.cik, pit_facts.c.concept, pit_facts.c.period_end, pit_facts.c.period_start,
+      pit_facts.c.accession, pit_facts.c.val, unique=True, postgresql_nulls_not_distinct=True)
+
+# every SEC filing of an issuer (submissions "recent" block + all older pages), with its acceptance time
+sec_filings = Table(
+    "sec_filings", metadata,
+    Column("cik", String(10), primary_key=True),
+    Column("accession", String(25), primary_key=True),
+    Column("form", String(24), nullable=False),
+    Column("filing_date", Date, nullable=False),
+    Column("report_date", Date),
+    Column("acceptance_at", DateTime(timezone=True)),  # NULL when EDGAR gives none (then: next-day rule)
+    Column("items", Text),
+    Column("primary_document", Text),
+    Column("source_block", String(64), nullable=False),  # recent | CIK##########-submissions-NNN.json
+    Column("run_id", String(40), nullable=False),
+    _created(),
+)
+Index("ix_sec_filings_cik_date", sec_filings.c.cik, sec_filings.c.filing_date)
+
+# per-company progress of the backfill jobs (resumable, idempotent, failures isolated per company)
+pit_backfill_progress = Table(
+    "pit_backfill_progress", metadata,
+    Column("job", String(24), primary_key=True),  # xbrl | submissions
+    Column("cik", String(10), primary_key=True),
+    Column("status", String(12), nullable=False),  # done | failed | not_found
+    Column("rows", Integer, nullable=False, server_default="0"),
+    Column("attempts", Integer, nullable=False, server_default="0"),
+    Column("error", Text),
+    Column("run_id", String(40), nullable=False),
+    _ts("updated_at", nullable=False, server_default=func.now()),
+)
