@@ -236,6 +236,12 @@ def fill_orders(conn: Connection, today: date) -> dict:
     # whatever their dates); a row a concurrent run already filled / cancelled drops out of the locked set
     rows = conn.execute(select(paper_orders).where(and_(paper_orders.c.status == "PENDING", paper_orders.c.not_before <= today))
                         .order_by(paper_orders.c.id).with_for_update()).mappings().all()
+    # the issuers of every pending BUY: their 10-K risk locks (shared, app.core.tenk_policy) are taken up front in CIK
+    # order, like the order rows in id order, so a multi-issuer 10-K writer and this run can never deadlock
+    from app.core.tenk_policy import lock_issuers
+    pids = [o["proposal_id"] for o in rows if o["side"] == "BUY" and o["proposal_id"]]
+    lock_issuers(conn, conn.execute(select(proposed_trades.c.cik).where(proposed_trades.c.id.in_(pids))).scalars().all()
+                 if pids else [], exclusive=False)
     from app.paper.fills import quote
     fresh: dict = {}
     # chronological: a catch-up run (after a halt or a missed day) fills in session order, so every sizing sees the

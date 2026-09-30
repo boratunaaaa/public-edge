@@ -10,12 +10,13 @@ Point in time: only changes of the SAME issuer that were public STRICTLY BEFORE 
 (coalesce(available_at, public_at) < at), and only within the TENK_WINDOW_DAYS before it (the window the effect was
 measured over). A change becoming public at or after the decision can never veto it.
 
-Locking (no race between a decision and a new 10-K): every writer of a TENK_CHANGE event takes the issuer's
-EXCLUSIVE transaction advisory lock (app.db.store.create_event); a paper decision that must honour the veto (approval,
+Locking (no race between a decision and a 10-K change): every writer of TENK_CHANGE state - a new event
+(app.db.store.create_event) or a supersession (app.tenk.engine) - takes the issuer's EXCLUSIVE transaction advisory
+lock; a paper decision that must honour the veto (approval,
 BUY fill) reads with lock=True, i.e. under the issuer's SHARED lock held until its transaction commits. A 10-K
 committed before the decision's read is therefore always seen; one being written waits until the decision has
-committed (it then happened before the 10-K was known, and the next stage re-checks). Writers process one filing -
-one issuer - per transaction, so a writer never waits on a second issuer lock: no deadlock cycle.
+committed (it then happened before the 10-K was known, and the next stage re-checks). A transaction holding several
+issuer locks takes them all up front in CIK order (lock_issuers): no deadlock cycle.
 
 Supersession: a live decision uses today's state (superseded changes are ignored). A retry at an earlier decision
 moment cannot know that moment's supersession state (no timestamp), so it counts superseded changes too - the
@@ -47,6 +48,13 @@ def lock_issuer(conn: Connection, issuer_cik: str, *, exclusive: bool) -> None:
     """Transaction-scoped advisory lock on the issuer's 10-K risk (see module doc)."""
     fn = "pg_advisory_xact_lock" if exclusive else "pg_advisory_xact_lock_shared"
     conn.execute(text(f"SELECT {fn}(hashtextextended(:k, 0))"), {"k": f"pe:tenk:{issuer_cik}"})
+
+
+def lock_issuers(conn: Connection, issuer_ciks, *, exclusive: bool) -> None:
+    """Several issuers at once, always in CIK order: every transaction that holds more than one issuer lock (the
+    multi-issuer reclassifier, a fill run over many orders) acquires them in the same order - no deadlock cycle."""
+    for cik in sorted({c for c in issuer_ciks if c}):
+        lock_issuer(conn, cik, exclusive=exclusive)
 
 
 def tenk_risk(conn: Connection, issuer_cik: str | None, at: datetime, *, include_superseded: bool = False,

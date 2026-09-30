@@ -204,11 +204,10 @@ def test_an_approval_waits_for_an_uncommitted_10k_write_and_then_sees_it(engine)
     try:
         _tenk(writer, CREATED + timedelta(hours=1), key="tkrace")  # takes the issuer's exclusive lock, not committed
         with engine.connect() as probe:
-            probe.execute(text("SET lock_timeout = '300ms'"))
-            probe.commit()
             from app.core.tenk_policy import tenk_risk
             with pytest.raises(OperationalError):  # a decision on this issuer must wait for the writer
                 with probe.begin():
+                    probe.execute(text("SET LOCAL lock_timeout = '300ms'"))  # never leaks into the pool
                     tenk_risk(probe, CIK, CREATED + timedelta(hours=3), lock=True)
     finally:
         tx.commit()
@@ -233,13 +232,89 @@ def test_a_10k_write_waits_for_an_uncommitted_fill(engine):
     try:
         assert fill_orders(filler, date(2024, 3, 8))["filled"] == 1  # not committed yet
         with engine.connect() as w:
-            w.execute(text("SET lock_timeout = '300ms'"))
-            w.commit()
             with pytest.raises(OperationalError):
                 with w.begin():
+                    w.execute(text("SET LOCAL lock_timeout = '300ms'"))
                     _tenk(w, OPEN0 - timedelta(days=1), key="tklate")
     finally:
         tx.commit()
         filler.close()
     with engine.connect() as c:
         assert _row(c, oid)["status"] == "FILLED"
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_a_reclassifier_supersession_waits_for_an_uncommitted_decision(engine):
+    """A supersession changes the 10-K risk too: while an approval holds the issuer's shared lock, the (multi-issuer)
+    reclassifier must wait, and only then withdraw the old event."""
+    import threading
+    import time as _t
+
+    from app.core.tenk_policy import tenk_risk
+    from app.db.models import events, tenk_filings
+    from app.tenk.engine import supersede_old_classifier
+    with engine.begin() as c:
+        for i, cik in enumerate(("0000000009", CIK)):  # two issuers in one reclassification transaction
+            acc = f"000000000{i}-24-000001"
+            c.execute(tenk_filings.insert().values(cik=cik, accession=acc, form="10-K", filing_date=date(2024, 3, 1),
+                                                   source_url="u", profile={}, status="ok"))
+            _event(c, et="TENK_CHANGE", key=f"tenk:{acc}", cik=cik, payload={"direction": "NEGATIVE"})
+    holder = engine.connect()
+    tx = holder.begin()
+    done = threading.Event()
+    try:
+        assert tenk_risk(holder, CIK, CREATED, lock=True).vetoes  # a decision in flight sees the veto
+        errors: list[BaseException] = []
+
+        def reclassify():
+            try:
+                supersede_old_classifier(engine, dry_run=False)
+                done.set()
+            except BaseException as e:  # noqa: BLE001 - surfaced below
+                errors.append(e)
+        t = threading.Thread(target=reclassify)
+        t.start()
+        _t.sleep(1.0)
+        assert not done.is_set()  # blocked on the issuer lock, nothing superseded yet
+        with engine.connect() as c:
+            assert not any(c.execute(select(events.c.superseded).where(events.c.event_type == "TENK_CHANGE")).scalars())
+    finally:
+        tx.commit()
+        holder.close()
+    t.join(10)
+    assert not errors and done.is_set(), errors
+    with engine.connect() as c:
+        assert all(c.execute(select(events.c.superseded).where(events.c.event_type == "TENK_CHANGE")).scalars())
+
+
+def test_multi_issuer_locks_are_always_taken_in_cik_order(monkeypatch):
+    from app.core import tenk_policy
+    seen = []
+    monkeypatch.setattr(tenk_policy, "lock_issuer", lambda conn, cik, exclusive: seen.append(cik))
+    tenk_policy.lock_issuers(None, ["0000000300", None, "0000000100", "0000000300", "0000000200"], exclusive=True)
+    assert seen == ["0000000100", "0000000200", "0000000300"]
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_a_fill_run_locks_every_buy_issuer_up_front(engine):
+    """Before filling anything, the run holds the shared 10-K lock of every pending BUY's issuer: a writer on any of
+    them waits - including an issuer whose order is processed last."""
+    from app.paper.ledger import fill_orders
+    from app.core.tenk_policy import lock_issuer
+    with engine.begin() as c:
+        _store(c, "ZBIO", _series(date(2024, 1, 2), 60))
+        _buy(c, _proposal(c))
+    runner = engine.connect()
+    tx = runner.begin()
+    try:
+        fill_orders(runner, date(2024, 3, 8))
+        with engine.connect() as w:
+            with pytest.raises(OperationalError):
+                with w.begin():
+                    w.execute(text("SET LOCAL lock_timeout = '300ms'"))
+                    lock_issuer(w, CIK, exclusive=True)
+    finally:
+        tx.rollback()
+        runner.close()
