@@ -30,13 +30,15 @@ def collect(engine: Engine, src: SourceData, last_day: date | None) -> dict:
                            .group_by(paper_orders.c.side, paper_orders.c.status)).all()
         capped = c.execute(select(func.count()).where(paper_orders.c.note == "participation cap: partial fill")).scalar()
         trades = c.execute(select(paper_trades.c.account_id, paper_trades.c.gross, paper_trades.c.commission,
-                                  paper_trades.c.slippage_bps)).all()
+                                  paper_trades.c.slippage_bps).order_by(paper_trades.c.id)).all()
         pos = c.execute(select(paper_positions, proposed_trades.c.signal_family, paper_accounts.c.strategy)
                         .join(proposed_trades, proposed_trades.c.id == paper_positions.c.proposal_id, isouter=True)
-                        .join(paper_accounts, paper_accounts.c.id == paper_positions.c.account_id)).mappings().all()
+                        .join(paper_accounts, paper_accounts.c.id == paper_positions.c.account_id)
+                        .order_by(paper_positions.c.id)).mappings().all()
         perf = c.execute(select(paper_performance.c.account_id, paper_performance.c.on_date, paper_performance.c.nav,
-                                paper_performance.c.positions_value).order_by(paper_performance.c.on_date)).all()
-        accts = {r.id: (r.strategy, float(r.starting_capital)) for r in c.execute(select(paper_accounts))}
+                                paper_performance.c.positions_value).order_by(paper_performance.c.on_date,
+                                                                              paper_performance.c.account_id)).all()
+        accts = {r.id: (r.strategy, float(r.starting_capital)) for r in c.execute(select(paper_accounts).order_by(paper_accounts.c.id))}
     closed = [p for p in pos if p["status"] == "CLOSED"]
     per_family: dict[str, list] = defaultdict(list)
     per_pos = []

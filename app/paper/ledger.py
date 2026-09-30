@@ -180,7 +180,8 @@ def position_value(conn: Connection, pos: dict, on: date) -> tuple[float, float 
 def nav_of(conn: Connection, account_id: int, on: date) -> float:
     nav = cash_of(conn, account_id)
     for p in conn.execute(select(paper_positions).where(and_(paper_positions.c.account_id == account_id,
-                                                             paper_positions.c.status != "CLOSED"))).mappings():
+                                                             paper_positions.c.status != "CLOSED"))
+                          .order_by(paper_positions.c.id)).mappings():
         nav += position_value(conn, dict(p), on)[0]
     return nav
 
@@ -322,7 +323,8 @@ def thesis_invalidated(conn: Connection, pos: dict, until: date) -> date | None:
 def check_exits(conn: Connection, today: date) -> dict:
     out = {"exit_orders": 0}
     rows = conn.execute(select(paper_positions, paper_accounts.c.strategy).join(
-        paper_accounts, paper_accounts.c.id == paper_positions.c.account_id).where(paper_positions.c.status == "OPEN")).mappings().all()
+        paper_accounts, paper_accounts.c.id == paper_positions.c.account_id).where(paper_positions.c.status == "OPEN")
+        .order_by(paper_positions.c.id)).mappings().all()  # id order: exit orders are created deterministically
     for p in rows:
         p = dict(p)
         rule = STRATEGIES[p["strategy"]][2]
@@ -371,7 +373,8 @@ def snapshot(conn: Connection, today: date) -> int:
         pv = 0.0
         n_open = 0
         for p in conn.execute(select(paper_positions).where(and_(paper_positions.c.account_id == a["id"],
-                                                                 paper_positions.c.status != "CLOSED"))).mappings():
+                                                                 paper_positions.c.status != "CLOSED"))
+                              .order_by(paper_positions.c.id)).mappings():
             pv += position_value(conn, dict(p), today)[0]
             n_open += 1
         first = conn.execute(select(func.min(paper_trades.c.trade_date)).where(paper_trades.c.account_id == a["id"])).scalar()
@@ -421,9 +424,11 @@ def account_metrics(conn: Connection, account_id: int) -> dict:
     perf = conn.execute(select(paper_performance).where(paper_performance.c.account_id == account_id)
                         .order_by(paper_performance.c.on_date)).mappings().all()
     closed = conn.execute(select(paper_positions).where(and_(paper_positions.c.account_id == account_id,
-                                                             paper_positions.c.status == "CLOSED"))).mappings().all()
+                                                             paper_positions.c.status == "CLOSED"))
+                          .order_by(paper_positions.c.id)).mappings().all()
     open_ = conn.execute(select(paper_positions).where(and_(paper_positions.c.account_id == account_id,
-                                                            paper_positions.c.status != "CLOSED"))).mappings().all()
+                                                            paper_positions.c.status != "CLOSED"))
+                         .order_by(paper_positions.c.id)).mappings().all()
     last = perf[-1] if perf else None
     unreal = sum((p["last_price"] or p["entry_price"]) * p["shares"] - p["cost"] for p in open_)
     sector_adj = []
