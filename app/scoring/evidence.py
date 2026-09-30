@@ -1,14 +1,19 @@
-"""Evidence registry for scoring V1: every weight is a MEASURED effect, never a chosen number.
+"""Evidence registry for scoring (v3, 2026-09-30): every weight is a MEASURED effect, never a chosen number.
 
-Unit: probability points of beating SPY over 90 days, event minus a matched control of the SAME stock (the placebo /
-matched-placebo designs of app.backtest.research_v2). A component is VALIDATED only when
+Unit: probability points of beating SPY over 90 days, event minus a matched control of the SAME stock (company-level
+paired differences, app.backtest.research_scoring). The evidence file is built by scripts/build_scoring_evidence_v3.py
+from committed research outputs; it labels each insider subgroup with a role, and this module re-checks the numbers:
 
-  * its sample has >= MIN_COMPANIES companies (the signal-contract minimum sample), and
-  * its p-value survives Benjamini-Hochberg at Q across every hypothesis of its test family (the 11 insider buckets are
-    one family; single pre-registered tests are their own family).
+  ACTIVE            gets its measured weight only if >= MIN_COMPANIES companies, BH-adjusted p <= Q in its family AND
+                    the company-bootstrap interval excludes 0 - otherwise weight 0 (a label never overrides the data)
+  EVIDENCE_ONLY     measured and significant, kept as evidence, never stacked (role_10pct_only is a subset of ten_pct_any)
+  HOLDOUT_REQUIRED  significant only in an exploratory family or discovered afterwards: weight 0 until a pre-registered
+                    holdout replicates it
+  NOT_SIGNIFICANT   tested, not significant
 
-Anything else - not significant, not measured, or a V2 family whose history is still being priced - has weight 0
-and is reported with the reason. Nothing is fitted or tuned here: the numbers come from the versioned evidence file."""
+The primary INSIDER_BUY effect is VALIDATED only when it is significant in the main design AND in every sensitivity run
+(lookback / contamination); otherwise NOT_ROBUST with weight 0. A NEGATIVE 10-K change is never a weight: it is a veto
+(app.scoring.engine)."""
 from __future__ import annotations
 
 import json
@@ -16,22 +21,24 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-EVIDENCE_FILE = Path(__file__).with_name("evidence_2026-09-28.json")
+EVIDENCE_FILE = Path(__file__).with_name("evidence_2026-09-30.json")
 MIN_COMPANIES = 100
 Q = 0.05
 
 VALIDATED, NOT_SIGNIFICANT, NOT_MEASURED = "VALIDATED", "NOT_SIGNIFICANT", "NOT_MEASURED"
+NOT_ROBUST, EVIDENCE_ONLY, HOLDOUT_REQUIRED, VETO = "NOT_ROBUST", "EVIDENCE_ONLY", "HOLDOUT_REQUIRED", "VETO"
 
 
 @dataclass(frozen=True)
 class Effect:
     name: str
     status: str
-    effect: float  # probability points (0.019 = +1.9 pp); 0 unless VALIDATED
+    effect: float  # the WEIGHT in probability points (0.05 = +5 pp); 0 unless VALIDATED
     companies: int | None
     p: float | None
     source: str
     why: str = ""
+    measured: float | None = None  # the measured effect, kept for audit even when the weight is 0
 
     @property
     def usable(self) -> bool:
@@ -48,43 +55,53 @@ def bh_survivors(pvals: dict[str, float], q: float = Q) -> set[str]:
     return {n for n, _p in ranked[:cut]}
 
 
-# No confidence interval in V1: the evidence file carries the company-equal mean difference and a SIGN-test p-value,
-# which says nothing about the mean's variance. A valid bound needs the company-level paired differences (next
-# evidence version); until then no interval is computed or stored.
-
-
-def _effect(name: str, cell: dict, source: str, survives: bool) -> Effect:
-    n, p, d = cell.get("companies"), cell.get("sign_test_p"), cell.get("difference")
+def _bucket(name: str, c: dict, src: str) -> Effect:
+    n, p, d, lo = c.get("companies"), c.get("bh_p"), c.get("effect"), (c.get("boot_ci95") or [None])[0]
     if n is None or p is None or d is None:
-        return Effect(name, NOT_MEASURED, 0.0, n, p, source, "no measured result")
-    if n < MIN_COMPANIES:
-        return Effect(name, NOT_SIGNIFICANT, 0.0, n, p, source, f"sample {n} < {MIN_COMPANIES} companies")
-    if not survives:
-        return Effect(name, NOT_SIGNIFICANT, 0.0, n, p, source, f"p={p:.3g} does not survive BH q={Q}")
-    return Effect(name, VALIDATED, float(d), n, p, source)
+        return Effect(name, NOT_MEASURED, 0.0, n, p, src, "no measured result")
+    role = c.get("role")
+    if role == "ACTIVE":
+        fail = [w for w, bad in ((f"sample {n} < {MIN_COMPANIES} companies", n < MIN_COMPANIES),
+                                 (f"BH p={p:.3g} > {Q}", p > Q), ("bootstrap interval includes 0", lo is None or lo <= 0))
+                if bad]
+        if fail:
+            return Effect(name, NOT_SIGNIFICANT, 0.0, n, p, src, "; ".join(fail), d)
+        return Effect(name, VALIDATED, float(d), n, p, src, "", d)
+    status = {"EVIDENCE_ONLY": EVIDENCE_ONLY, "HOLDOUT_REQUIRED": HOLDOUT_REQUIRED}.get(role, NOT_SIGNIFICANT)
+    return Effect(name, status, 0.0, n, p, src, c.get("why") or "", d)
+
+
+def _primary(c: dict, sens: dict, src: str) -> Effect:
+    n, p, d = c.get("companies"), c.get("t_p"), c.get("effect")
+    if n is None or p is None or d is None:
+        return Effect("INSIDER_BUY", NOT_MEASURED, 0.0, n, p, src, "no measured result")
+    if p > Q:
+        return Effect("INSIDER_BUY", NOT_SIGNIFICANT, 0.0, n, p, src, f"p={p:.3g}", d)
+    weak = {k: v for k, v in sens.items() if (v.get("t_p") or 1.0) > Q}
+    if weak:
+        why = "; ".join(f"{k}: {100 * v['effect']:+.2f} pp, p={v['t_p']:.2g}" for k, v in sorted(weak.items()))
+        return Effect("INSIDER_BUY", NOT_ROBUST, 0.0, n, p, src, "not robust to the sensitivity runs - " + why, d)
+    return Effect("INSIDER_BUY", VALIDATED, float(d), n, p, src, "", d)
 
 
 @lru_cache(maxsize=1)
 def registry() -> dict:
     raw = json.loads(EVIDENCE_FILE.read_text())
-    fam = raw["families"]
     src = raw["evidence_version"]
-    ins = fam["INSIDER_BUY"]
-    buckets = ins["buckets"]
-    surv = bh_survivors({k: v["sign_test_p"] for k, v in buckets.items() if v.get("sign_test_p") is not None})
-    single = lambda c: (c.get("sign_test_p") or 1.0) <= Q  # noqa: E731 - a one-hypothesis family
-    out = {
-        "INSIDER_BUY": _effect("INSIDER_BUY", ins["primary"], src, single(ins["primary"])),
-        "INSIDER_BUY_BUCKETS": {k: _effect(f"INSIDER_BUY:{k}", v, src, k in surv) for k, v in buckets.items()},
-        "INSIDER_CLUSTER": _effect("INSIDER_CLUSTER", fam["INSIDER_CLUSTER"]["primary"], src, single(fam["INSIDER_CLUSTER"]["primary"])),
+    ins = raw["insider_buy"]
+    cl = raw["insider_cluster"]["cluster_placebo_pre60_family"]
+    tk = raw["tenk"]["placebo_negative"]
+    return {
+        "INSIDER_BUY": _primary(ins["primary"], ins["primary_sensitivity"], src),
+        "INSIDER_BUY_BUCKETS": {k: _bucket(f"INSIDER_BUY:{k}", v, src) for k, v in ins["buckets"].items()},
+        # matched placebo, one pre-registered test (60-day lookback, same-family contamination)
+        "INSIDER_CLUSTER": Effect("INSIDER_CLUSTER", NOT_SIGNIFICANT, 0.0, cl["companies"], cl["sign_test_p"], src,
+                                  f"{100 * cl['difference']:+.2f} pp, sign p={cl['sign_test_p']:.2g}", cl["difference"]),
+        # measured from the 10-K date: a risk, never a weight -> veto in the engine
+        "TENK_NEGATIVE_RECENT": Effect("TENK_NEGATIVE_RECENT", VETO, 0.0, tk["companies"], tk["sign_test_p"], src,
+                                       f"NEGATIVE 10-K change: {100 * tk['difference']:+.2f} pp vs matched control "
+                                       f"(p={tk['sign_test_p']:.1g}); veto, never a positive weight", tk["difference"]),
+        "v2_families": raw["v2_families"],
+        "unmeasured": raw["not_significant_or_unmeasured"],
+        "version": src,
     }
-    # 10-K material change: measured NEGATIVE (both placebo directions), but on the 90 days starting AT the 10-K event.
-    # Its incremental effect on a later signal's 90-day window (delayed entry, alongside an insider cell) was never
-    # measured, so it is context with weight 0 until that design is measured.
-    tk = fam["10K_NEGATIVE"]["primary"]
-    out["TENK_CHANGE_RECENT"] = Effect("TENK_CHANGE_RECENT", NOT_MEASURED, 0.0, tk.get("companies"), tk.get("sign_test_p"),
-                                       src, f"measured {100 * tk['difference']:+.2f} pp from the 10-K date; the incremental "
-                                            "effect on a later signal's window is not measured")
-    out["unmeasured"] = raw["not_significant_or_unmeasured"]
-    out["version"] = src
-    return out

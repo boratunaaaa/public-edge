@@ -1,0 +1,171 @@
+{
+ "job": "research_v2",
+ "wall_seconds": 667,
+ "result": {
+  "insider_spy": {
+   "events": 62267,
+   "companies": 4416,
+   "event_weighted": 0.4217000979652143,
+   "company_equal": 0.421847198116777,
+   "median_excess": -0.029488962304831112
+  },
+  "insider_placebo_pre20_family": {
+   "event_type": "INSIDER_OPEN_MARKET_BUY",
+   "where": "NOT COALESCE((payload->>'is_10b5_1')::boolean, false)",
+   "lookback": 20,
+   "contamination": "family",
+   "companies": 3404,
+   "skipped": 7016,
+   "event_rate": 0.44972127826187924,
+   "control_rate": 0.42510731388608625,
+   "difference": 0.024613964375793017,
+   "sign_test_p": 0.003581164033123746
+  },
+  "insider_placebo_pre60_family": {
+   "event_type": "INSIDER_OPEN_MARKET_BUY",
+   "where": "NOT COALESCE((payload->>'is_10b5_1')::boolean, false)",
+   "lookback": 60,
+   "contamination": "family",
+   "companies": 3337,
+   "skipped": 7999,
+   "event_rate": 0.44479800036004,
+   "control_rate": 0.4247215740796486,
+   "difference": 0.02007642628039139,
+   "sign_test_p": 0.002334219301028967
+  },
+  "insider_placebo_pre90_family": {
+   "event_type": "INSIDER_OPEN_MARKET_BUY",
+   "where": "NOT COALESCE((payload->>'is_10b5_1')::boolean, false)",
+   "lookback": 90,
+   "contamination": "family",
+   "companies": 3301,
+   "skipped": 8565,
+   "event_rate": 0.4445368463425193,
+   "control_rate": 0.43954603059778524,
+   "difference": 0.004990815744734014,
+   "sign_test_p": 0.5824281499808375
+  },
+  "insider_placebo_pre60_any": {
+   "event_type": "INSIDER_OPEN_MARKET_BUY",
+   "where": "NOT COALESCE((payload->>'is_10b5_1')::boolean, false)",
+   "lookback": 60,
+   "contamination": "any",
+   "companies": 2760,
+   "skipped": 11479,
+   "event_rate": 0.44753180746387267,
+   "control_rate": 0.42866615922322443,
+   "difference": 0.01886564824064824,
+   "sign_test_p": 0.02895064185541616
+  },
+  "cluster_placebo_pre20_family": {
+   "event_type": "CLUSTER_INSIDER_BUY",
+   "where": "TRUE",
+   "lookback": 20,
+   "contamination": "family",
+   "companies": 2181,
+   "skipped": 2242,
+   "event_rate": 0.4451614043611778,
+   "control_rate": 0.4273535348865068,
+   "difference": 0.017807869474670997,
+   "sign_test_p": 0.13987150757272526
+  },
+  "cluster_placebo_pre60_family": {
+   "event_type": "CLUSTER_INSIDER_BUY",
+   "where": "TRUE",
+   "lookback": 60,
+   "contamination": "family",
+   "companies": 2100,
+   "skipped": 2665,
+   "event_rate": 0.44105812970098685,
+   "control_rate": 0.44588917365703085,
+   "difference": -0.004831043956043957,
+   "sign_test_p": 0.8221039253659351
+  },
+  "cluster_placebo_pre90_family": {
+   "event_type": "CLUSTER_INSIDER_BUY",
+   "where": "TRUE",
+   "lookback": 90,
+   "contamination": "family",
+   "companies": 2052,
+   "skipped": 2934,
+   "event_rate": 0.432937554648081,
+   "control_rate": 0.45272066302768055,
+   "difference": -0.01978310837959961,
+   "sign_test_p": 0.06675032805147697
+  },
+  "tenk_negative": {
+   "NEGATIVE": {
+    "spy_90d": {
+     "events": 6354,
+     "companies": 3492,
+     "event_weighted": 0.35064526282656594,
+     "company_equal": 0.34987590683466974,
+     "median_excess": -0.072361117267084
+    },
+    "n": 7693.0,
+    "median_mae_180": -0.2326032564633579,
+    "delist_180": 0.20227272727272727,
+    "bankrupt_365": 0.03579545454545455,
+    "dilution_filing_180": 0.3809957103860653,
+    "mean_sector_excess_180": 0.08900028737413737
+   },
+   "POSITIVE": {
+    "spy_90d": {
+     "events": 1470,
+     "companies": 1225,
+     "event_weighted": 0.3435374149659864,
+     "company_equal": 0.3434013605442177,
+     "median_excess": -0.08964972073929678
+    },
+    "n": 1733.0,
+    "median_mae_180": -0.27711017785902725,
+    "delist_180": 0.11859838274932614,
+    "bankrupt_365": 0.026954177897574125,
+    "dilution_filing_180": 0.41431044431621467,
+    "mean_sector_excess_180": -0.03136398558545715
+   },
+   "NEW_GOING_CONCERN": {
+    "spy_90d": {
+     "events": 325,
+     "companies": 319,
+     "event_weighted": 0.28307692307692306,
+     "company_equal": 0.28213166144200624,
+     "median_excess": -0.21482453251393585
+    },
+    "n": 569.0,
+    "median_mae_180": -0.48672566371681414,
+    "delist_180": 0.26996197718631176,
+    "bankrupt_365": 0.12167300380228137,
+    "dilution_filing_180": 0.5992970123022847,
+    "mean_sector_excess_180": -0.09574942990964401
+   },
+   "LIQUIDITY_DETERIORATION": {
+    "spy_90d": {
+     "events": 1049,
+     "companies": 877,
+     "event_weighted": 0.2897998093422307,
+     "company_equal": 0.2968453059673128,
+     "median_excess": -0.14551705315775598
+    },
+    "n": 1500.0,
+    "median_mae_180": -0.36118884332967405,
+    "delist_180": 0.2265193370165746,
+    "bankrupt_365": 0.08103130755064457,
+    "dilution_filing_180": 0.516,
+    "mean_sector_excess_180": -0.08706279640788148
+   },
+   "placebo_negative": {
+    "event_type": "TENK_CHANGE",
+    "where": "payload->>'direction' = 'NEGATIVE'",
+    "lookback": 60,
+    "contamination": "family",
+    "companies": 2863,
+    "skipped": 1548,
+    "event_rate": 0.34002794271742925,
+    "control_rate": 0.4071486785423216,
+    "difference": -0.0671207358248923,
+    "sign_test_p": 4.685729628718024e-09
+   }
+  }
+ }
+}

@@ -1,54 +1,60 @@
-# Investment scoring V1 (research-only)
+# Investment scoring (research-only)
 
 `app/scoring/engine.py` gives every scanned live event an evidence-weighted estimate. It is **kept apart from the
 hard gate** (`app.paper.proposals.evaluate_gate`) and changes nothing in it: the gate still decides alone whether a
 proposal exists, its size and its book. The score is stored in `signal_scores` (migration 0015) together with the
 gate's failed rules (`vetoes`). No MAIN book, no real money, no sizing change.
 
-## Unit and formula
+## Unit and formula (model `score.v2-evidence`, evidence `scoring_evidence_v3_night_2026-09-30`)
 Probability points of beating SPY over 90 days, the event minus a matched control of the **same stock**
-(`app.backtest.research_v2` matched placebo, `docs/v2_placebo_results_2026-09-28.jsonl`).
+(company-level paired differences, `app.backtest.research_scoring`).
 
-    score  = edge of the most specific VALIDATED cell the event falls into
-           + VALIDATED risk adjustments that apply at the scoring moment (none validated yet)
+    score  = weight of the ONE validated cell the event falls into (never added across cells)
+    vetoes = the gate's failed rules + scoring vetoes; any veto means "no action", the score is never lowered or raised
 
-When several validated cells match, the smallest effect is used.
+The score and the vetoes are stored side by side in `signal_scores`; neither changes the other, and neither is read by
+the gate, the sizing or the ledger.
 
-**No confidence interval in V1.** The evidence carries the company-equal mean difference and a SIGN-test p-value;
-the sign test says nothing about the mean's variance, so no valid bound can be derived from it. A bound needs the
-company-level paired differences (a new evidence version); until then none is computed or stored. Bucket membership
-follows the research SQL exactly, including NULL semantics: a missing role flag never qualifies for a bucket. An
-event that is not public at the scoring moment (or has no public time) scores 0.
+## Which evidence counts (`app/scoring/evidence.py`, `app/scoring/evidence_2026-09-30.json`)
+The evidence file is rebuilt deterministically by `scripts/build_scoring_evidence_v3.py` from committed research
+outputs only (`docs/scoring_evidence_v2_2026-09-30.json` = the pre-registered 14-hypothesis insider family, and the
+2026-09-30 night run in `docs/night_2026-09-30/`). A test checks that the committed file equals the rebuild.
+Significance is judged in the **pre-registered** family; a subgroup significant only in the larger exploratory night
+family, or discovered in it, gets no weight until a pre-registered holdout replicates it. An `ACTIVE` label is
+re-checked in code (>= 100 companies, BH p <= 0.05, bootstrap interval above 0) - a label never overrides the data.
 
-## Which evidence counts (`app/scoring/evidence.py`, `evidence_2026-09-28.json`; sources
-`docs/v2_research_2026-09-28_insider.json`, `docs/v2_placebo_results_2026-09-28.jsonl`)
-A component gets a weight only if it has >= 100 companies and its p-value survives Benjamini-Hochberg (q 0.05) across
-its test family (the 11 insider buckets are one family). Everything else weighs 0 and is shown with the reason.
+| component | measured | role | weight |
+|---|---|---|---|
+| INSIDER_BUY: any 10 % owner (`ten_pct_any`) | +5.02 pp, 1,050 cos, BH 0.023, boot [+1.78, +8.42] | ACTIVE | **+5.02 pp** |
+| INSIDER_BUY: 10 % owner only (`role_10pct_only`) | +7.52 pp, 642 cos, BH 0.011 | EVIDENCE_ONLY (subset of ten_pct_any, never stacked) | 0 |
+| INSIDER_BUY (all discretionary buys) | +2.01 pp at 60-day lookback, but +0.50 pp (p 0.56) at 90 days and p 0.055 with any-type contamination | NOT_ROBUST | 0 |
+| value 100k-1M $, holdings +10-50 % | +2.98 / +3.19 pp, pre-registered BH 0.057 / 0.051 | HOLDOUT_REQUIRED | 0 |
+| serial buyer (3+ issuers in 2y), owner history negative, indirect only, first buy in 5y | +12.8 / +6.1 / +8.2 / +2.7 pp, night family only | HOLDOUT_REQUIRED | 0 |
+| CEO / CFO / director / other officer / other value and increase buckets, 10b5-1, >= 3 transactions | not significant | NOT_SIGNIFICANT | 0 |
+| INSIDER_CLUSTER (matched control) | -0.48 pp, p 0.82 | NOT_SIGNIFICANT | 0 |
+| 13F new / accumulation / exit / decrease, trial results / registration | BH >= 0.052 | NOT_SIGNIFICANT | 0 |
+| FDA, GOV_CONTRACT, CA contracts, FTD, short pressure | < 100 companies with 90-day returns | NOT_MEASURED | 0 |
+| 13D, HOUSE_BUY, MULTI_SIGNAL / NEWS, DISCOVERY, ACTIVIST_CROWDING | not significant / no matched-control result | - | 0 |
 
-| component | measured | weight |
+## Vetoes
+| veto | rule | evidence |
 |---|---|---|
-| INSIDER_BUY (discretionary, 60-day prior-return matched control) | +1.89 pp, p 0.005, 3,277 cos | **+1.89 pp** |
-| INSIDER_BUY: 10 % owner only (bucket) | +8.25 pp, p 8e-5, 620 cos (only bucket surviving BH) | **+8.25 pp cell** |
-| INSIDER_BUY: CEO / CFO / director / other officer / value / holdings increase buckets | p >= 0.03, none survives BH | 0 |
-| 10b5-1 pre-planned buys | outside the evidence (discretionary only) | 0 |
-| INSIDER_CLUSTER (matched control) | p 0.27 | 0 |
-| TENK_CHANGE in the 90 days before (risk context) | -3.60 / -3.74 pp from the 10-K date, p 0.0005 / 0.004; the incremental effect on a LATER signal's 90-day window was not measured | 0 (context; evidence event recorded) |
-| 13D, HOUSE_BUY, MULTI_SIGNAL | not significant | 0 |
-| NEWS, GOV_CONTRACT, DISCOVERY, ACTIVIST_CROWDING | no matched-control result | 0 |
-| insider history profiles | not validated as a predictor | 0 (context only) |
-| all 21+ V2 families (13F, FDA, trials, FTD, short volume, TR, CA ...) | returns still filling, not measured | 0 |
+| `TENK_NEGATIVE_RECENT` | a non-superseded 10-K change of the issuer with direction NEGATIVE, public (available_at) in the 90 days before the scoring moment | -6.71 pp vs matched control, 2,863 cos, sign p 5e-9 |
+| `TENK_NEW_GOING_CONCERN` | the same change lists NEW_GOING_CONCERN | 28 % beat SPY, 27 % delisted in 180 d, 12 % bankrupt in 365 d |
+| gate rules | every failed rule of `evaluate_gate` (e.g. SEVERE_FINANCING_RISK, LOW_LIQUIDITY, NOT_A_LONG_SIGNAL) | unchanged |
 
-`family_status()` lists every declared family with its status - the audit view of what is wired.
+A negative 10-K is never a (positive or negative) weight. Scoring vetoes are research-only: the gate is unchanged, so
+a proposal can still exist for a vetoed event; wiring the veto into the gate is a separate decision.
 
 ## Missing scores
 A score is written after the gate. If that write fails (or the process dies in between), the next scan retries it for
 events whose proposal already exists, at the proposal's creation time and with no vetoes (the gate passed then). A
-retry does not rebuild the 10-K context (supersession carries no timestamp, so the decision's state is not
+retry does not rebuild the 10-K veto (supersession carries no timestamp, so the decision's state is not
 reconstructable); its component records that instead of today's view.
 
 ## Point in time
-Only events with `available_at <= scoring moment` count; the 10-K adjustment uses changes public in the 90 days
-before (the window the effect was measured over). Evidence is a versioned file: a new measurement is a new version,
+Only events with `available_at <= scoring moment` count; the 10-K veto uses NEGATIVE changes public in the 90 days
+before the scoring moment. Evidence is a versioned file: a new measurement is a new version,
 never an in-place edit.
 
 ## What would change a weight

@@ -1,9 +1,10 @@
-"""Investment scoring V1 (RESEARCH-ONLY): an evidence-weighted estimate, kept apart from the hard gate.
+"""Investment scoring (RESEARCH-ONLY): an evidence-weighted estimate, kept apart from the hard gate.
 
-    score = edge of the most specific VALIDATED evidence cell the event falls into
-          + VALIDATED risk adjustments that apply at the scoring moment (none yet: see TENK_CHANGE_RECENT)
-    unit  = probability points of beating SPY over 90 days vs a matched control of the same stock
-    No confidence interval in V1 (the evidence has no company-level paired differences; see app.scoring.evidence).
+    score  = edge of the VALIDATED evidence cell the event falls into (evidence v3: only ten_pct_any is active)
+    vetoes = the gate's failed rules + scoring vetoes (a NEGATIVE 10-K change of the issuer in the 90 days before)
+    unit   = probability points of beating SPY over 90 days vs a matched control of the same stock
+A veto never changes the score and the score never lifts a veto: any veto means "no action" (the same convention as
+the gate's rules). Cells marked EVIDENCE_ONLY or HOLDOUT_REQUIRED are listed with weight 0 and are never stacked.
 
 The hard gate (app.paper.proposals.evaluate_gate: identity, duplicate, liquidity, severe financing risk, direction,
 family policy) is NOT part of the score and is never changed by it: the gate's failed rules are stored next to the
@@ -12,7 +13,7 @@ score as vetoes. Nothing here sizes, approves or places an order; MAIN books and
 Every input a component reads is point in time: only events with available_at <= the scoring moment. Components
 without validated evidence (13D, 13F, Congress, contracts, news, discovery, insider history profiles, every V2 family)
 are listed with weight 0 and the reason - no chosen weights. When several validated cells match, the SMALLEST effect
-is used (the conservative choice)."""
+is used (the conservative choice); weights are never added across cells of the same event."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -20,10 +21,13 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
-from app.scoring.evidence import NOT_MEASURED, NOT_SIGNIFICANT, registry
+from app.scoring.evidence import EVIDENCE_ONLY, HOLDOUT_REQUIRED, NOT_MEASURED, NOT_SIGNIFICANT, registry
 
-MODEL_VERSION = "score.v1-evidence"
+MODEL_VERSION = "score.v2-evidence"
 TENK_WINDOW_DAYS = 90  # the 10-K effect was measured over the 90 days after the change
+TENK_VETO, GOING_CONCERN_VETO = "TENK_NEGATIVE_RECENT", "TENK_NEW_GOING_CONCERN"
+# night-run subgroups derived from owner / issuer history: not evaluated at scoring time (weight 0 until a holdout)
+DERIVED_HOLDOUT = ("serial_3plus_issuers_2y", "owner_history_negative", "indirect_only", "first_buy_same_issuer_5y")
 
 # research_v2.INSIDER_BUCKETS as Python predicates with SQL three-valued logic: `(payload->>'x')::boolean` is NULL when
 # the key is missing or null, NOT NULL is NULL, and a WHERE clause keeps a row only when the whole condition is TRUE.
@@ -72,6 +76,7 @@ BUCKETS = {
     "incr_lt_10pct": lambda p: _cmp(_f(p, "holdings_increase"), lambda x: x < 0.10),
     "incr_10_50pct": lambda p: _cmp(_f(p, "holdings_increase"), lambda x: 0.10 <= x < 0.50),
     "incr_ge_50pct": lambda p: _cmp(_f(p, "holdings_increase"), lambda x: x >= 0.50),
+    "ten_pct_any": lambda p: _b(p, "is_ten_pct"),  # research_scoring.EXTRA_BUCKETS: (payload->>'is_ten_pct')::boolean
 }
 
 
@@ -109,6 +114,10 @@ def _edge_cell(ev: dict, reg: dict) -> tuple[object | None, str, list[dict]]:
                                "" if (hit or not eff.usable) else "bucket does not match this filing"))
             if hit and eff.usable:
                 matched.append(eff)
+        for name in DERIVED_HOLDOUT:
+            eff = reg["INSIDER_BUY_BUCKETS"].get(name)
+            comps.append(_comp(f"INSIDER_BUY:{name}", eff, False, "history-derived subgroup, not evaluated at scoring: "
+                                                                   + (eff.why if eff else "no result")))
         base = reg["INSIDER_BUY"]
         if matched:
             cell = min(matched, key=lambda e: e.effect)
@@ -121,9 +130,9 @@ def _edge_cell(ev: dict, reg: dict) -> tuple[object | None, str, list[dict]]:
         comps.append(_comp("INSIDER_CLUSTER", eff, eff.usable))
         return (eff if eff.usable else None), ("INSIDER_CLUSTER" if eff.usable else "NO_VALIDATED_CELL"), comps
     fam = UNVALIDATED_FAMILY.get(et)
-    status, why = _evidence_status(fam.split(" ")[0], reg) if fam else (NOT_MEASURED, "V2 family: not measured yet")
+    status, why = _evidence_status(fam.split(" ")[0], reg) if fam else _v2_status(et, reg)
     if et == "TENK_CHANGE":
-        status, why = reg["TENK_CHANGE_RECENT"].status, reg["TENK_CHANGE_RECENT"].why
+        status, why = NOT_MEASURED, "a 10-K change is never a buy cell; a NEGATIVE one is a veto on the issuer's signals"
     comps.append({"component": fam or et, "applies": False, "status": status, "effect_pp": 0.0, "companies": None,
                   "p": None, "why": why})
     return None, "NO_VALIDATED_CELL", comps
@@ -139,6 +148,17 @@ def _evidence_status(family: str, reg: dict) -> tuple[str, str]:
     return NOT_MEASURED, (e if isinstance(e, str) else "no matched-control result")
 
 
+def _v2_status(event_type: str, reg: dict) -> tuple[str, str]:
+    """A V2 event type from the night family run: tested (with its numbers) or not enough 90-day coverage."""
+    r = reg["v2_families"].get(event_type)
+    if not r:
+        return NOT_MEASURED, "V2 family: not measured yet"
+    if r.get("status") == "TESTED":
+        return NOT_SIGNIFICANT, (f"tested: {100 * r['effect']:+.2f} pp, BH p={r['bh_p']:.3g}, {r['companies']} companies"
+                                 " - not significant")
+    return NOT_MEASURED, f"insufficient 90-day coverage ({r.get('companies_90d', 0)} companies < 100)"
+
+
 def score_event(conn: Connection, ev: dict, now: datetime | None = None, context: bool = True) -> dict:
     """context=False (a retry at an earlier decision moment): the 10-K context is not rebuilt - supersession has no
     timestamp, so today's state could differ from the decision's; the component says so instead of guessing."""
@@ -152,28 +172,28 @@ def score_event(conn: Connection, ev: dict, now: datetime | None = None, context
                                 "companies": None, "p": None,
                                 "why": "event not public at the scoring moment" if public else "event has no public time"}]}
     cell, cell_name, comps = _edge_cell(ev, reg)
-    parts = [cell] if cell else []
-    tk = reg["TENK_CHANGE_RECENT"]
+    score = cell.effect if cell else 0.0  # one cell per event: weights are never stacked
+    tk = reg["TENK_NEGATIVE_RECENT"]
+    out = {"model_version": MODEL_VERSION, "evidence_version": reg["version"], "scored_at": now,
+           "score_pp": round(100 * score, 3), "cell": cell_name, "components": comps, "vetoes": []}
     if not context:
-        comps.append({**_comp("TENK_CHANGE_RECENT", tk, False, "context not rebuilt on a retry: supersession state at the "
-                                                               "decision moment is not reconstructable"),
-                      "evidence_event": None})
-        score = sum(e.effect for e in parts)
-        return {"model_version": MODEL_VERSION, "evidence_version": reg["version"], "scored_at": now,
-                "score_pp": round(100 * score, 3), "cell": cell_name, "components": comps}
-    recent = conn.execute(text("""SELECT id FROM events WHERE issuer_cik = :c AND event_type = 'TENK_CHANGE' AND NOT superseded
+        comps.append({**_comp(TENK_VETO, tk, False, "context not rebuilt on a retry: supersession state at the "
+                                                    "decision moment is not reconstructable"), "evidence_event": None})
+        return out
+    recent = conn.execute(text("""SELECT id, payload FROM events WHERE issuer_cik = :c AND event_type = 'TENK_CHANGE'
+                                  AND NOT superseded AND payload->>'direction' = 'NEGATIVE'
                                   AND coalesce(available_at, public_at) <= :now AND coalesce(available_at, public_at) > :lo
                                   ORDER BY coalesce(available_at, public_at) DESC LIMIT 1"""),
-                          {"c": ev.get("issuer_cik"), "now": now, "lo": now - timedelta(days=TENK_WINDOW_DAYS)}).scalar() \
+                          {"c": ev.get("issuer_cik"), "now": now, "lo": now - timedelta(days=TENK_WINDOW_DAYS)}).first() \
         if ev.get("issuer_cik") else None
-    comps.append({**_comp("TENK_CHANGE_RECENT", tk, bool(recent) and tk.usable,
-                          "" if recent else f"no 10-K material change in the {TENK_WINDOW_DAYS} days before"),
-                  "evidence_event": recent})
-    if recent and tk.usable:
-        parts.append(tk)
-    score = sum(e.effect for e in parts)
-    return {"model_version": MODEL_VERSION, "evidence_version": reg["version"], "scored_at": now,
-            "score_pp": round(100 * score, 3), "cell": cell_name, "components": comps}
+    comps.append({**_comp(TENK_VETO, tk, bool(recent), tk.why if recent else
+                          f"no NEGATIVE 10-K change in the {TENK_WINDOW_DAYS} days before"),
+                  "evidence_event": recent[0] if recent else None})
+    if recent:
+        out["vetoes"].append(TENK_VETO)
+        if "NEW_GOING_CONCERN" in ((recent[1] or {}).get("change_types") or []):
+            out["vetoes"].append(GOING_CONCERN_VETO)
+    return out
 
 
 def record(engine: Engine, event_id: int, vetoes: list[str] | None = None, now: datetime | None = None,
@@ -194,7 +214,7 @@ def record(engine: Engine, event_id: int, vetoes: list[str] | None = None, now: 
                              ON CONFLICT (event_id, model_version) DO NOTHING"""),
                      {"e": event_id, "mv": s["model_version"], "ev": s["evidence_version"], "at": s["scored_at"],
                       "s": s["score_pp"], "cell": s["cell"], "comp": json.dumps(s["components"], default=str),
-                      "veto": json.dumps(sorted(vetoes or []))})
+                      "veto": json.dumps(sorted(set(vetoes or []) | set(s["vetoes"])))})
     return s
 
 
@@ -231,24 +251,30 @@ def family_status() -> list[dict]:
     for fam in V1:
         if fam == "INSIDER_BUY":
             e = reg["INSIDER_BUY"]
-            rows.append({"family": fam, "status": e.status, "weight_pp": round(100 * e.effect, 2),
-                         "buckets_validated": sorted(k for k, v in reg["INSIDER_BUY_BUCKETS"].items() if v.usable)})
+            b = reg["INSIDER_BUY_BUCKETS"]
+            rows.append({"family": fam, "status": e.status, "weight_pp": round(100 * e.effect, 2), "why": e.why,
+                         "buckets_validated": {k: round(100 * v.effect, 2) for k, v in b.items() if v.usable},
+                         "evidence_only": sorted(k for k, v in b.items() if v.status == EVIDENCE_ONLY),
+                         "holdout_required": sorted(k for k, v in b.items() if v.status == HOLDOUT_REQUIRED)})
         elif fam == "INSIDER_CLUSTER":
             e = reg["INSIDER_CLUSTER"]
             rows.append({"family": fam, "status": e.status, "weight_pp": round(100 * e.effect, 2), "why": e.why})
         elif fam == "10K_CHANGE":
-            tk = reg["TENK_CHANGE_RECENT"]
-            rows.append({"family": fam, "status": tk.status, "weight_pp": 0.0,
-                         "why": "never a buy cell; as risk context (TENK_CHANGE_RECENT): " + tk.why})
+            tk = reg["TENK_NEGATIVE_RECENT"]
+            rows.append({"family": fam, "status": NOT_MEASURED, "weight_pp": 0.0,
+                         "why": "never a buy cell; a NEGATIVE change is a scoring veto (TENK_NEGATIVE_RECENT): " + tk.why})
         else:
             st, why = _evidence_status(fam, reg)
             rows.append({"family": fam, "status": st, "weight_pp": 0.0, "why": why})
-    tk = reg["TENK_CHANGE_RECENT"]
-    rows.append({"family": "TENK_CHANGE_RECENT (risk context)", "status": tk.status, "weight_pp": round(100 * tk.effect, 2),
-                 "why": tk.why})
+    tk = reg["TENK_NEGATIVE_RECENT"]
+    rows.append({"family": "TENK_NEGATIVE_RECENT (veto)", "status": tk.status, "weight_pp": 0.0, "why": tk.why})
     seen = {r["family"] for r in rows}
     for f in V2:
         if f.signal_id not in seen:
-            rows.append({"family": f.signal_id, "status": NOT_MEASURED, "weight_pp": 0.0,
-                         "why": "V2 family: no matched-control result yet" + (" (context only)" if f.context_only else "")})
+            tested = [(et, _v2_status(et, reg)) for et in f.source_event_types if et in reg["v2_families"]]
+            st, why = ((NOT_SIGNIFICANT if any(s == NOT_SIGNIFICANT for _e, (s, _w) in tested) else NOT_MEASURED),
+                       "; ".join(f"{et}: {w}" for et, (_s, w) in tested)) if tested else \
+                (NOT_MEASURED, "V2 family: no matched-control result yet")
+            rows.append({"family": f.signal_id, "status": st, "weight_pp": 0.0,
+                         "why": why + (" (context only)" if f.context_only else "")})
     return rows

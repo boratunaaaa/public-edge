@@ -1,0 +1,870 @@
+{
+ "evidence_version": "scoring_evidence_v3_night_2026-09-30",
+ "insider_buy": {
+  "buckets": {
+   "cluster_context_30d": {
+    "bh_family": "night_expansion_28",
+    "bh_p": 0.8225760075715995,
+    "boot_ci95": [
+     -0.03121417426813523,
+     0.023811206015568815
+    ],
+    "ci95": [
+     -0.03166268399811472,
+     0.023931370153138416
+    ],
+    "companies": 1742,
+    "effect": -0.0038656569224881513,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.014182417164614537,
+    "sign_p": 0.622789777061346,
+    "t_p": 0.7851861890456178,
+    "why": "BH 0.823 in the night expansion family"
+   },
+   "direct_only": {
+    "bh_family": "night_expansion_28",
+    "bh_p": 0.35411481442705856,
+    "boot_ci95": [
+     -0.04287878787878788,
+     0.1940909090909091
+    ],
+    "ci95": [
+     -0.041647965460819406,
+     0.19831463212748607
+    ],
+    "companies": 110,
+    "effect": 0.07833333333333334,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.06121607274120991,
+    "sign_p": 0.13964939861042938,
+    "t_p": 0.2006786840960642,
+    "why": "BH 0.354 in the night expansion family"
+   },
+   "first_buy_same_issuer_5y": {
+    "bh_family": "night_expansion_28",
+    "bh_p": 0.03133003465515246,
+    "boot_ci95": [
+     0.006121289424860853,
+     0.0462605648319934
+    ],
+    "ci95": [
+     0.00688648450707972,
+     0.04648343921998686
+    ],
+    "companies": 3080,
+    "effect": 0.02668496186353329,
+    "role": "HOLDOUT_REQUIRED",
+    "se": 0.010101449494201714,
+    "sign_p": 0.010047215446100844,
+    "t_p": 0.008249198577579981,
+    "why": "discovered in the 2026-09-30 night expansion (not pre-registered): weight 0 until the pre-registered holdout replicates it"
+   },
+   "incr_10_50pct": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.05079732503881296,
+    "boot_ci95": [
+     0.006846997541376379,
+     0.05717387110868453
+    ],
+    "ci95": [
+     0.007344867142429358,
+     0.05644329452008281
+    ],
+    "companies": 2117,
+    "effect": 0.03189408083125608,
+    "role": "HOLDOUT_REQUIRED",
+    "se": 0.012525339082160043,
+    "sign_p": 0.060476384268586494,
+    "t_p": 0.010885141079745635,
+    "why": "BH 0.051 in the pre-registered family; significant only in the larger exploratory night family (BH 0.034)"
+   },
+   "incr_ge_50pct": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.24688174228866597,
+    "boot_ci95": [
+     -0.006247512932749702,
+     0.05083432816023345
+    ],
+    "ci95": [
+     -0.00599552136459942,
+     0.05003186570735045
+    ],
+    "companies": 1795,
+    "effect": 0.022018172171375514,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.014292963307476533,
+    "sign_p": 0.05481154903096858,
+    "t_p": 0.12344087114433298,
+    "why": "BH 0.247 in the pre-registered family"
+   },
+   "incr_lt_10pct": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.6861927510944077,
+    "boot_ci95": [
+     -0.01659727291826577,
+     0.028284328442090327
+    ],
+    "ci95": [
+     -0.016435576914179434,
+     0.026852422490890385
+    ],
+    "companies": 2377,
+    "effect": 0.0052084227883554745,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.01104305982280027,
+    "sign_p": 0.35957465551325407,
+    "t_p": 0.6371789831590928,
+    "why": "BH 0.686 in the pre-registered family"
+   },
+   "indirect_only": {
+    "bh_family": "night_expansion_28",
+    "bh_p": 0.03133003465515246,
+    "boot_ci95": [
+     0.021435166864529745,
+     0.13842171217517477
+    ],
+    "ci95": [
+     0.02093086844627938,
+     0.14342739563497642
+    ],
+    "companies": 361,
+    "effect": 0.08217913204062789,
+    "role": "HOLDOUT_REQUIRED",
+    "se": 0.03124968805261143,
+    "sign_p": 0.012982972930050123,
+    "t_p": 0.008544554905950671,
+    "why": "discovered in the 2026-09-30 night expansion (not pre-registered): weight 0 until the pre-registered holdout replicates it"
+   },
+   "n_transactions_ge_3": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.16133748650574573,
+    "boot_ci95": [
+     -0.002968867366457728,
+     0.06638826813525608
+    ],
+    "ci95": [
+     -0.0017270149606093618,
+     0.06602328094362234
+    ],
+    "companies": 1245,
+    "effect": 0.032148132991506484,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.01728355620415265,
+    "sign_p": 0.036626654357682205,
+    "t_p": 0.06287964504250479,
+    "why": "BH 0.161 in the pre-registered family"
+   },
+   "owner_history_negative": {
+    "bh_family": "night_expansion_28",
+    "bh_p": 0.0010656921159746004,
+    "boot_ci95": [
+     0.03337844694987552,
+     0.08834291898577613
+    ],
+    "ci95": [
+     0.031252954271746076,
+     0.09024441343990736
+    ],
+    "companies": 1400,
+    "effect": 0.06074868385582671,
+    "role": "HOLDOUT_REQUIRED",
+    "se": 0.015049118036903043,
+    "sign_p": 8.392121542200459e-05,
+    "t_p": 5.420971043397514e-05,
+    "why": "discovered in the 2026-09-30 night expansion (not pre-registered): weight 0 until the pre-registered holdout replicates it"
+   },
+   "owner_history_positive": {
+    "bh_family": "night_expansion_28",
+    "bh_p": 0.4344012057200389,
+    "boot_ci95": [
+     -0.017148215733982158,
+     0.04930015746621586
+    ],
+    "ci95": [
+     -0.016503838885960208,
+     0.051089544137723854
+    ],
+    "companies": 1096,
+    "effect": 0.017292852625881823,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.017243526672858292,
+    "sign_p": 0.3673538520983263,
+    "t_p": 0.3159281496145737,
+    "why": "BH 0.434 in the night expansion family"
+   },
+   "planned_10b5_1": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.7667054805355082,
+    "boot_ci95": [
+     -0.10241862567811935,
+     0.06954490657022303
+    ],
+    "ci95": [
+     -0.10338702487495981,
+     0.07620197363927565
+    ],
+    "companies": 158,
+    "effect": -0.013592525617842074,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.04581436151741446,
+    "sign_p": 0.8330288937195214,
+    "t_p": 0.7667054805355082,
+    "why": "BH 0.767 in the pre-registered family"
+   },
+   "repeat_same_issuer_365d": {
+    "bh_family": "night_expansion_28",
+    "bh_p": 0.947388550902419,
+    "boot_ci95": [
+     -0.022248803693757823,
+     0.022347331567515054
+    ],
+    "ci95": [
+     -0.02111080266389464,
+     0.02258181126793076
+    ],
+    "companies": 2180,
+    "effect": 0.0007355043020180618,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.011146279710195033,
+    "sign_p": 0.8513330334547934,
+    "t_p": 0.9473885509024191,
+    "why": "BH 0.947 in the night expansion family"
+   },
+   "role_10pct_only": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.010721713520435754,
+    "boot_ci95": [
+     0.03150991445383969,
+     0.11827127528062106
+    ],
+    "ci95": [
+     0.03140468542506138,
+     0.1190300131404783
+    ],
+    "companies": 642,
+    "effect": 0.07521734928276984,
+    "role": "EVIDENCE_ONLY",
+    "se": 0.022353810507595273,
+    "sign_p": 0.00040754117273446994,
+    "t_p": 0.0007658366800311254,
+    "why": "subset of ten_pct_any (a 10 % owner with no officer/director role): kept as evidence, not stacked on an event that already carries the ten_pct_any weight"
+   },
+   "role_ceo": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.16133748650574573,
+    "boot_ci95": [
+     -0.0024485150640418674,
+     0.053394568133069815
+    ],
+    "ci95": [
+     -0.002049387839262881,
+     0.054329491685094676
+    ],
+    "companies": 1623,
+    "effect": 0.026140051922915897,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.014382631396382167,
+    "sign_p": 0.023576464626801658,
+    "t_p": 0.06914463707389103,
+    "why": "BH 0.161 in the pre-registered family"
+   },
+   "role_cfo": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.3444636309160353,
+    "boot_ci95": [
+     -0.015577078288942697,
+     0.06200480898574119
+    ],
+    "ci95": [
+     -0.015560104287567256,
+     0.06068722293163506
+    ],
+    "companies": 944,
+    "effect": 0.0225635593220339,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.019451206047458605,
+    "sign_p": 0.407867043902164,
+    "t_p": 0.24604545065431094,
+    "why": "BH 0.344 in the pre-registered family"
+   },
+   "role_director_only": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.3444636309160353,
+    "boot_ci95": [
+     -0.008279435989992394,
+     0.03170943322429603
+    ],
+    "ci95": [
+     -0.007663081501315932,
+     0.03252096519113559
+    ],
+    "companies": 2624,
+    "effect": 0.012428941844909832,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.010251220607228379,
+    "sign_p": 0.2819025817283859,
+    "t_p": 0.22534579099903723,
+    "why": "BH 0.344 in the pre-registered family"
+   },
+   "role_other_officer": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.6861927510944077,
+    "boot_ci95": [
+     -0.023280904644197697,
+     0.03957006404136314
+    ],
+    "ci95": [
+     -0.02399418538173182,
+     0.04027705072048839
+    ],
+    "companies": 1324,
+    "effect": 0.008141432669378288,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.016396024646937447,
+    "sign_p": 0.666632055322476,
+    "t_p": 0.6195069949403471,
+    "why": "BH 0.686 in the pre-registered family"
+   },
+   "serial_3plus_issuers_2y": {
+    "bh_family": "night_expansion_28",
+    "bh_p": 0.0010656921159746004,
+    "boot_ci95": [
+     0.06210386593661855,
+     0.19206902273104365
+    ],
+    "ci95": [
+     0.06375329727317994,
+     0.19268439975685162
+    ],
+    "companies": 287,
+    "effect": 0.12821884851501578,
+    "role": "HOLDOUT_REQUIRED",
+    "se": 0.032891191492208954,
+    "sign_p": 8.742522262975024e-05,
+    "t_p": 9.68811014522364e-05,
+    "why": "discovered in the 2026-09-30 night expansion (not pre-registered): weight 0 until the pre-registered holdout replicates it"
+   },
+   "ten_pct_any": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.023100736592697915,
+    "boot_ci95": [
+     0.01819437876160565,
+     0.08213710534718939
+    ],
+    "ci95": [
+     0.01672953645402714,
+     0.0837598188840677
+    ],
+    "companies": 1050,
+    "effect": 0.050244677669047416,
+    "role": "ACTIVE",
+    "se": 0.0170998759237518,
+    "sign_p": 0.000272638040891604,
+    "t_p": 0.0033001052275282734,
+    "why": ""
+   },
+   "value_100k_1m": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.05683253038020106,
+    "boot_ci95": [
+     0.0050462431625222315,
+     0.054021477230779553
+    ],
+    "ci95": [
+     0.00550120683619032,
+     0.05411761969371692
+    ],
+    "companies": 2150,
+    "effect": 0.02980941326495362,
+    "role": "HOLDOUT_REQUIRED",
+    "se": 0.012402373935829077,
+    "sign_p": 0.015900774224671416,
+    "t_p": 0.016237865822914588,
+    "why": "BH 0.057 in the pre-registered family; significant only in the larger exploratory night family (BH 0.045)"
+   },
+   "value_ge_1m": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.3444636309160353,
+    "boot_ci95": [
+     -0.013780180015812202,
+     0.058213221431612235
+    ],
+    "ci95": [
+     -0.013544423617515424,
+     0.0589710489291982
+    ],
+    "companies": 1044,
+    "effect": 0.02271331265584139,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.01849918481837259,
+    "sign_p": 0.11397144117486258,
+    "t_p": 0.21952178093964225,
+    "why": "BH 0.344 in the pre-registered family"
+   },
+   "value_ge_250k": {
+    "bh_family": "night_expansion_28",
+    "bh_p": 0.2488680266677805,
+    "boot_ci95": [
+     -0.005673611210109565,
+     0.047874117131800994
+    ],
+    "ci95": [
+     -0.005751919436214854,
+     0.047483192492954435
+    ],
+    "companies": 1822,
+    "effect": 0.02086563652836979,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.013580635136453854,
+    "sign_p": 0.058063388908898866,
+    "t_p": 0.12443401333389026,
+    "why": "BH 0.249 in the night expansion family"
+   },
+   "value_lt_100k": {
+    "bh_family": "prereg_insider_14",
+    "bh_p": 0.6861927510944077,
+    "boot_ci95": [
+     -0.014433146112863456,
+     0.02543795225231436
+    ],
+    "ci95": [
+     -0.013654663307511083,
+     0.025462001203466242
+    ],
+    "companies": 2618,
+    "effect": 0.005903668947977578,
+    "role": "NOT_SIGNIFICANT",
+    "se": 0.009978924233041354,
+    "sign_p": 0.28362374695334946,
+    "t_p": 0.5541092534168947,
+    "why": "BH 0.686 in the pre-registered family"
+   }
+  },
+  "primary": {
+   "bh_family": "single",
+   "bh_p": null,
+   "boot_ci95": [
+    0.003988594563961659,
+    0.03512354463965586
+   ],
+   "ci95": [
+    0.0036784237052266897,
+    0.03647442885555609
+   ],
+   "companies": 3337,
+   "effect": 0.02007642628039139,
+   "se": 0.00836648151454042,
+   "sign_p": 0.002334219301028967,
+   "t_p": 0.016411832033733458
+  },
+  "primary_sensitivity": {
+   "lookback20_family": {
+    "bh_family": "single",
+    "bh_p": null,
+    "boot_ci95": [
+     0.008438445890491926,
+     0.04120137027745724
+    ],
+    "ci95": [
+     0.008442254122554685,
+     0.04078567462903135
+    ],
+    "companies": 3404,
+    "effect": 0.024613964375793017,
+    "se": 0.008251024127605575,
+    "sign_p": 0.003581164033123746,
+    "t_p": 0.0028530697458756978
+   },
+   "lookback60_any": {
+    "bh_family": "single",
+    "bh_p": null,
+    "boot_ci95": [
+     -0.0010033947533947551,
+     0.037362663001249956
+    ],
+    "ci95": [
+     -0.00040046348938828705,
+     0.03813175997068477
+    ],
+    "companies": 2760,
+    "effect": 0.01886564824064824,
+    "se": 0.00982982938974212,
+    "sign_p": 0.02895064185541616,
+    "t_p": 0.05495594305038115
+   },
+   "lookback90_family": {
+    "bh_family": "single",
+    "bh_p": null,
+    "boot_ci95": [
+     -0.012585073309494937,
+     0.022518874881396603
+    ],
+    "ci95": [
+     -0.011821587145462706,
+     0.021803218634930732
+    ],
+    "companies": 3301,
+    "effect": 0.004990815744734014,
+    "se": 0.00857791413015582,
+    "sign_p": 0.5824281499808375,
+    "t_p": 0.5606868515645004
+   }
+  }
+ },
+ "insider_cluster": {
+  "cluster_placebo_pre20_family": {
+   "companies": 2181,
+   "contamination": "family",
+   "control_rate": 0.4273535348865068,
+   "difference": 0.017807869474670997,
+   "event_rate": 0.4451614043611778,
+   "event_type": "CLUSTER_INSIDER_BUY",
+   "lookback": 20,
+   "sign_test_p": 0.13987150757272526,
+   "skipped": 2242,
+   "where": "TRUE"
+  },
+  "cluster_placebo_pre60_family": {
+   "companies": 2100,
+   "contamination": "family",
+   "control_rate": 0.44588917365703085,
+   "difference": -0.004831043956043957,
+   "event_rate": 0.44105812970098685,
+   "event_type": "CLUSTER_INSIDER_BUY",
+   "lookback": 60,
+   "sign_test_p": 0.8221039253659351,
+   "skipped": 2665,
+   "where": "TRUE"
+  },
+  "cluster_placebo_pre90_family": {
+   "companies": 2052,
+   "contamination": "family",
+   "control_rate": 0.45272066302768055,
+   "difference": -0.01978310837959961,
+   "event_rate": 0.432937554648081,
+   "event_type": "CLUSTER_INSIDER_BUY",
+   "lookback": 90,
+   "sign_test_p": 0.06675032805147697,
+   "skipped": 2934,
+   "where": "TRUE"
+  }
+ },
+ "not_significant_or_unmeasured": {
+  "13D": {
+   "companies": 2576,
+   "difference": 0.0013004658385093169,
+   "sign_test_p": 0.6094156374241846
+  },
+  "ACTIVIST_CROWDING": "no result (all packs superseded)",
+  "DISCOVERY": "no result",
+  "GOV_CONTRACT": "no placebo / matched-control result",
+  "HOUSE_BUY": {
+   "companies": 913,
+   "difference": 0.028386272362175977,
+   "sign_test_p": 0.3071007888373524
+  },
+  "MULTI_SIGNAL": {
+   "companies": 641,
+   "difference": 0.014898595943837755,
+   "sign_test_p": 0.654720846018577
+  },
+  "NEWS": "placebo not run; 33 % SPY beat (master report)",
+  "V2_FAMILIES": "not measured yet (history ingested 2026-09-28, returns still filling)"
+ },
+ "sources": [
+  "docs/scoring_evidence_v2_2026-09-30.json",
+  "docs/night_2026-09-30/expansion.json",
+  "docs/night_2026-09-30/research_v2_refresh.json",
+  "docs/night_2026-09-30/families.json"
+ ],
+ "tenk": {
+  "incremental_on_later_buy": {
+   "any_10k": {
+    "bh_p": 0.28394430493266404,
+    "boot_ci95": [
+     -0.06054848514329133,
+     0.016976558349540698
+    ],
+    "ci95": [
+     -0.06243938347207087,
+     0.018299764959390133
+    ],
+    "incremental": -0.02206980925634037,
+    "se": 0.02059709985271694,
+    "welch_p": 0.28394430493266404,
+    "with_companies": 1171,
+    "with_effect": 0.005664674067748363,
+    "without_companies": 3220,
+    "without_effect": 0.027734483324088732
+   },
+   "negative_10k": {
+    "bh_p": 0.28394430493266404,
+    "boot_ci95": [
+     -0.06822976739599844,
+     0.018319326672210666
+    ],
+    "ci95": [
+     -0.07078383301589057,
+     0.018826089562508242
+    ],
+    "incremental": -0.025978871726691163,
+    "se": 0.022860094006420223,
+    "welch_p": 0.2557771019621523,
+    "with_companies": 962,
+    "with_effect": 0.0013167013167013164,
+    "without_companies": 3251,
+    "without_effect": 0.02729557304339248
+   }
+  },
+  "outcomes_from_10k_date": {
+   "LIQUIDITY_DETERIORATION": {
+    "bankrupt_365": 0.08103130755064457,
+    "delist_180": 0.2265193370165746,
+    "dilution_filing_180": 0.516,
+    "mean_sector_excess_180": -0.08706279640788148,
+    "median_mae_180": -0.36118884332967405,
+    "n": 1500.0,
+    "spy_90d": {
+     "companies": 877,
+     "company_equal": 0.2968453059673128,
+     "event_weighted": 0.2897998093422307,
+     "events": 1049,
+     "median_excess": -0.14551705315775598
+    }
+   },
+   "NEGATIVE": {
+    "bankrupt_365": 0.03579545454545455,
+    "delist_180": 0.20227272727272727,
+    "dilution_filing_180": 0.3809957103860653,
+    "mean_sector_excess_180": 0.08900028737413737,
+    "median_mae_180": -0.2326032564633579,
+    "n": 7693.0,
+    "spy_90d": {
+     "companies": 3492,
+     "company_equal": 0.34987590683466974,
+     "event_weighted": 0.35064526282656594,
+     "events": 6354,
+     "median_excess": -0.072361117267084
+    }
+   },
+   "NEW_GOING_CONCERN": {
+    "bankrupt_365": 0.12167300380228137,
+    "delist_180": 0.26996197718631176,
+    "dilution_filing_180": 0.5992970123022847,
+    "mean_sector_excess_180": -0.09574942990964401,
+    "median_mae_180": -0.48672566371681414,
+    "n": 569.0,
+    "spy_90d": {
+     "companies": 319,
+     "company_equal": 0.28213166144200624,
+     "event_weighted": 0.28307692307692306,
+     "events": 325,
+     "median_excess": -0.21482453251393585
+    }
+   },
+   "POSITIVE": {
+    "bankrupt_365": 0.026954177897574125,
+    "delist_180": 0.11859838274932614,
+    "dilution_filing_180": 0.41431044431621467,
+    "mean_sector_excess_180": -0.03136398558545715,
+    "median_mae_180": -0.27711017785902725,
+    "n": 1733.0,
+    "spy_90d": {
+     "companies": 1225,
+     "company_equal": 0.3434013605442177,
+     "event_weighted": 0.3435374149659864,
+     "events": 1470,
+     "median_excess": -0.08964972073929678
+    }
+   }
+  },
+  "placebo_negative": {
+   "companies": 2863,
+   "contamination": "family",
+   "control_rate": 0.4071486785423216,
+   "difference": -0.0671207358248923,
+   "event_rate": 0.34002794271742925,
+   "event_type": "TENK_CHANGE",
+   "lookback": 60,
+   "sign_test_p": 4.685729628718024e-09,
+   "skipped": 1548,
+   "where": "payload->>'direction' = 'NEGATIVE'"
+  },
+  "veto_rule": "a NEGATIVE 10-K change of the issuer public in the 90 days before the scoring moment is a veto (score 0, never a positive weight); NEW_GOING_CONCERN among its change types is named separately"
+ },
+ "unit": "probability points of beating SPY over 90 days, event minus matched same-stock control (company-equal)",
+ "v2_families": {
+  "CA_GOV_CONTRACT_WIN": {
+   "companies_90d": 3,
+   "status": "INSUFFICIENT_COVERAGE",
+   "statuses": {
+    "no_data": 14,
+    "partial": 15,
+    "pending": 3
+   }
+  },
+  "FDA_APPROVAL": {
+   "companies_90d": 43,
+   "status": "INSUFFICIENT_COVERAGE",
+   "statuses": {
+    "complete": 152,
+    "no_data": 54,
+    "partial": 34,
+    "vendor_wait": 15
+   }
+  },
+  "FDA_EFFICACY_SUPPLEMENT": {
+   "companies_90d": 29,
+   "status": "INSUFFICIENT_COVERAGE",
+   "statuses": {
+    "complete": 529,
+    "no_data": 25,
+    "partial": 81,
+    "pending": 1,
+    "vendor_wait": 15
+   }
+  },
+  "FTD_SPIKE": {
+   "companies_90d": 0,
+   "status": "INSUFFICIENT_COVERAGE",
+   "statuses": {
+    "pending": 267
+   }
+  },
+  "GOV_CONTRACT": {
+   "companies_90d": 81,
+   "status": "INSUFFICIENT_COVERAGE",
+   "statuses": {
+    "complete": 415,
+    "no_data": 6,
+    "partial": 191,
+    "pending": 6
+   }
+  },
+  "INST_13F_ACCUMULATION": {
+   "bh_p": 0.12381614084064875,
+   "boot_ci95": [
+    -0.0017516171771490927,
+    0.055009352349777885
+   ],
+   "ci95": [
+    -0.0013433287014730337,
+    0.05527131560818334
+   ],
+   "companies": 1222,
+   "companies_90d": 1420,
+   "effect": 0.02696399345335515,
+   "raw_spy_beat_company_equal": 0.4192421193829644,
+   "sd": 0.5048778246951862,
+   "se": 0.014442776578971953,
+   "sign_p": 0.11317664737301827,
+   "status": "TESTED",
+   "t_p": 0.061908070420324375
+  },
+  "INST_13F_DECREASE": {
+   "bh_p": 0.12381614084064875,
+   "boot_ci95": [
+    -8.976660682226334e-05,
+    0.04167307856715397
+   ],
+   "ci95": [
+    4.9075263181885126e-05,
+    0.041756515914043044
+   ],
+   "companies": 1671,
+   "companies_90d": 1902,
+   "effect": 0.020902795588612466,
+   "raw_spy_beat_company_equal": 0.4050866860108351,
+   "sd": 0.4349343167770468,
+   "se": 0.010639848653052087,
+   "sign_p": 0.0004460308953872011,
+   "status": "TESTED",
+   "t_p": 0.04946328539447359
+  },
+  "INST_13F_EXIT": {
+   "bh_p": 0.05183823508751578,
+   "boot_ci95": [
+    0.006925493152406079,
+    0.045341123256690534
+   ],
+   "ci95": [
+    0.006687274551450996,
+    0.046045480819826796
+   ],
+   "companies": 1895,
+   "companies_90d": 2223,
+   "effect": 0.026366377685638896,
+   "raw_spy_beat_company_equal": 0.40515566843776346,
+   "sd": 0.43708088572811626,
+   "se": 0.010040543160072277,
+   "sign_p": 0.0005337898907677697,
+   "status": "TESTED",
+   "t_p": 0.008639705847919297
+  },
+  "INST_13F_NEW_POSITION": {
+   "bh_p": 0.6209280824781958,
+   "boot_ci95": [
+    -0.052077646345162265,
+    0.028659387321807703
+   ],
+   "ci95": [
+    -0.055660350464961844,
+    0.028023104483766815
+   ],
+   "companies": 785,
+   "companies_90d": 930,
+   "effect": -0.013818622990597513,
+   "raw_spy_beat_company_equal": 0.39537822890811863,
+   "sd": 0.5981310395915476,
+   "se": 0.02134821225000272,
+   "sign_p": 0.9633261516904313,
+   "status": "TESTED",
+   "t_p": 0.5174400687318298
+  },
+  "RESULTS_POSTED": {
+   "bh_p": 0.7616628442838427,
+   "boot_ci95": [
+    -0.05802264933861014,
+    0.043900786244193586
+   ],
+   "ci95": [
+    -0.05798528146837972,
+    0.04244415983213746
+   ],
+   "companies": 384,
+   "companies_90d": 436,
+   "effect": -0.0077705608181211265,
+   "raw_spy_beat_company_equal": 0.3591142779550621,
+   "sd": 0.502051846542206,
+   "se": 0.025620226009385166,
+   "sign_p": 0.9498704530360561,
+   "status": "TESTED",
+   "t_p": 0.7616628442838427
+  },
+  "SHORT_PRESSURE": {
+   "companies_90d": 0,
+   "status": "INSUFFICIENT_COVERAGE",
+   "statuses": {}
+  },
+  "TRIAL_REGISTERED": {
+   "bh_p": 0.1446588459251156,
+   "boot_ci95": [
+    -0.06766004876311084,
+    0.005697192694496881
+   ],
+   "ci95": [
+    -0.06532570870880747,
+    0.005366914762763471
+   ],
+   "companies": 611,
+   "companies_90d": 755,
+   "effect": -0.029979396973021995,
+   "raw_spy_beat_company_equal": 0.3588045026883667,
+   "sd": 0.44577592931559107,
+   "se": 0.018034163758000384,
+   "sign_p": 0.14228142215219053,
+   "status": "TESTED",
+   "t_p": 0.09643923061674374
+  }
+ }
+}

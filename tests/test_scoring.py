@@ -21,17 +21,45 @@ def test_benjamini_hochberg_step_up():
     assert bh_survivors({"a": 0.03, "b": 0.04, "c": 0.9}) == set()
 
 
-def test_only_measured_significant_effects_get_a_weight():
-    from app.scoring.evidence import NOT_SIGNIFICANT, VALIDATED, registry
+def test_only_ten_pct_any_carries_a_weight_in_evidence_v3():
+    from app.scoring.evidence import EVIDENCE_ONLY, HOLDOUT_REQUIRED, NOT_ROBUST, NOT_SIGNIFICANT, VETO, registry
     reg = registry()
-    assert reg["INSIDER_BUY"].status == VALIDATED and reg["INSIDER_BUY"].effect == pytest.approx(0.0189, abs=1e-3)
-    validated = {k for k, v in reg["INSIDER_BUY_BUCKETS"].items() if v.usable}
-    assert validated == {"role_10pct_only"}  # the one bucket surviving BH across the 11 insider buckets
-    assert reg["INSIDER_BUY_BUCKETS"]["value_100k_1m"].status == NOT_SIGNIFICANT  # p 0.03 alone is not enough
-    assert reg["INSIDER_BUY_BUCKETS"]["value_100k_1m"].effect == 0.0
+    base = reg["INSIDER_BUY"]  # significant at 60 days, but +0.5 pp (p 0.56) with a 90-day lookback: not robust
+    assert base.status == NOT_ROBUST and base.effect == 0.0 and "lookback90_family" in base.why
+    assert base.measured == pytest.approx(0.0201, abs=1e-3)
+    b = reg["INSIDER_BUY_BUCKETS"]
+    assert {k: round(v.effect, 4) for k, v in b.items() if v.usable} == {"ten_pct_any": 0.0502}
+    assert b["role_10pct_only"].status == EVIDENCE_ONLY and b["role_10pct_only"].measured == pytest.approx(0.0752, abs=1e-3)
+    holdout = {k for k, v in b.items() if v.status == HOLDOUT_REQUIRED}
+    assert holdout == {"serial_3plus_issuers_2y", "owner_history_negative", "indirect_only", "first_buy_same_issuer_5y",
+                       "value_100k_1m", "incr_10_50pct"}
+    assert all(b[k].effect == 0.0 for k in holdout)
+    assert b["role_ceo"].status == NOT_SIGNIFICANT and b["role_ceo"].effect == 0.0
     assert reg["INSIDER_CLUSTER"].status == NOT_SIGNIFICANT and reg["INSIDER_CLUSTER"].effect == 0.0
-    tk = reg["TENK_CHANGE_RECENT"]  # measured from the 10-K date, not on a later signal's window: context only
-    assert tk.status == "NOT_MEASURED" and tk.effect == 0.0 and "incremental" in tk.why
+    tk = reg["TENK_NEGATIVE_RECENT"]  # a risk: a veto, never a weight
+    assert tk.status == VETO and tk.effect == 0.0 and tk.measured < 0
+
+
+def test_an_active_label_never_overrides_the_numbers():
+    from app.scoring.evidence import NOT_SIGNIFICANT, VALIDATED, _bucket
+    ok = {"role": "ACTIVE", "companies": 500, "effect": 0.05, "bh_p": 0.01, "boot_ci95": [0.01, 0.09]}
+    assert _bucket("x", ok, "v").status == VALIDATED
+    for bad in ({"companies": 80}, {"bh_p": 0.06}, {"boot_ci95": [-0.001, 0.09]}):
+        e = _bucket("x", {**ok, **bad}, "v")
+        assert e.status == NOT_SIGNIFICANT and e.effect == 0.0, bad
+
+
+def test_the_evidence_file_is_reproducible_from_the_committed_research_outputs():
+    import json
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "scripts"))
+    try:
+        from build_scoring_evidence_v3 import OUT, build
+    finally:
+        sys.path.pop(0)
+    assert json.loads(json.dumps(build(), sort_keys=True, default=str)) == json.loads(OUT.read_text())
 
 
 def test_every_declared_family_has_a_status_and_unvalidated_ones_weigh_zero():
@@ -40,8 +68,8 @@ def test_every_declared_family_has_a_status_and_unvalidated_ones_weigh_zero():
     from app.scoring.engine import family_status
     rows = {r["family"]: r for r in family_status()}
     assert set(V1) | {f.signal_id for f in V2} <= set(rows)
-    weighted = {k for k, r in rows.items() if r["weight_pp"]}
-    assert weighted == {"INSIDER_BUY"}
+    assert {k for k, r in rows.items() if r["weight_pp"]} == set()  # no family-level weight
+    assert rows["INSIDER_BUY"]["buckets_validated"] == {"ten_pct_any": 5.02}
     assert all(r["weight_pp"] == 0.0 for k, r in rows.items() if k.startswith(("US_", "TR_", "CA_")))
 
 
@@ -60,20 +88,30 @@ def _score(engine, payload, et="INSIDER_OPEN_MARKET_BUY", now=NOW, tenk_at=None,
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_a_discretionary_insider_buy_gets_the_validated_base_edge(engine):
+def test_a_plain_insider_buy_scores_zero_because_the_base_effect_is_not_robust(engine):
     s = _score(engine, {"is_ceo": True, "value": 50_000, "holdings_increase": 0.05})
-    assert s["cell"] == "INSIDER_BUY" and s["score_pp"] == pytest.approx(1.893, abs=0.01)
-    assert "ci_low_pp" not in s  # no unsupported interval
+    assert s["cell"] == "NO_VALIDATED_CELL" and s["score_pp"] == 0.0 and s["vetoes"] == []
+    base = next(c for c in s["components"] if c["component"] == "INSIDER_BUY")
+    assert base["status"] == "NOT_ROBUST" and base["effect_pp"] == 0.0
     ceo = next(c for c in s["components"] if c["component"] == "INSIDER_BUY:role_ceo")
     assert ceo["effect_pp"] == 0.0 and ceo["status"] == "NOT_SIGNIFICANT"  # matched, but not validated: no weight
 
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_a_ten_percent_owner_buy_uses_the_more_specific_validated_cell(engine):
-    owner = {"is_ten_pct": True, "is_director": False, "is_ceo": False, "is_cfo": False, "value": 2_000_000}
-    s = _score(engine, owner)
-    assert s["cell"] == "INSIDER_BUY:role_10pct_only" and s["score_pp"] == pytest.approx(8.25, abs=0.01)
+def test_a_ten_percent_owner_gets_ten_pct_any_once_never_stacked(engine):
+    only = {"is_ten_pct": True, "is_director": False, "is_ceo": False, "is_cfo": False, "value": 200_000,
+            "holdings_increase": 0.2}  # also in role_10pct_only, value_100k_1m and incr_10_50pct
+    s = _score(engine, only)
+    assert s["cell"] == "INSIDER_BUY:ten_pct_any" and s["score_pp"] == pytest.approx(5.02, abs=0.01)
+    comp = {c["component"]: c for c in s["components"]}
+    assert comp["INSIDER_BUY:role_10pct_only"]["status"] == "EVIDENCE_ONLY" and comp["INSIDER_BUY:role_10pct_only"]["effect_pp"] == 0
+    for k in ("value_100k_1m", "incr_10_50pct", "serial_3plus_issuers_2y", "owner_history_negative", "indirect_only",
+              "first_buy_same_issuer_5y"):
+        assert comp[f"INSIDER_BUY:{k}"]["status"] == "HOLDOUT_REQUIRED" and comp[f"INSIDER_BUY:{k}"]["effect_pp"] == 0, k
+    assert sum(c["effect_pp"] for c in s["components"]) == pytest.approx(5.02, abs=0.01)  # exactly one weighted cell
+    director = _score(engine, {**only, "is_director": True}, cik="0000000021")  # 10 % owner AND director
+    assert director["cell"] == "INSIDER_BUY:ten_pct_any" and director["score_pp"] == pytest.approx(5.02, abs=0.01)
 
 
 @pytest.mark.parametrize("flags, owner_cell", [
@@ -118,14 +156,29 @@ def test_planned_10b5_1_buys_and_unvalidated_families_score_zero(engine):
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_a_recent_10k_change_is_context_only_and_point_in_time(engine):
-    base = {"is_ceo": True, "value": 50_000}
-    recent = _score(engine, base, tenk_at=NOW - timedelta(days=20), cik="0000000011")
-    tk = next(c for c in recent["components"] if c["component"] == "TENK_CHANGE_RECENT")
-    assert recent["score_pp"] == pytest.approx(1.893, abs=0.01)  # weight 0 until its incremental effect is measured
-    assert tk["evidence_event"] and tk["effect_pp"] == 0.0 and "incremental" in tk["why"]
-    later = _score(engine, base, tenk_at=NOW + timedelta(days=5), cik="0000000012")  # public after the scoring moment
-    assert next(c for c in later["components"] if c["component"] == "TENK_CHANGE_RECENT")["evidence_event"] is None
+@pytest.mark.parametrize("direction, types, at_days, vetoes", [
+    ("NEGATIVE", ["NEW_RISK_FACTORS"], -20, ["TENK_NEGATIVE_RECENT"]),
+    ("NEGATIVE", ["NEW_GOING_CONCERN"], -20, ["TENK_NEGATIVE_RECENT", "TENK_NEW_GOING_CONCERN"]),
+    ("POSITIVE", ["REMOVED_GOING_CONCERN"], -20, []),  # a positive change is neither a weight nor a veto
+    ("MIXED", ["NEW_GOING_CONCERN"], -20, []),
+    ("NEGATIVE", ["NEW_GOING_CONCERN"], -120, []),  # outside the 90-day window
+    ("NEGATIVE", ["NEW_GOING_CONCERN"], +5, []),  # public after the scoring moment: point in time
+])
+def test_a_negative_10k_change_is_a_veto_never_a_weight(engine, direction, types, at_days, vetoes):
+    from app.scoring.engine import score_event
+    owner = {"is_ten_pct": True, "is_director": False, "is_ceo": False, "is_cfo": False, "value": 2e6}
+    cik = "0000000" + str(abs(at_days)).zfill(3)
+    with engine.begin() as c:
+        tid = _event(c, et="TENK_CHANGE", d=(NOW + timedelta(days=at_days)).date(), key=f"tk{direction}{types}{at_days}",
+                     payload={"direction": direction, "change_types": types}, cik=cik)
+        c.execute(text("UPDATE events SET available_at = :a WHERE id = :i"), {"a": NOW + timedelta(days=at_days), "i": tid})
+        eid = _event(c, payload=owner, key=f"b{direction}{types}{at_days}", cik=cik)
+        ev = dict(c.execute(text("SELECT * FROM events WHERE id = :i"), {"i": eid}).mappings().one())
+        s = score_event(c, ev, NOW)
+    assert s["vetoes"] == vetoes
+    assert s["score_pp"] == pytest.approx(5.02, abs=0.01)  # the 10-K never adds or subtracts a weight
+    tk = next(x for x in s["components"] if x["component"] == "TENK_NEGATIVE_RECENT")
+    assert tk["effect_pp"] == 0.0 and (tk["evidence_event"] == tid) is bool(vetoes)
 
 
 # ------------------------------------------------------------------ kept apart from the gate, research-only
@@ -156,7 +209,8 @@ def test_scan_records_the_score_after_the_gate_and_changes_nothing(engine, monke
         s = c.execute(select(signal_scores)).mappings().one()
     assert p["research_only"] and "score" not in (p["gate"] or {})  # the proposal is the gate's alone
     assert p["max_position_pct"] == 0.05 and p["suggested_position_pct"] == 0.03  # sizing untouched by a +8 pp score
-    assert s["event_id"] == eid and s["research_only"] and s["vetoes"] == [] and s["score_pp"] == pytest.approx(8.25, abs=0.01)
+    assert s["event_id"] == eid and s["research_only"] and s["vetoes"] == [] and s["score_pp"] == pytest.approx(5.02, abs=0.01)
+    assert s["model_version"] == "score.v2-evidence" and s["evidence_version"] == "scoring_evidence_v3_night_2026-09-30"
     assert scan_new_events(engine, days=5)["checked"] == 0  # already proposed: nothing re-scored twice
 
 
@@ -193,7 +247,26 @@ def test_vetoes_are_stored_apart_from_the_score(engine, monkeypatch):
     assert out["created"] == 0 and out["rejected"].get("SEVERE_FINANCING_RISK") == 1
     with engine.connect() as c:
         s = c.execute(select(signal_scores)).mappings().one()
-    assert "SEVERE_FINANCING_RISK" in s["vetoes"] and s["score_pp"] == pytest.approx(8.25, abs=0.01)  # score is not a veto
+    assert "SEVERE_FINANCING_RISK" in s["vetoes"] and s["score_pp"] == pytest.approx(5.02, abs=0.01)  # score is not a veto
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_a_scoring_veto_is_stored_with_the_gate_vetoes_and_leaves_the_gate_alone(engine, monkeypatch):
+    from app.db.models import proposed_trades, signal_scores
+    from app.paper.proposals import scan_new_events
+    _live_setup(engine, monkeypatch)
+    with engine.begin() as c:
+        tid = _event(c, et="TENK_CHANGE", d=date.today() - timedelta(days=10), key="tkneg",
+                     payload={"direction": "NEGATIVE", "change_types": ["NEW_GOING_CONCERN"]})
+        c.execute(text("UPDATE events SET available_at = now() - interval '10 days', is_backfill = true WHERE id = :i"),
+                  {"i": tid})
+    out = scan_new_events(engine, days=5)
+    with engine.connect() as c:
+        s = c.execute(select(signal_scores)).mappings().one()
+        n = c.execute(select(proposed_trades)).mappings().all()
+    assert out["created"] == 1 and len(n) == 1  # the gate is unchanged: a scoring veto is research-only
+    assert s["vetoes"] == ["TENK_NEGATIVE_RECENT", "TENK_NEW_GOING_CONCERN"]
 
 
 def test_scoring_is_never_read_by_the_gate_or_the_ledger():
@@ -238,7 +311,9 @@ def test_family_audit_separates_tested_from_unmeasured():
         assert rows[fam]["status"] == "NOT_SIGNIFICANT" and "tested" in rows[fam]["why"], fam
     for fam in ("NEWS", "GOV_CONTRACT", "DISCOVERY", "ACTIVIST_CROWDING"):
         assert rows[fam]["status"] == "NOT_MEASURED", fam
-    assert "incremental" in rows["10K_CHANGE"]["why"] and "incremental" in rows["TENK_CHANGE_RECENT (risk context)"]["why"]
+    assert "veto" in rows["10K_CHANGE"]["why"] and rows["TENK_NEGATIVE_RECENT (veto)"]["status"] == "VETO"
+    assert rows["US_13F_ACCUMULATION"]["status"] == "NOT_SIGNIFICANT" and "tested" in rows["US_13F_ACCUMULATION"]["why"]
+    assert rows["US_FDA_EVENT"]["status"] == "NOT_MEASURED" and "coverage" in rows["US_FDA_EVENT"]["why"]
 
 
 @db
@@ -282,5 +357,5 @@ def test_a_retry_does_not_rebuild_context_from_todays_supersession_state(engine)
     record(engine, eid, [], now=NOW, context=False)
     with engine.connect() as c:
         comps = c.execute(select(signal_scores.c.components)).scalar()
-    tk = next(x for x in comps if x["component"] == "TENK_CHANGE_RECENT")
+    tk = next(x for x in comps if x["component"] == "TENK_NEGATIVE_RECENT")
     assert tk["evidence_event"] is None and "not rebuilt" in tk["why"]
