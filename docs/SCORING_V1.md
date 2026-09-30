@@ -50,6 +50,12 @@ disagree. Point in time: only changes public **strictly before** the decision mo
 changes, a retry at an earlier moment counts them (its supersession state is not reconstructable). A 10-K change is
 never a weight: a vetoed event keeps its evidence score, and any veto means no action.
 
+The veto is re-checked after creation with the same `tenk_risk()`: at approval (`decide`: the proposal EXPIRES,
+`decided_by = system:tenk_...`, no order is queued), in the expiry sweep (PENDING proposals), and at every BUY fill
+at that fill's session open (the order is CANCELLED with the veto as note). SELL / exit orders are never checked.
+Every TENK_CHANGE write takes the issuer's exclusive advisory lock; approvals and fills read under its shared lock
+until they commit, so a 10-K write and a decision never interleave.
+
 ## Missing scores
 A score is written after the gate. If that write fails (or the process dies in between), the next scan retries it for
 events whose proposal already exists, at the proposal's creation time and with no vetoes (the gate passed then). A

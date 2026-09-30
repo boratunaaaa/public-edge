@@ -10,6 +10,13 @@ Point in time: only changes of the SAME issuer that were public STRICTLY BEFORE 
 (coalesce(available_at, public_at) < at), and only within the TENK_WINDOW_DAYS before it (the window the effect was
 measured over). A change becoming public at or after the decision can never veto it.
 
+Locking (no race between a decision and a new 10-K): every writer of a TENK_CHANGE event takes the issuer's
+EXCLUSIVE transaction advisory lock (app.db.store.create_event); a paper decision that must honour the veto (approval,
+BUY fill) reads with lock=True, i.e. under the issuer's SHARED lock held until its transaction commits. A 10-K
+committed before the decision's read is therefore always seen; one being written waits until the decision has
+committed (it then happened before the 10-K was known, and the next stage re-checks). Writers process one filing -
+one issuer - per transaction, so a writer never waits on a second issuer lock: no deadlock cycle.
+
 Supersession: a live decision uses today's state (superseded changes are ignored). A retry at an earlier decision
 moment cannot know that moment's supersession state (no timestamp), so it counts superseded changes too - the
 conservative side of a veto."""
@@ -31,11 +38,25 @@ class TenkRisk:
     vetoes: tuple[str, ...] = ()
     event_ids: tuple[int, ...] = ()  # the 10-K change events behind the vetoes (most recent first)
 
+    @property
+    def note(self) -> str:
+        return "validated 10-K risk: " + ", ".join(self.vetoes)
 
-def tenk_risk(conn: Connection, issuer_cik: str | None, at: datetime, *, include_superseded: bool = False) -> TenkRisk:
-    """The validated 10-K vetoes that apply to a decision on `issuer_cik` at `at` (see module doc)."""
+
+def lock_issuer(conn: Connection, issuer_cik: str, *, exclusive: bool) -> None:
+    """Transaction-scoped advisory lock on the issuer's 10-K risk (see module doc)."""
+    fn = "pg_advisory_xact_lock" if exclusive else "pg_advisory_xact_lock_shared"
+    conn.execute(text(f"SELECT {fn}(hashtextextended(:k, 0))"), {"k": f"pe:tenk:{issuer_cik}"})
+
+
+def tenk_risk(conn: Connection, issuer_cik: str | None, at: datetime, *, include_superseded: bool = False,
+              lock: bool = False) -> TenkRisk:
+    """The validated 10-K vetoes that apply to a decision on `issuer_cik` at `at` (see module doc). lock=True takes
+    the issuer's shared lock first and keeps it until the caller's transaction ends."""
     if not issuer_cik:
         return TenkRisk()
+    if lock:
+        lock_issuer(conn, issuer_cik, exclusive=False)
     rows = conn.execute(text(f"""
         SELECT id, payload->>'direction' = 'NEGATIVE' AS negative,
                coalesce(payload->'change_types' ? 'NEW_GOING_CONCERN', false) AS going_concern

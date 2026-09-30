@@ -14,7 +14,7 @@ Every strategy book (A-E) is a separate account with its own cash - results are 
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.engine import Connection, Engine
@@ -288,6 +288,17 @@ def fill_orders(conn: Connection, today: date) -> dict:
                     out["cancelled"] += 1
                 else:
                     out["waiting"] += 1
+                continue
+            # the validated 10-K hard veto at THIS fill's moment (the session open): a change public strictly before
+            # it - e.g. after the proposal / approval - cancels the BUY. The issuer's shared lock is held until the
+            # fill commits, so no 10-K write can interleave. SELL / exit orders never reach this check.
+            from app.core.tenk_policy import tenk_risk
+            from app.marketdata.calendar import NY
+            tk = tenk_risk(conn, info.get("cik"), datetime.combine(b.date, time(9, 30), NY), lock=True)
+            if tk.vetoes:
+                conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING"))
+                             .values(status="CANCELLED", note=tk.note))
+                out["cancelled"] += 1
                 continue
             bps = fq.cost_bps
             px = b.open * (1 + bps / 1e4)
