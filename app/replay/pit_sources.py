@@ -122,6 +122,7 @@ def _accepted(f: PitFact, acceptance: dict) -> datetime:
 def runway_months(facts: list[PitFact], acceptance: dict, at: datetime) -> float | None:
     """Production formula on what was public at `at`: the latest cash instant and the latest annual operating cash
     flow (by period end, then by filing - a restatement replaces), runway only when that OCF is negative."""
+    at = _aware(at)  # rejected even when there is no fact to look at
     seen = [f for f in facts if visible(f, acceptance, at)]
 
     def latest(fs):

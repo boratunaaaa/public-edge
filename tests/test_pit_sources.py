@@ -87,6 +87,9 @@ def test_offset_less_acceptance_is_utc_and_naive_moments_are_rejected():
     f = parse_companyfacts(CIK, _cf())[0]
     with pytest.raises(ValueError):
         visible(f, {}, datetime(2023, 6, 1))
+    from app.replay.pit_sources import runway_months
+    with pytest.raises(ValueError):
+        runway_months([], {}, datetime(2023, 6, 1))  # even with no facts at all
 
 
 def test_within_one_filing_the_preferred_concept_wins_whatever_the_input_order():
