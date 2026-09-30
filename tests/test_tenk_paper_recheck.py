@@ -357,3 +357,37 @@ def test_approval_and_a_10k_supersession_of_its_own_source_never_deadlock(engine
         writer.close()
     t.join(10)
     assert result == {"ok": False, "error": "SOURCE_SUPERSEDED"}
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_the_expiry_sweep_and_an_approval_never_deadlock(engine):
+    """decide() locks the proposal, then its source event. The sweep must take proposal rows before event rows too:
+    while an approval holds the proposal, the sweep waits WITHOUT holding the (blocked) source event."""
+    import threading
+    import time as _t
+
+    from app.db.models import proposed_trades
+    from app.paper.proposals import expire
+    with engine.begin() as c:
+        pid = _proposal(c)
+        src = _p(c, pid)["event_id"]
+        c.execute(text("UPDATE events SET needs_review = true WHERE id = :i"), {"i": src})  # the sweep will act on it
+    approval = engine.connect()
+    tx = approval.begin()
+    done = threading.Event()
+    try:
+        approval.execute(select(proposed_trades.c.id).where(proposed_trades.c.id == pid).with_for_update()).all()
+        t = threading.Thread(target=lambda: (expire(engine, now=CREATED + timedelta(hours=1)), done.set()))
+        t.start()
+        _t.sleep(1.0)
+        assert not done.is_set()
+        approval.execute(text("SET LOCAL lock_timeout = '3s'"))  # the approval's next step: its source event row
+        approval.execute(text("SELECT 1 FROM events WHERE id = :i FOR UPDATE"), {"i": src})
+    finally:
+        tx.commit()
+        approval.close()
+    t.join(10)
+    assert done.is_set()
+    with engine.connect() as c:
+        assert _p(c, pid)["approval_status"] == "EXPIRED"

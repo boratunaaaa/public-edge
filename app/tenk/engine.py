@@ -196,6 +196,8 @@ def process_filing(engine: Engine, cik: str, ticker: str | None, name: str | Non
     except FetchError as e:
         if not existing:
             with engine.begin() as conn:
+                from app.core.tenk_policy import lock_issuer
+                lock_issuer(conn, cik, exclusive=True)  # first, like every 10-K writer
                 conn.execute(pg_insert(tenk_filings).values(accession=f["accession"], sections=[], profile={},
                                                             status="fetch_failed", **vals)
                              .on_conflict_do_nothing(index_elements=["accession"]))
@@ -209,6 +211,9 @@ def process_filing(engine: Engine, cik: str, ticker: str | None, name: str | Non
     if isinstance(txt, Extracted) and txt.failed:
         status = "extract_failed"  # not retried automatically: the same document would fail the same way
     with engine.begin() as conn:
+        # every 10-K writer takes the issuer's 10-K lock FIRST, before any filing / event row (app.core.tenk_policy)
+        from app.core.tenk_policy import lock_issuer
+        lock_issuer(conn, cik, exclusive=True)
         if existing:
             conn.execute(tenk_filings.update().where(tenk_filings.c.id == existing[0]).values(
                 sections=sorted(items), profile=prof, status=status, **vals))
@@ -601,7 +606,7 @@ def supersede_old_classifier(engine: Engine, dry_run: bool = True) -> dict:
     from app.tenk.diff import CLASSIFIER_VERSION
     run_id = f"tenk-reclassify-{date.today().isoformat()}-{uuid.uuid4().hex[:6]}"
     with engine.begin() as conn:
-        old = conn.execute(sql("""SELECT id, accession, COALESCE((profile->'_meta'->>'v')::int, 1) v FROM tenk_filings
+        old = conn.execute(sql("""SELECT id, accession, cik, COALESCE((profile->'_meta'->>'v')::int, 1) v FROM tenk_filings
                                   WHERE status <> 'superseded' AND COALESCE((profile->'_meta'->>'v')::int, 1) < :v"""),
                            {"v": CLASSIFIER_VERSION}).mappings().all()
         evs = conn.execute(sql("""SELECT id, dedupe_key, issuer_cik FROM events WHERE event_type = 'TENK_CHANGE'
@@ -611,7 +616,7 @@ def supersede_old_classifier(engine: Engine, dry_run: bool = True) -> dict:
         if dry_run:
             return out
         from app.core.tenk_policy import lock_issuers  # these supersessions change 10-K risk: all issuers, CIK order
-        lock_issuers(conn, [e["issuer_cik"] for e in evs], exclusive=True)
+        lock_issuers(conn, [e["issuer_cik"] for e in evs] + [r["cik"] for r in old], exclusive=True)
         for r in old:
             new_acc = f"{r['accession'][:20]}#{r['id'] % 65536:04x}"  # unique per row (re-supersessions never collide)
             conn.execute(sql("UPDATE tenk_filings SET status = 'superseded', accession = :a WHERE id = :i"), {"a": new_acc, "i": r["id"]})

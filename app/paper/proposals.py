@@ -326,21 +326,19 @@ def source_valid(conn: Connection, event_id: int | None, lock: bool = False) -> 
 def expire(engine: Engine, now: datetime | None = None) -> int:
     """Time-outs, PENDING proposals whose issuer carries a validated 10-K veto (app.core.tenk_policy), plus PENDING
     proposals and unfilled paper BUY orders whose source event no longer stands (source_block: superseded, identity
-    unsafe or under review). The affected event rows are locked (FOR SHARE)
-    first, so the decision and the cancellation see one state. SELL orders are never touched here."""
+    unsafe or under review). Lock order: PENDING proposal rows (id order), then the affected event rows (FOR SHARE), so the
+    decision and the cancellation see one state and an approval never deadlocks with it. SELL orders are never touched."""
     from app.core.event_policy import SOURCE_COLUMNS, source_block_reason, source_blocked_clause
     from app.db.models import paper_orders
     now = now or datetime.now(timezone.utc)
     with engine.begin() as conn:
+        # lock order, as in decide(): proposal rows (all PENDING, id order) BEFORE any event row - an approval and this
+        # sweep can never hold one each and wait for the other
+        conn.execute(select(proposed_trades.c.id).where(proposed_trades.c.approval_status == "PENDING")
+                     .order_by(proposed_trades.c.id).with_for_update()).all()
         n = conn.execute(proposed_trades.update().where(and_(
             proposed_trades.c.approval_status == "PENDING", proposed_trades.c.expires_at <= now))
             .values(approval_status="EXPIRED", decided_at=now, decided_by="system:expiry")).rowcount
-        open_ids = select(proposed_trades.c.event_id).where(proposed_trades.c.approval_status == "PENDING").union(
-            select(proposed_trades.c.event_id).join(paper_orders, paper_orders.c.proposal_id == proposed_trades.c.id)
-            .where(and_(paper_orders.c.status == "PENDING", paper_orders.c.side == "BUY")))
-        rows = conn.execute(select(events.c.id, *SOURCE_COLUMNS).where(and_(
-            events.c.id.in_(open_ids), source_blocked_clause())).order_by(events.c.id)
-            .with_for_update(read=True)).mappings().all()
         # PENDING proposals whose issuer now carries a validated 10-K veto expire (the approval re-checks it under the
         # issuer lock anyway; this sweep only keeps the queue honest). BUY orders are left to fill_orders, which checks
         # the veto at each order's own session open (point in time).
@@ -352,6 +350,12 @@ def expire(engine: Engine, now: datetime | None = None) -> int:
                 n += conn.execute(proposed_trades.update().where(and_(
                     proposed_trades.c.id == pid, proposed_trades.c.approval_status == "PENDING")).values(
                     approval_status="EXPIRED", decided_at=now, decided_by=f"system:{tk.vetoes[0].lower()}"[:40])).rowcount
+        open_ids = select(proposed_trades.c.event_id).where(proposed_trades.c.approval_status == "PENDING").union(
+            select(proposed_trades.c.event_id).join(paper_orders, paper_orders.c.proposal_id == proposed_trades.c.id)
+            .where(and_(paper_orders.c.status == "PENDING", paper_orders.c.side == "BUY")))
+        rows = conn.execute(select(events.c.id, *SOURCE_COLUMNS).where(and_(
+            events.c.id.in_(open_ids), source_blocked_clause())).order_by(events.c.id)
+            .with_for_update(read=True)).mappings().all()
         by: dict[str, list[int]] = {}
         for r in rows:
             by.setdefault(source_block_reason(r), []).append(r["id"])
