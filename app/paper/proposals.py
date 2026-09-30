@@ -383,6 +383,11 @@ def decide(engine: Engine, code: str, approve: bool, by: str, now: datetime | No
                 approval_status="EXPIRED", decided_at=now, decided_by="system:expiry"))
             return {"ok": False, "error": "EXPIRED"}
         if approve:
+            # lock order: proposal row -> issuer 10-K lock -> source event row. A TENK_CHANGE writer takes the issuer
+            # lock before touching any event row, so taking it here BEFORE the event lock leaves no cycle.
+            from app.core.tenk_policy import lock_issuer
+            if p["cik"]:
+                lock_issuer(conn, p["cik"], exclusive=False)
             # re-validate the source signal inside the same transaction (row lock on the event): superseded,
             # identity unsafe or under review since the proposal was created -> the proposal expires
             why = source_block(conn, p["event_id"], lock=True, exclusive=True)

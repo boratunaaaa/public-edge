@@ -318,3 +318,42 @@ def test_a_fill_run_locks_every_buy_issuer_up_front(engine):
     finally:
         tx.rollback()
         runner.close()
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_approval_and_a_10k_supersession_of_its_own_source_never_deadlock(engine):
+    """Lock order: the approval takes the issuer lock BEFORE the source event row, like every 10-K writer. A writer
+    holding the issuer lock can therefore still supersede the proposal's own TENK_CHANGE source event; the waiting
+    approval then sees the supersession."""
+    import threading
+    import time as _t
+
+    from app.db.models import proposed_trades
+    from app.paper.proposals import decide
+    with engine.begin() as c:
+        src = _tenk(c, CREATED - timedelta(days=1), direction="POSITIVE", types=("RISK_DECREASE",), key="tksrc")
+        c.execute(proposed_trades.insert().values(
+            code="PETENKS", ticker="ZBIO", cik=CIK, event_id=src, signal_family="10K_CHANGE", event_type="TENK_CHANGE",
+            proposal_created_at=CREATED, reference_date=CREATED.date(), entry_reference_price=10.0,
+            suggested_position_pct=0.03, max_position_pct=0.05, stop_reference=8.5, thesis="t", risks=[], reasons=[],
+            data_quality="OK", gate={}, approval_status="PENDING", expires_at=CREATED + timedelta(days=3),
+            research_only=True))
+    writer = engine.connect()
+    tx = writer.begin()
+    result: dict = {}
+    try:
+        from app.core.tenk_policy import lock_issuer
+        lock_issuer(writer, CIK, exclusive=True)  # the writer's first step, as in app.tenk.engine
+        t = threading.Thread(target=lambda: result.update(decide(engine, "PETENKS", True, by="user",
+                                                                 now=CREATED + timedelta(hours=3))))
+        t.start()
+        _t.sleep(1.0)
+        assert not result  # the approval waits on the issuer lock, holding no event row lock
+        writer.execute(text("SET LOCAL lock_timeout = '3s'"))  # a deadlock / wait here would raise
+        writer.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": src})
+    finally:
+        tx.commit()
+        writer.close()
+    t.join(10)
+    assert result == {"ok": False, "error": "SOURCE_SUPERSEDED"}
