@@ -4,7 +4,7 @@ on it (found by the 2023-H1 replay pilot: two runs swapped two same-day exit ord
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 from app.marketdata.provider import Bar
 from tests.test_alpha_validation import _serve, offline_prices  # noqa: F401 - fixture
@@ -45,11 +45,22 @@ def test_exit_orders_follow_position_ids_whatever_the_physical_row_order(engine,
                                                    trade_date=date(2024, 1, 3), price=px, shares=10, gross=px * 10,
                                                    commission=1, slippage_bps=0))
             ids.append(pid)
-        # an UPDATE moves the first position's tuple behind the second: unordered scans now return BBB first
+        # an UPDATE usually moves the first position's tuple behind the second (not guaranteed - hence the SQL check below)
         c.execute(paper_positions.update().where(paper_positions.c.id == ids[0]).values(last_price=10.5))
-        unordered = [r[0] for r in c.execute(text("SELECT id FROM paper_positions WHERE status = 'OPEN'"))]
-        assert unordered == [ids[1], ids[0]]  # the precondition of the test: physical order != id order
-        assert check_exits(c, date(2024, 2, 5))["exit_orders"] == 2
+        seen: list[str] = []
+
+        def capture(conn, cursor, statement, *args):
+            if "FROM paper_positions" in statement and "status" in statement:
+                seen.append(statement)
+        from sqlalchemy import event
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            assert check_exits(c, date(2024, 2, 5))["exit_orders"] == 2
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+    # deterministic: the read of open positions itself is ordered by id, whatever PostgreSQL's physical order
+    assert seen and all("ORDER BY paper_positions.id" in s for s in seen)
+    with engine.connect() as c:
         sells = c.execute(select(paper_orders.c.position_id).where(paper_orders.c.side == "SELL")
                           .order_by(paper_orders.c.id)).scalars().all()
     assert sells == ids  # exit orders created in position id order

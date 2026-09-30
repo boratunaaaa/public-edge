@@ -25,9 +25,11 @@ def collect(engine: Engine, src: SourceData, last_day: date | None) -> dict:
     spy = src.bars.get("SPY", [])
     with engine.connect() as c:
         props = c.execute(select(proposed_trades.c.signal_family, proposed_trades.c.approval_status, func.count())
-                          .group_by(proposed_trades.c.signal_family, proposed_trades.c.approval_status)).all()
+                          .group_by(proposed_trades.c.signal_family, proposed_trades.c.approval_status)
+                          .order_by(proposed_trades.c.signal_family, proposed_trades.c.approval_status)).all()
         orders = c.execute(select(paper_orders.c.side, paper_orders.c.status, func.count())
-                           .group_by(paper_orders.c.side, paper_orders.c.status)).all()
+                           .group_by(paper_orders.c.side, paper_orders.c.status)
+                           .order_by(paper_orders.c.side, paper_orders.c.status)).all()
         capped = c.execute(select(func.count()).where(paper_orders.c.note == "participation cap: partial fill")).scalar()
         trades = c.execute(select(paper_trades.c.account_id, paper_trades.c.gross, paper_trades.c.commission,
                                   paper_trades.c.slippage_bps).order_by(paper_trades.c.id)).all()
