@@ -1,13 +1,14 @@
 """Investment scoring (RESEARCH-ONLY): an evidence-weighted estimate, kept apart from the hard gate.
 
     score  = edge of the VALIDATED evidence cell the event falls into (evidence v3: only ten_pct_any is active)
-    vetoes = the gate's failed rules + scoring vetoes (a NEGATIVE 10-K change of the issuer in the 90 days before)
+    vetoes = the gate's failed rules + the validated 10-K vetoes (app.core.tenk_policy - the SAME policy the gate
+             enforces as a hard veto: NEGATIVE change / NEW_GOING_CONCERN public in the 90 days before)
     unit   = probability points of beating SPY over 90 days vs a matched control of the same stock
 A veto never changes the score and the score never lifts a veto: any veto means "no action" (the same convention as
 the gate's rules). Cells marked EVIDENCE_ONLY or HOLDOUT_REQUIRED are listed with weight 0 and are never stacked.
 
 The hard gate (app.paper.proposals.evaluate_gate: identity, duplicate, liquidity, severe financing risk, direction,
-family policy) is NOT part of the score and is never changed by it: the gate's failed rules are stored next to the
+validated 10-K risk, family policy) is NOT part of the score and is never changed by it: the gate's failed rules are stored next to the
 score as vetoes. Nothing here sizes, approves or places an order; MAIN books and real money are untouched.
 
 Every input a component reads is point in time: only events with available_at <= the scoring moment. Components
@@ -16,16 +17,16 @@ are listed with weight 0 and the reason - no chosen weights. When several valida
 is used (the conservative choice); weights are never added across cells of the same event."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
+from app.core.tenk_policy import TENK_NEGATIVE_RECENT as TENK_VETO  # the SAME policy the paper gate enforces
+from app.core.tenk_policy import TENK_WINDOW_DAYS, tenk_risk
 from app.scoring.evidence import EVIDENCE_ONLY, HOLDOUT_REQUIRED, NOT_MEASURED, NOT_SIGNIFICANT, registry
 
 MODEL_VERSION = "score.v2-evidence"
-TENK_WINDOW_DAYS = 90  # the 10-K effect was measured over the 90 days after the change
-TENK_VETO, GOING_CONCERN_VETO = "TENK_NEGATIVE_RECENT", "TENK_NEW_GOING_CONCERN"
 # night-run subgroups derived from owner / issuer history: not evaluated at scoring time (weight 0 until a holdout)
 DERIVED_HOLDOUT = ("serial_3plus_issuers_2y", "owner_history_negative", "indirect_only", "first_buy_same_issuer_5y")
 
@@ -177,22 +178,14 @@ def score_event(conn: Connection, ev: dict, now: datetime | None = None, context
     tk = reg["TENK_NEGATIVE_RECENT"]
     out = {"model_version": MODEL_VERSION, "evidence_version": reg["version"], "scored_at": now,
            "score_pp": round(100 * score, 3), "cell": cell_name, "components": comps, "vetoes": []}
-    # A retry cannot rebuild the supersession state of the decision moment (no timestamp), so it errs on the side of
-    # the veto: a NEGATIVE change available in the window counts even if it is superseded today.
-    recent = conn.execute(text(f"""SELECT id, payload FROM events WHERE issuer_cik = :c AND event_type = 'TENK_CHANGE'
-                                  {"AND NOT superseded" if context else ""} AND payload->>'direction' = 'NEGATIVE'
-                                  AND coalesce(available_at, public_at) <= :now AND coalesce(available_at, public_at) > :lo
-                                  ORDER BY coalesce(available_at, public_at) DESC LIMIT 1"""),
-                          {"c": ev.get("issuer_cik"), "now": now, "lo": now - timedelta(days=TENK_WINDOW_DAYS)}).first() \
-        if ev.get("issuer_cik") else None
+    # app.core.tenk_policy: strictly before the decision moment; a retry (context=False) cannot rebuild that moment's
+    # supersession state and counts superseded changes too (the conservative side of a veto)
+    risk = tenk_risk(conn, ev.get("issuer_cik"), now, include_superseded=not context)
     note = "" if context else " (retry: superseded changes also count - the decision's state is not reconstructable)"
-    comps.append({**_comp(TENK_VETO, tk, bool(recent), (tk.why if recent else
-                          f"no NEGATIVE 10-K change in the {TENK_WINDOW_DAYS} days before") + note),
-                  "evidence_event": recent[0] if recent else None})
-    if recent:
-        out["vetoes"].append(TENK_VETO)
-        if "NEW_GOING_CONCERN" in ((recent[1] or {}).get("change_types") or []):
-            out["vetoes"].append(GOING_CONCERN_VETO)
+    comps.append({**_comp(TENK_VETO, tk, bool(risk.vetoes), (tk.why if risk.vetoes else
+                          f"no NEGATIVE / going-concern 10-K change public in the {TENK_WINDOW_DAYS} days before") + note),
+                  "evidence_event": risk.event_ids[0] if risk.event_ids else None})
+    out["vetoes"].extend(risk.vetoes)
     return out
 
 

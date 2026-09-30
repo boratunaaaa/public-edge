@@ -12,8 +12,8 @@ Probability points of beating SPY over 90 days, the event minus a matched contro
     score  = weight of the ONE validated cell the event falls into (never added across cells)
     vetoes = the gate's failed rules + scoring vetoes; any veto means "no action", the score is never lowered or raised
 
-The score and the vetoes are stored side by side in `signal_scores`; neither changes the other, and neither is read by
-the gate, the sizing or the ledger.
+The score and the vetoes are stored side by side in `signal_scores`; neither changes the other. The score is never
+read by the gate, the sizing or the ledger; the 10-K vetoes come from the same policy the gate enforces.
 
 ## Which evidence counts (`app/scoring/evidence.py`, `app/scoring/evidence_2026-09-30.json`)
 The evidence file is rebuilt deterministically by `scripts/build_scoring_evidence_v3.py` from committed research
@@ -36,15 +36,19 @@ re-checked in code (>= 100 companies, BH p <= 0.05, bootstrap interval above 0) 
 | FDA, GOV_CONTRACT, CA contracts, FTD, short pressure | < 100 companies with 90-day returns | NOT_MEASURED | 0 |
 | 13D, HOUSE_BUY, MULTI_SIGNAL / NEWS, DISCOVERY, ACTIVIST_CROWDING | not significant / no matched-control result | - | 0 |
 
-## Vetoes
+## Vetoes (one policy: `app/core/tenk_policy.py`)
 | veto | rule | evidence |
 |---|---|---|
-| `TENK_NEGATIVE_RECENT` | a non-superseded 10-K change of the issuer with direction NEGATIVE, public (available_at) in the 90 days before the scoring moment | -6.71 pp vs matched control, 2,863 cos, sign p 5e-9 |
-| `TENK_NEW_GOING_CONCERN` | the same change lists NEW_GOING_CONCERN | 28 % beat SPY, 27 % delisted in 180 d, 12 % bankrupt in 365 d |
-| gate rules | every failed rule of `evaluate_gate` (e.g. SEVERE_FINANCING_RISK, LOW_LIQUIDITY, NOT_A_LONG_SIGNAL) | unchanged |
+| `TENK_NEGATIVE_RECENT` | a 10-K change of the issuer with direction NEGATIVE | -6.71 pp vs matched control, 2,863 cos, sign p 5e-9 |
+| `TENK_NEW_GOING_CONCERN` | a 10-K change of the issuer listing NEW_GOING_CONCERN, whatever its direction (measured by change type) | 28 % beat SPY, 27 % delisted in 180 d, 12 % bankrupt in 365 d |
+| other gate rules | every failed rule of `evaluate_gate` (SEVERE_FINANCING_RISK, LOW_LIQUIDITY, NOT_A_LONG_SIGNAL ...) | unchanged |
 
-A negative 10-K is never a (positive or negative) weight. Scoring vetoes are research-only: the gate is unchanged, so
-a proposal can still exist for a vetoed event; wiring the veto into the gate is a separate decision.
+Both 10-K vetoes are **hard vetoes in the paper gate** (`evaluate_gate` rule 7: no proposal, research mode never
+overrides them) and the same `tenk_risk()` result is stored as the research score's vetoes, so the two can never
+disagree. Point in time: only changes public **strictly before** the decision moment
+(`coalesce(available_at, public_at) < decision`) and within the 90 days before it; a live decision ignores superseded
+changes, a retry at an earlier moment counts them (its supersession state is not reconstructable). A 10-K change is
+never a weight: a vetoed event keeps its evidence score, and any veto means no action.
 
 ## Missing scores
 A score is written after the gate. If that write fails (or the process dies in between), the next scan retries it for

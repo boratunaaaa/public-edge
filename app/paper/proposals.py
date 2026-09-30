@@ -138,7 +138,16 @@ def evaluate_gate(conn: Connection, ev: dict, *, family_ok: tuple[bool, str], pr
     direction = (ev.get("payload") or {}).get("direction")
     if direction in ("NEGATIVE", "MIXED"):
         g.failed.append("NOT_A_LONG_SIGNAL")
-    # 7. signal family evidence
+    # 7. validated 10-K risk: hard veto, the same policy as the research score vetoes (app.core.tenk_policy); only
+    # changes public strictly before this decision count
+    from app.core.tenk_policy import tenk_risk
+    tk = tenk_risk(conn, cik, now)
+    if tk.vetoes:
+        g.failed.extend(tk.vetoes)
+        g.info["tenk_events"] = list(tk.event_ids)
+    else:
+        g.passed.append("NO_VALIDATED_10K_RISK")
+    # 8. signal family evidence
     allowed, why = family_ok
     if allowed and why != "FAMILY_OUTPERFORMING":
         why += ":RESEARCH_MODE_OVERRIDE"  # allowed only because research mode is on - never shown as "passed"

@@ -160,7 +160,7 @@ def test_planned_10b5_1_buys_and_unvalidated_families_score_zero(engine):
     ("NEGATIVE", ["NEW_RISK_FACTORS"], -20, ["TENK_NEGATIVE_RECENT"]),
     ("NEGATIVE", ["NEW_GOING_CONCERN"], -20, ["TENK_NEGATIVE_RECENT", "TENK_NEW_GOING_CONCERN"]),
     ("POSITIVE", ["REMOVED_GOING_CONCERN"], -20, []),  # a positive change is neither a weight nor a veto
-    ("MIXED", ["NEW_GOING_CONCERN"], -20, []),
+    ("MIXED", ["NEW_GOING_CONCERN"], -20, ["TENK_NEW_GOING_CONCERN"]),  # going concern is measured by change type
     ("NEGATIVE", ["NEW_GOING_CONCERN"], -120, []),  # outside the 90-day window
     ("NEGATIVE", ["NEW_GOING_CONCERN"], +5, []),  # public after the scoring moment: point in time
 ])
@@ -248,25 +248,6 @@ def test_vetoes_are_stored_apart_from_the_score(engine, monkeypatch):
     with engine.connect() as c:
         s = c.execute(select(signal_scores)).mappings().one()
     assert "SEVERE_FINANCING_RISK" in s["vetoes"] and s["score_pp"] == pytest.approx(5.02, abs=0.01)  # score is not a veto
-
-
-@db
-@pytest.mark.usefixtures("clean", "offline_prices")
-def test_a_scoring_veto_is_stored_with_the_gate_vetoes_and_leaves_the_gate_alone(engine, monkeypatch):
-    from app.db.models import proposed_trades, signal_scores
-    from app.paper.proposals import scan_new_events
-    _live_setup(engine, monkeypatch)
-    with engine.begin() as c:
-        tid = _event(c, et="TENK_CHANGE", d=date.today() - timedelta(days=10), key="tkneg",
-                     payload={"direction": "NEGATIVE", "change_types": ["NEW_GOING_CONCERN"]})
-        c.execute(text("UPDATE events SET available_at = now() - interval '10 days', is_backfill = true WHERE id = :i"),
-                  {"i": tid})
-    out = scan_new_events(engine, days=5)
-    with engine.connect() as c:
-        s = c.execute(select(signal_scores)).mappings().one()
-        n = c.execute(select(proposed_trades)).mappings().all()
-    assert out["created"] == 1 and len(n) == 1  # the gate is unchanged: a scoring veto is research-only
-    assert s["vetoes"] == ["TENK_NEGATIVE_RECENT", "TENK_NEW_GOING_CONCERN"]
 
 
 def test_scoring_is_never_read_by_the_gate_or_the_ledger():
