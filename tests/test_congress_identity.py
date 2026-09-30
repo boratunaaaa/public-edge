@@ -207,6 +207,8 @@ def test_apply_repairs_removes_stale_returns_audits_and_undo_restores(engine):
         ids = _seed(c)
         before = {k: dict(c.execute(text("SELECT issuer_cik, identity_confidence, needs_review FROM events WHERE id = :i"),
                                     {"i": v}).mappings().one()) for k, v in ids.items()}
+        full_before = {k: c.execute(text("SELECT to_jsonb(e) - 'updated_at' FROM events e WHERE id = :i"), {"i": v}).scalar()
+                       for k, v in ids.items()}
     out = run(engine, do_apply=True)
     with engine.connect() as c:
         ev = {k: dict(c.execute(text("""SELECT issuer_cik, identity_confidence, needs_review, returns_status, missing_reason,
@@ -219,11 +221,17 @@ def test_apply_repairs_removes_stale_returns_audits_and_undo_restores(engine):
     assert ev["review"]["needs_review"] and ev["review"]["issuer_cik"] is None and not ev["review"]["has_ret"]
     assert ev["review"]["missing_reason"] == "IDENTITY_REVIEW"
     assert audit == 4 and out["applied"]["returns_removed"] == 3
-    with engine.begin() as c:
+    with engine.begin() as c:  # the return worker recomputed a return for the repaired identity before the undo
+        _ret(c, ids["changed"])
         assert undo(c, out["run_id"]) == 4
         after = {k: dict(c.execute(text("SELECT issuer_cik, identity_confidence, needs_review FROM events WHERE id = :i"),
                                    {"i": v}).mappings().one()) for k, v in ids.items()}
+        rows_after = {k: c.execute(text("SELECT to_jsonb(e) - 'updated_at' FROM events e WHERE id = :i"), {"i": v}).scalar()
+                      for k, v in ids.items()}
+        rets_after = c.execute(text("SELECT event_id, horizon_days, ret FROM event_returns ORDER BY 1")).all()
     assert after == before
+    assert rows_after == full_before  # every column restored exactly
+    assert [tuple(r) for r in rets_after] == [(ids[k], 90, 0.1) for k in ("same", "changed", "filled", "review")]
 
 
 @db
@@ -252,3 +260,52 @@ def test_a_cluster_event_takes_its_members_issuer_or_goes_to_review(engine):
         g = c.execute(text("SELECT issuer_cik, needs_review FROM events WHERE id = :i"), {"i": good}).one()
         b = c.execute(text("SELECT issuer_cik, needs_review FROM events WHERE id = :i"), {"i": bad}).one()
     assert tuple(g) == (NEW, False) and tuple(b) == (None, True)
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_a_safe_identity_lifts_an_earlier_identity_review_and_fixes_the_name(engine):
+    from app.jobs.congress_repair import run
+    with engine.begin() as c:
+        _world(c)
+        _tx(c, "S1", 0, "A Member", "RUSE", "Oldco Pharmaceuticals (RUSE) [ST]", date(2020, 5, 1), date(2020, 5, 1))
+        eid = _event(c, "CONG:house:S1:0", "RUSE", NEW, date(2020, 5, 1))
+        c.execute(text("""UPDATE events SET needs_review = true, missing_reason = 'IDENTITY_REVIEW', company_name = 'Newco Robotics Inc',
+                          payload = payload || '{"identity_review": "old"}'::jsonb WHERE id = :i"""), {"i": eid})
+        other = _event(c, "CONG:house:S1:9", "RUSE", NEW, date(2024, 5, 1))  # reviewed for another reason: kept
+        _tx(c, "S1", 9, "A Member", "RUSE", "Newco Robotics (RUSE) [ST]", date(2024, 5, 1), date(2024, 5, 1))
+        c.execute(text("UPDATE events SET needs_review = true, missing_reason = 'DATA_QUALITY' WHERE id = :i"), {"i": other})
+    run(engine, do_apply=True)
+    with engine.connect() as c:
+        r = c.execute(text("SELECT issuer_cik, needs_review, missing_reason, company_name, payload ? 'identity_review' ir "
+                           "FROM events WHERE id = :i"), {"i": eid}).mappings().one()
+        o = c.execute(text("SELECT needs_review, missing_reason FROM events WHERE id = :i"), {"i": other}).one()
+    assert (r["issuer_cik"], r["needs_review"], r["missing_reason"], r["ir"]) == (OLD, False, None, False)
+    assert r["company_name"] == "Oldco Pharmaceuticals Corp"
+    assert tuple(o) == (True, "DATA_QUALITY")
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_an_ambiguous_cluster_member_line_sends_the_cluster_to_review(engine):
+    from app.db.store import create_event
+    from app.jobs.congress_repair import run
+    with engine.begin() as c:
+        _world(c)
+        _tx(c, "M1", 0, "A Member", "RUSE", "Newco Robotics (RUSE) [ST]", date(2024, 5, 1), date(2024, 5, 10))
+        _tx(c, "M2", 0, "B Member", "RUSE", "Newco Robotics (RUSE) [ST]", date(2024, 5, 3), date(2024, 5, 12))
+        _tx(c, "M3", 0, "B Member", "RUSE", "X Corp (XX) [ST] Newco (RUSE) [ST]", date(2024, 5, 3), date(2024, 5, 20))  # same member/date
+        for k in ("M1", "M2", "M3"):
+            _event(c, f"CONG:house:{k}:0", "RUSE", None, date(2024, 5, 1))
+        cl = create_event(c, event_type="CONGRESS_CLUSTER_BUY", dedupe_key="CLM", public_date=date(2024, 5, 12),
+                          transaction_date=date(2024, 5, 3), ticker="RUSE", title="t", source_url="u",
+                          payload={"trades": [{"politician": "A Member", "date": "2024-05-01"},
+                                              {"politician": "B Member", "date": "2024-05-03"}]})
+        new = create_event(c, event_type="CONGRESS_CLUSTER_BUY", dedupe_key="CLN", public_date=date(2024, 5, 12),
+                           transaction_date=date(2024, 5, 3), ticker="RUSE", title="t", source_url="u",
+                           payload={"trades": [{"politician": "A Member", "date": "2024-05-01", "doc_id": "M1", "line_no": 0},
+                                               {"politician": "B Member", "date": "2024-05-03", "doc_id": "M2", "line_no": 0}]})
+    run(engine, do_apply=True)
+    with engine.connect() as c:
+        assert tuple(c.execute(text("SELECT issuer_cik, needs_review FROM events WHERE id = :i"), {"i": cl}).one()) == (None, True)
+        assert tuple(c.execute(text("SELECT issuer_cik, needs_review FROM events WHERE id = :i"), {"i": new}).one()) == (NEW, False)

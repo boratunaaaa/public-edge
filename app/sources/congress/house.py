@@ -133,7 +133,8 @@ def congress_cluster_check(conn: Connection, ticker: str, as_of: date, *, is_bac
                 title=f"{len(members)} members of Congress bought ${ticker} within {w}d",
                 payload={"window_days": w, "members": members, "n_members": len(members), "aggregate_min": total_min,
                          "trades": [{"politician": r["politician"], "chamber": r["chamber"], "date": r["transaction_date"],
-                                     "amount_range": r["amount_range"], "owner": r["owner"]} for r in inwin]},
+                                     "amount_range": r["amount_range"], "owner": r["owner"],
+                                     "doc_id": r["doc_id"], "line_no": r["line_no"]} for r in inwin]},
                 source_url=inwin[-1]["source_url"], is_backfill=is_backfill,
             )
             if eid:

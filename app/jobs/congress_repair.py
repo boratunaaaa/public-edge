@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
@@ -29,8 +29,6 @@ from sqlalchemy.engine import Connection, Engine
 from app.sources.congress.identity import Identity, resolve
 
 REVIEW_PARK_DAYS = 3650
-EVENT_COLS = ("issuer_cik", "issuer_id", "identity_confidence", "ticker", "needs_review", "returns_status",
-              "missing_reason", "price_symbol", "price_symbol_basis", "payload")
 
 
 def _tx_key(dedupe_key: str) -> tuple[str, int] | None:
@@ -97,14 +95,20 @@ def plan(conn: Connection, sample: int = 8) -> dict:
     for c in _cluster_rows(conn):
         p = c["payload"] or {}
         trades = p.get("trades") or []
-        members = [(t.get("politician"), t.get("date")) for t in trades]
         idents = []
-        for pol, d in members:
-            row = conn.execute(text("""SELECT doc_id, line_no FROM congress_transactions WHERE chamber = 'house'
-                                        AND upper(ticker) = upper(:t) AND politician = :p AND transaction_date = :d
-                                        AND transaction_type = 'PURCHASE' ORDER BY doc_id, line_no LIMIT 1"""),
-                               {"t": c["ticker"], "p": pol, "d": d}).first()
-            idents.append(by_tx.get((row[0], row[1])) if row else None)
+        for t in trades:
+            if t.get("doc_id") is not None and t.get("line_no") is not None:  # clusters written since this repair
+                keys = [(str(t["doc_id"]), int(t["line_no"]))]
+            else:  # older clusters: every matching disclosure line; they must all agree (never an arbitrary one)
+                keys = [tuple(r) for r in conn.execute(text("""
+                    SELECT doc_id, line_no FROM congress_transactions WHERE chamber = 'house' AND upper(ticker) = upper(:t)
+                      AND politician = :p AND transaction_date = :d AND transaction_type = 'PURCHASE'
+                    ORDER BY doc_id, line_no"""), {"t": c["ticker"], "p": t.get("politician"), "d": t.get("date")})]
+            found = [by_tx.get(k) for k in keys]
+            if not found or any(i is None or i.review for i in found) or len({i.cik for i in found}) > 1:
+                idents.append(None)  # missing, unsafe or ambiguous member line
+            else:
+                idents.append(found[0])
         if not idents or any(i is None or i.review for i in idents):
             i = Identity(None, "LOW", "REVIEW_REQUIRED:CLUSTER_MEMBER_UNSAFE")
         elif len({i.cik for i in idents}) > 1:
@@ -135,9 +139,18 @@ def plan(conn: Connection, sample: int = 8) -> dict:
             "examples": examples}
 
 
-def _snapshot(conn: Connection, eid: int) -> dict:
-    r = conn.execute(text(f"SELECT {', '.join(EVENT_COLS)} FROM events WHERE id = :i FOR UPDATE"), {"i": eid}).mappings().one()
-    return {k: (v.isoformat() if isinstance(v, (date, datetime)) else v) for k, v in r.items()}
+def _snapshot(conn: Connection, eid: int, lock: bool = True) -> dict:
+    """The complete event row and its return rows, as JSON (restored exactly by undo)."""
+    row = conn.execute(text(f"SELECT to_jsonb(e) FROM events e WHERE id = :i {'FOR UPDATE' if lock else ''}"), {"i": eid}).scalar()
+    rets = conn.execute(text("SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY r.horizon_days), '[]'::jsonb) "
+                             "FROM event_returns r WHERE r.event_id = :i"), {"i": eid}).scalar()
+    return {"event": row, "returns": rets}
+
+
+def _issuer_name(conn: Connection, cik: str) -> str | None:
+    from app.entities.registry import resolver
+    return resolver.cik_to_name.get(cik) or conn.execute(text("SELECT name FROM security_master WHERE cik = :c"),
+                                                         {"c": cik}).scalar()
 
 
 def apply(conn: Connection, decisions: list[dict], run_id: str, now: datetime) -> dict:
@@ -150,14 +163,24 @@ def apply(conn: Connection, decisions: list[dict], run_id: str, now: datetime) -
         before = _snapshot(conn, eid)
         removed = conn.execute(text("DELETE FROM event_returns WHERE event_id = :i"), {"i": eid}).rowcount \
             if kind != "SAME" else 0
+        # an earlier IDENTITY review is lifted once the identity is safe; a review for any other reason stays
+        was_id_review = "(missing_reason = 'IDENTITY_REVIEW' OR payload ? 'identity_review')"
         if kind == "SAME":
-            conn.execute(text("UPDATE events SET identity_confidence = :cf WHERE id = :i"), {"cf": d["confidence"], "i": eid})
+            conn.execute(text(f"""UPDATE events SET identity_confidence = :cf,
+                                  needs_review = CASE WHEN {was_id_review} THEN false ELSE needs_review END,
+                                  returns_status = CASE WHEN missing_reason = 'IDENTITY_REVIEW' THEN 'pending' ELSE returns_status END,
+                                  returns_next_at = CASE WHEN missing_reason = 'IDENTITY_REVIEW' THEN NULL ELSE returns_next_at END,
+                                  missing_reason = CASE WHEN missing_reason = 'IDENTITY_REVIEW' THEN NULL ELSE missing_reason END,
+                                  payload = payload - 'identity_review' WHERE id = :i"""), {"cf": d["confidence"], "i": eid})
         elif kind in ("FILLED", "CHANGED"):
-            conn.execute(text("""UPDATE events SET issuer_cik = :c, issuer_id = :c, identity_confidence = :cf,
-                                 ticker = coalesce(:t, ticker), returns_status = 'pending', returns_checked_at = NULL,
-                                 returns_next_at = NULL, price_symbol = NULL, price_symbol_basis = NULL,
-                                 missing_reason = NULL, payload = payload || CAST(:p AS jsonb) WHERE id = :i"""),
-                         {"c": d["cik"], "cf": d["confidence"], "t": d["ticker"], "i": eid,
+            conn.execute(text(f"""UPDATE events SET issuer_cik = :c, issuer_id = :c, identity_confidence = :cf,
+                                  company_name = coalesce(:nm, company_name), ticker = coalesce(:t, ticker),
+                                  needs_review = CASE WHEN {was_id_review} THEN false ELSE needs_review END,
+                                  returns_status = 'pending', returns_checked_at = NULL, returns_next_at = NULL,
+                                  returns_error = NULL, price_symbol = NULL, price_symbol_basis = NULL,
+                                  missing_reason = CASE WHEN missing_reason = 'IDENTITY_REVIEW' THEN NULL ELSE missing_reason END,
+                                  payload = (payload - 'identity_review') || CAST(:p AS jsonb) WHERE id = :i"""),
+                         {"c": d["cik"], "cf": d["confidence"], "t": d["ticker"], "i": eid, "nm": _issuer_name(conn, d["cik"]),
                           "p": json.dumps({"identity_repair": d["reason"]})})
         else:
             conn.execute(text("""UPDATE events SET needs_review = true, identity_confidence = 'LOW', issuer_cik = NULL,
@@ -168,7 +191,8 @@ def apply(conn: Connection, decisions: list[dict], run_id: str, now: datetime) -
         conn.execute(text("""INSERT INTO data_cleanup_audit (run_id, action, table_name, row_id, before, after, reason, dry_run)
                              VALUES (:r, :a, 'events', :i, CAST(:b AS jsonb), CAST(:af AS jsonb), :why, false)"""),
                      {"r": run_id, "a": f"congress_{kind.lower()}", "i": eid, "b": json.dumps(before, default=str),
-                      "af": json.dumps({"cik": d["cik"], "confidence": d["confidence"], "returns_removed": removed}),
+                      "af": json.dumps({**_snapshot(conn, eid, lock=False), "cik": d["cik"], "confidence": d["confidence"],
+                                        "returns_removed": removed}, default=str),
                       "why": d["reason"][:500]})
         n[kind] += 1
         n["returns_removed"] += removed
@@ -176,20 +200,21 @@ def apply(conn: Connection, decisions: list[dict], run_id: str, now: datetime) -
 
 
 def undo(conn: Connection, run_id: str) -> int:
-    """Restore the event columns of a run (the removed returns are recomputed by the return queue)."""
-    rows = conn.execute(text("SELECT row_id, before, after FROM data_cleanup_audit WHERE run_id = :r AND table_name = 'events' "
+    """Restore every event row of a run exactly as it was (all columns) and its original return rows; returns
+    computed after the run for the repaired identity are removed first."""
+    cols = [c for c in conn.execute(text("""SELECT column_name FROM information_schema.columns WHERE table_name = 'events'
+                                            AND table_schema = current_schema() ORDER BY ordinal_position""")).scalars()
+            if c != "id"]
+    rows = conn.execute(text("SELECT row_id, before FROM data_cleanup_audit WHERE run_id = :r AND table_name = 'events' "
                              "ORDER BY row_id"), {"r": run_id}).all()
-    for eid, b, after in rows:
-        # removed returns are recomputed (pending); an event whose returns were kept keeps its original status
-        status = "pending" if (after or {}).get("returns_removed") else b["returns_status"]
+    col_list = ", ".join(cols)
+    for eid, b in rows:
         conn.execute(text("SELECT 1 FROM events WHERE id = :i FOR UPDATE"), {"i": eid})
-        conn.execute(text("""UPDATE events SET issuer_cik = :issuer_cik, issuer_id = :issuer_id,
-                             identity_confidence = :identity_confidence, ticker = :ticker, needs_review = :needs_review,
-                             returns_status = :status,
-                             missing_reason = :missing_reason, price_symbol = :price_symbol,
-                             price_symbol_basis = :price_symbol_basis, payload = CAST(:payload AS jsonb),
-                             returns_next_at = NULL WHERE id = :i"""),
-                     {**b, "status": status, "payload": json.dumps(b["payload"]), "i": eid})
+        conn.execute(text(f"""UPDATE events SET ({col_list}) = (SELECT {col_list} FROM jsonb_populate_record(NULL::events,
+                              CAST(:j AS jsonb))) WHERE id = :i"""), {"j": json.dumps(b["event"]), "i": eid})
+        conn.execute(text("DELETE FROM event_returns WHERE event_id = :i"), {"i": eid})
+        conn.execute(text("""INSERT INTO event_returns SELECT * FROM jsonb_populate_recordset(NULL::event_returns,
+                             CAST(:j AS jsonb))"""), {"j": json.dumps(b["returns"])})
     return len(rows)
 
 
