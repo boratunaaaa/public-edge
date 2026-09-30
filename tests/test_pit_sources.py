@@ -100,3 +100,15 @@ def test_within_one_filing_the_preferred_concept_wins_whatever_the_input_order()
     facts = parse_companyfacts(CIK, cf)
     assert runway_months(facts, acc, at) == pytest.approx(120e6 / (60e6 / 12))
     assert runway_months(list(reversed(facts)), acc, at) == runway_months(facts, acc, at)
+
+
+def test_a_same_day_correction_accepted_later_wins_even_with_a_smaller_accession():
+    from app.replay.pit_sources import PitFact, runway_months
+    d = datetime(2023, 3, 1).date()
+    facts = [PitFact(CIK, "CASH", "CashAndCashEquivalentsAtCarryingValue", None, d, 120.0, d, "b-original", "10-K"),
+             PitFact(CIK, "CASH", "CashAndCashEquivalentsAtCarryingValue", None, d, 30.0, d, "a-correction", "10-K/A"),
+             PitFact(CIK, "OCF", "NetCashProvidedByUsedInOperatingActivities", datetime(2022, 3, 2).date(), d, -60.0, d,
+                     "b-original", "10-K")]
+    acc = {"b-original": datetime(2023, 3, 1, 14, tzinfo=timezone.utc), "a-correction": datetime(2023, 3, 1, 20, tzinfo=timezone.utc)}
+    assert runway_months(facts, acc, datetime(2023, 3, 2, tzinfo=timezone.utc)) == pytest.approx(30.0 / (60.0 / 12))  # 6 months
+    assert runway_months(facts, acc, datetime(2023, 3, 1, 15, tzinfo=timezone.utc)) == pytest.approx(120.0 / (60.0 / 12))

@@ -12,7 +12,7 @@ Nothing here reads the database or the network."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 
 from app.marketdata.calendar import NY
 
@@ -109,6 +109,16 @@ def visible(f: PitFact, acceptance: dict, at: datetime) -> bool:
     return f.filed < at.astimezone(NY).date()
 
 
+def _accepted(f: PitFact, acceptance: dict) -> datetime:
+    """When the filing was accepted: the exact time if known, else the end of its filing day in New York (the moment
+    a date-only filing becomes visible) - so a same-day correction accepted later wins over the earlier filing,
+    whatever the accession numbers."""
+    t = acceptance.get(f.accession)
+    if t is not None:
+        return t.astimezone(timezone.utc)
+    return datetime.combine(f.filed, time(23, 59, 59), NY).astimezone(timezone.utc)
+
+
 def runway_months(facts: list[PitFact], acceptance: dict, at: datetime) -> float | None:
     """Production formula on what was public at `at`: the latest cash instant and the latest annual operating cash
     flow (by period end, then by filing - a restatement replaces), runway only when that OCF is negative."""
@@ -117,7 +127,8 @@ def runway_months(facts: list[PitFact], acceptance: dict, at: datetime) -> float
     def latest(fs):
         # latest period, then latest filing (a restatement replaces); within ONE filing the production-preferred
         # concept wins (CONCEPTS order); a remaining tie is broken by value - never by input order
-        return max(fs, key=lambda x: (x.end, x.filed, x.accession, -_RANK[(x.family, x.concept)], x.val)) if fs else None
+        return max(fs, key=lambda x: (x.end, x.filed, _accepted(x, acceptance), x.accession, -_RANK[(x.family, x.concept)],
+                                      x.val)) if fs else None
     cash = latest([f for f in seen if f.family == "CASH"])
     ocf = latest([f for f in seen if f.family == "OCF" and f.start
                   and ANNUAL_DAYS[0] <= (f.end - f.start).days <= ANNUAL_DAYS[1]])
