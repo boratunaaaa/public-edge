@@ -251,24 +251,25 @@ def scan_new_events(engine: Engine, days: int = 2) -> dict:
         import logging
         logging.getLogger(__name__).exception("research score retry failed")
     for eid in ids:
-        r = create_proposal(engine, eid)
+        at = datetime.now(timezone.utc)  # ONE decision moment per event: the gate and the research score both use it
+        r = create_proposal(engine, eid, now=at)
         if r.get("created"):
             out["created"] += 1
         else:
             for f in r.get("failed", []):
                 out["rejected"][f] = out["rejected"].get(f, 0) + 1
                 out["rejected_ids"].setdefault(f, []).append(eid)
-        _record_score(engine, eid, r.get("failed", []), out)
+        _record_score(engine, eid, r.get("failed", []), out, now=at)
     return out
 
 
-def _record_score(engine: Engine, event_id: int, vetoes: list[str], out: dict) -> None:
+def _record_score(engine: Engine, event_id: int, vetoes: list[str], out: dict, now: datetime | None = None) -> None:
     """RESEARCH-ONLY score record (app.scoring.engine), AFTER the gate decided: it never changes the gate, the size or
     the approval, and a scoring failure never stops a proposal."""
     import logging
     try:
         from app.scoring.engine import record
-        record(engine, event_id, vetoes)
+        record(engine, event_id, vetoes, now=now)
         out["scored"] = out.get("scored", 0) + 1
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception("research score of event %s failed", event_id)

@@ -71,6 +71,27 @@ def test_other_issuers_and_superseded_changes(engine):
         assert _risk(c, include_superseded=True).vetoes == ("TENK_NEGATIVE_RECENT", "TENK_NEW_GOING_CONCERN")  # retry
 
 
+@db
+@pytest.mark.usefixtures("clean")
+@pytest.mark.parametrize("payload_sql, vetoes", [
+    ("'null'::jsonb", ()),  # JSON null payload (an SQL NULL is impossible: events.payload is NOT NULL)
+    ("'{}'::jsonb", ()),
+    ("'{\"direction\": null, \"change_types\": null}'::jsonb", ()),
+    ("'{\"direction\": \"NEGATIVE\"}'::jsonb", ("TENK_NEGATIVE_RECENT",)),  # no change_types: direction still counts
+    ("'{\"direction\": \"negative\"}'::jsonb", ()),  # exact value, as in the research SQL
+    ("'{\"change_types\": []}'::jsonb", ()),
+    # PostgreSQL `?` semantics, identical to research_v2.tenk_negative: a scalar string or an object key also match
+    ("'{\"change_types\": \"NEW_GOING_CONCERN\"}'::jsonb", ("TENK_NEW_GOING_CONCERN",)),
+    ("'{\"change_types\": {\"NEW_GOING_CONCERN\": 1}}'::jsonb", ("TENK_NEW_GOING_CONCERN",)),
+    ("'{\"change_types\": [\"new_going_concern\"]}'::jsonb", ()),
+])
+def test_null_and_json_type_handling(engine, payload_sql, vetoes):
+    with engine.begin() as c:
+        tid = _tenk(c, AT - timedelta(days=5))
+        c.execute(text(f"UPDATE events SET payload = {payload_sql} WHERE id = :i"), {"i": tid})
+        assert _risk(c).vetoes == vetoes
+
+
 # ------------------------------------------------------------------ paper gate: hard veto
 
 def _buy(c):
@@ -141,6 +162,32 @@ def test_gate_and_score_agree_on_every_case(engine, offset, direction, types):
         s = score_event(c, ev, AT)
     tenk = {TENK_NEGATIVE_RECENT, TENK_NEW_GOING_CONCERN}
     assert set(g.failed) & tenk == set(s["vetoes"])
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_scan_uses_one_decision_moment_for_gate_and_score(engine, monkeypatch):
+    """A 10-K becoming public between the gate and the score write must not reach only one of them."""
+    from app.db.models import proposed_trades, signal_scores
+    from app.paper import proposals
+    from tests.test_scoring import _live_setup
+    _live_setup(engine, monkeypatch)
+    real = proposals.create_proposal
+
+    def gate_then_publish(engine_, event_id, **kw):
+        r = real(engine_, event_id, **kw)
+        with engine_.begin() as c:  # published right after the gate decided, before the score is written
+            tid = _event(c, et="TENK_CHANGE", d=kw["now"].date(), key="tklate",
+                         payload={"direction": "NEGATIVE", "change_types": ["NEW_GOING_CONCERN"]})
+            c.execute(text("UPDATE events SET available_at = :a, is_backfill = true WHERE id = :i"),
+                      {"a": kw["now"] + timedelta(milliseconds=1), "i": tid})
+        return r
+    monkeypatch.setattr(proposals, "create_proposal", gate_then_publish)
+    out = proposals.scan_new_events(engine, days=5)
+    with engine.connect() as c:
+        p = c.execute(select(proposed_trades)).mappings().one()
+        s = c.execute(select(signal_scores)).mappings().one()
+    assert out["created"] == 1 and s["vetoes"] == [] and s["scored_at"] == p["proposal_created_at"]
 
 
 def test_gate_and_score_call_the_one_policy():
