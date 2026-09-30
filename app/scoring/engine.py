@@ -170,24 +170,24 @@ def score_event(conn: Connection, ev: dict, now: datetime | None = None, context
                 "cell": "NOT_PUBLIC_YET" if public else "NO_PUBLIC_TIME",
                 "components": [{"component": "EVENT", "applies": False, "status": NOT_MEASURED, "effect_pp": 0.0,
                                 "companies": None, "p": None,
-                                "why": "event not public at the scoring moment" if public else "event has no public time"}]}
+                                "why": "event not public at the scoring moment" if public else "event has no public time"}],
+                "vetoes": []}
     cell, cell_name, comps = _edge_cell(ev, reg)
     score = cell.effect if cell else 0.0  # one cell per event: weights are never stacked
     tk = reg["TENK_NEGATIVE_RECENT"]
     out = {"model_version": MODEL_VERSION, "evidence_version": reg["version"], "scored_at": now,
            "score_pp": round(100 * score, 3), "cell": cell_name, "components": comps, "vetoes": []}
-    if not context:
-        comps.append({**_comp(TENK_VETO, tk, False, "context not rebuilt on a retry: supersession state at the "
-                                                    "decision moment is not reconstructable"), "evidence_event": None})
-        return out
-    recent = conn.execute(text("""SELECT id, payload FROM events WHERE issuer_cik = :c AND event_type = 'TENK_CHANGE'
-                                  AND NOT superseded AND payload->>'direction' = 'NEGATIVE'
+    # A retry cannot rebuild the supersession state of the decision moment (no timestamp), so it errs on the side of
+    # the veto: a NEGATIVE change available in the window counts even if it is superseded today.
+    recent = conn.execute(text(f"""SELECT id, payload FROM events WHERE issuer_cik = :c AND event_type = 'TENK_CHANGE'
+                                  {"AND NOT superseded" if context else ""} AND payload->>'direction' = 'NEGATIVE'
                                   AND coalesce(available_at, public_at) <= :now AND coalesce(available_at, public_at) > :lo
                                   ORDER BY coalesce(available_at, public_at) DESC LIMIT 1"""),
                           {"c": ev.get("issuer_cik"), "now": now, "lo": now - timedelta(days=TENK_WINDOW_DAYS)}).first() \
         if ev.get("issuer_cik") else None
-    comps.append({**_comp(TENK_VETO, tk, bool(recent), tk.why if recent else
-                          f"no NEGATIVE 10-K change in the {TENK_WINDOW_DAYS} days before"),
+    note = "" if context else " (retry: superseded changes also count - the decision's state is not reconstructable)"
+    comps.append({**_comp(TENK_VETO, tk, bool(recent), (tk.why if recent else
+                          f"no NEGATIVE 10-K change in the {TENK_WINDOW_DAYS} days before") + note),
                   "evidence_event": recent[0] if recent else None})
     if recent:
         out["vetoes"].append(TENK_VETO)

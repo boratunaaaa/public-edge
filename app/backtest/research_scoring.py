@@ -22,7 +22,7 @@ import math
 import random
 import statistics
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy.engine import Connection
 
@@ -223,7 +223,7 @@ def per_quarter(rows: list[dict]) -> list[dict]:
 
 
 def derive_flags(rows: list[dict]) -> dict[int, set[str]]:
-    """Point-in-time flags from EARLIER events only (owner / issuer history strictly before the buy's public date;
+    """Point-in-time flags from EARLIER events only (history available strictly before the buy, by available_at;
     an owner's past outcome only from buys whose 90-day window ended >= 30 days before it: public_date <= d - 120)."""
     by_owner, by_issuer = defaultdict(list), defaultdict(list)
     for r in rows:
@@ -232,10 +232,13 @@ def derive_flags(rows: list[dict]) -> dict[int, set[str]]:
             by_owner[own].append(r)
         by_issuer[r["issuer_cik"]].append(r)
     flags: dict[int, set[str]] = defaultdict(set)
+
+    def seen(x):  # when an earlier filing became available: history must be available strictly before this buy
+        return x.get("available_at") or datetime.combine(x["public_date"], time.min, timezone.utc)
     for r in rows:
         p, d = r["payload"] or {}, r["public_date"]
         own = p.get("owner_cik")
-        prior = [x for x in by_owner.get(own, []) if x["public_date"] < d] if own else []
+        prior = [x for x in by_owner.get(own, []) if seen(x) < seen(r) and x["public_date"] <= d] if own else []
         same = [x for x in prior if x["issuer_cik"] == r["issuer_cik"]]
         if any(x["public_date"] >= d - timedelta(days=365) for x in same):
             flags[r["id"]].add("repeat_same_issuer_365d")
@@ -247,7 +250,7 @@ def derive_flags(rows: list[dict]) -> dict[int, set[str]]:
                 and x["excess_ret"] is not None]
         if len(hist) >= 2:
             flags[r["id"]].add("owner_history_positive" if statistics.fmean(hist) > 0 else "owner_history_negative")
-        if any(x["public_date"] < d and x["public_date"] >= d - timedelta(days=30)
+        if any(seen(x) < seen(r) and d - timedelta(days=30) <= x["public_date"] <= d
                and (x["payload"] or {}).get("owner_cik") != own for x in by_issuer[r["issuer_cik"]]):
             flags[r["id"]].add("cluster_context_30d")
         di = p.get("direct_indirect")
@@ -274,7 +277,7 @@ def run_expansion(conn: Connection) -> dict:
     disc = [r for r in rows if _discretionary(r["payload"] or {})]
     preds = {k: (lambda r, f=f: f(r["payload"] or {}) is True) for k, f in BUCKETS.items()}
     preds["planned_10b5_1"] = None  # handled on the non-discretionary set
-    preds["ten_pct_any"] = lambda r: (r["payload"] or {}).get("is_ten_pct") is True
+    preds["ten_pct_any"] = lambda r: BUCKETS["ten_pct_any"](r["payload"] or {}) is True
     for k in DERIVED:
         preds[k] = lambda r, k=k: k in flags.get(r["id"], ())
     out: dict = {"events_priced": len(rows), "discretionary": len(disc)}
@@ -371,7 +374,7 @@ def run_holdout(conn: Connection) -> dict:
     flags = derive_flags(rows)
     disc = [r for r in rows if _discretionary(r["payload"] or {})]
     preds = {"primary": lambda r: True,
-             "ten_pct_any": lambda r: (r["payload"] or {}).get("is_ten_pct") is True,
+             "ten_pct_any": lambda r: BUCKETS["ten_pct_any"](r["payload"] or {}) is True,
              "role_10pct_only": lambda r: BUCKETS["role_10pct_only"](r["payload"] or {}) is True,
              "value_100k_1m": lambda r: BUCKETS["value_100k_1m"](r["payload"] or {}) is True,
              "incr_10_50pct": lambda r: BUCKETS["incr_10_50pct"](r["payload"] or {}) is True}

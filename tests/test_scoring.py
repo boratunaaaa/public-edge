@@ -344,9 +344,9 @@ def test_one_failing_retry_does_not_block_the_others(engine, monkeypatch):
 
 @db
 @pytest.mark.usefixtures("clean")
-def test_a_retry_does_not_rebuild_context_from_todays_supersession_state(engine):
-    """A 10-K change valid at the decision but superseded before the retry: the retry must not record today's view as
-    the decision's context."""
+def test_a_retry_keeps_the_veto_of_a_change_superseded_after_the_decision(engine):
+    """A NEGATIVE 10-K change valid at the decision but superseded before the retry: today's supersession state cannot
+    say what held at the decision, so the retry keeps the veto (the conservative side)."""
     from app.db.models import signal_scores
     from app.scoring.engine import record
     with engine.begin() as c:
@@ -358,4 +358,20 @@ def test_a_retry_does_not_rebuild_context_from_todays_supersession_state(engine)
     with engine.connect() as c:
         comps = c.execute(select(signal_scores.c.components)).scalar()
     tk = next(x for x in comps if x["component"] == "TENK_NEGATIVE_RECENT")
-    assert tk["evidence_event"] is None and "not rebuilt" in tk["why"]
+    assert tk["evidence_event"] == tid and "retry" in tk["why"]  # errs on the side of the veto
+    with engine.connect() as c:
+        assert c.execute(select(signal_scores.c.vetoes)).scalar() == ["TENK_NEGATIVE_RECENT"]
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_an_event_not_public_yet_is_still_recorded(engine):
+    from app.db.models import signal_scores
+    from app.scoring.engine import record
+    with engine.begin() as c:
+        eid = _event(c, key="future", payload={"is_ten_pct": True})
+        c.execute(text("UPDATE events SET available_at = :a WHERE id = :i"), {"a": NOW + timedelta(hours=1), "i": eid})
+    assert record(engine, eid, ["DUPLICATE"], now=NOW)["cell"] == "NOT_PUBLIC_YET"
+    with engine.connect() as c:
+        row = c.execute(select(signal_scores)).mappings().one()
+    assert row["score_pp"] == 0.0 and row["vetoes"] == ["DUPLICATE"]

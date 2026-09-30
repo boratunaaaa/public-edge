@@ -88,3 +88,24 @@ def test_holdout_window_and_family_are_the_preregistered_ones():
     assert (HOLDOUT_START, HOLDOUT_END) == (date(2024, 7, 1), date(2026, 6, 30))
     assert set(HOLDOUT_FAMILY) == {"serial_3plus_issuers_2y", "owner_history_negative", "indirect_only",
                                    "first_buy_same_issuer_5y", "value_100k_1m", "incr_10_50pct"}
+
+
+def test_owner_history_counts_only_filings_available_before_the_buy():
+    from datetime import date, datetime, timezone
+
+    from app.backtest.research_scoring import derive_flags
+
+    def row(i, issuer, d, avail, owner="O1"):
+        return {"id": i, "issuer_cik": issuer, "public_date": d, "excess_ret": 0.1,
+                "available_at": datetime(avail.year, avail.month, avail.day, 12, tzinfo=timezone.utc),
+                "payload": {"owner_cik": owner, "is_ten_pct": "true"}}
+    buy = row(9, "C9", date(2024, 6, 1), date(2024, 6, 1))
+    early = [row(1, "C1", date(2024, 1, 5), date(2024, 1, 5)), row(2, "C2", date(2024, 2, 5), date(2024, 2, 5))]
+    late = row(3, "C3", date(2024, 3, 5), date(2024, 6, 10))  # dated earlier but only available after the buy
+    assert "serial_3plus_issuers_2y" not in derive_flags([*early, late, buy])[9]
+    assert "serial_3plus_issuers_2y" in derive_flags([*early, {**late, "available_at": early[1]["available_at"]}, buy])[9]
+
+
+def test_ten_pct_any_research_predicate_matches_sql_boolean_text():
+    from app.scoring.engine import BUCKETS
+    assert BUCKETS["ten_pct_any"]({"is_ten_pct": "true"}) is True and BUCKETS["ten_pct_any"]({"is_ten_pct": None}) is None
