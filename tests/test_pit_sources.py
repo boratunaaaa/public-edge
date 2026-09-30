@@ -71,3 +71,32 @@ def test_runway_uses_only_facts_public_at_the_moment_and_the_production_formula(
     assert runway_months(facts, acc, datetime(2023, 5, 11, tzinfo=timezone.utc)) == pytest.approx(90e6 / (60e6 / 12))
     positive = [f for f in facts if f.family != "OCF"]
     assert runway_months(positive, acc, datetime(2023, 6, 1, tzinfo=timezone.utc)) is None  # no burn -> no runway
+
+
+def test_duplicate_accessions_fill_missing_fields_from_other_pages():
+    from app.replay.pit_sources import acceptance_map, merge_submission_pages
+    recent = {"accessionNumber": ["x1"], "filingDate": ["2020-01-02"], "acceptanceDateTime": [""]}
+    old = {"accessionNumber": ["x1"], "filingDate": ["2020-01-02"], "acceptanceDateTime": ["2020-01-02T15:00:00.000Z"]}
+    assert acceptance_map(merge_submission_pages(recent, [old]))["x1"] == datetime(2020, 1, 2, 15, tzinfo=timezone.utc)
+
+
+def test_offset_less_acceptance_is_utc_and_naive_moments_are_rejected():
+    from app.replay.pit_sources import acceptance_map, parse_companyfacts, visible
+    assert acceptance_map({"accessionNumber": ["a"], "acceptanceDateTime": ["2021-03-01T14:00:00"]})["a"] == \
+        datetime(2021, 3, 1, 14, tzinfo=timezone.utc)
+    f = parse_companyfacts(CIK, _cf())[0]
+    with pytest.raises(ValueError):
+        visible(f, {}, datetime(2023, 6, 1))
+
+
+def test_within_one_filing_the_preferred_concept_wins_whatever_the_input_order():
+    from app.replay.pit_sources import parse_companyfacts, runway_months
+    cf = _cf()
+    # the same 10-K also tags a secondary cash concept (restricted cash included): the primary concept must be used
+    cf["facts"]["us-gaap"]["CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"] = {"units": {"USD": [
+        {"val": 999e6, "end": "2022-12-31", "filed": "2023-02-28", "accn": "a-10k22", "form": "10-K"}]}}
+    acc = {"a-10k22": datetime(2023, 2, 28, 21, 30, tzinfo=timezone.utc)}
+    at = datetime(2023, 3, 1, tzinfo=timezone.utc)
+    facts = parse_companyfacts(CIK, cf)
+    assert runway_months(facts, acc, at) == pytest.approx(120e6 / (60e6 / 12))
+    assert runway_months(list(reversed(facts)), acc, at) == runway_months(facts, acc, at)

@@ -46,9 +46,13 @@ existing FINANCING_TEXT scan). Plan: per scope, EFTS candidates -> fetch each hi
 headline + lead extraction and `classify` -> label at the filing's acceptance time. Scope of 24-100 issuers x a
 6-12 month window: ~10-30 EFTS queries + tens to low hundreds of documents -> minutes.
 **NOT reconstructable:** non-SEC news (Yahoo, PR wires) before 2025-09 - no archive exists in the database; a
-historical headline feed would be a new (paid / licensed) source. Therefore THESIS_INVALIDATION can only be COMPLETE
-under a policy that accepts SEC-sourced news as the definition for historical windows - **a user decision**; without
-it the family stays PARTIAL by construction.
+historical headline feed would be a new (paid / licensed) source. Production thesis changes also depend on stored news
+clustering and on which companies were tracked then - neither exists historically.
+**Consequence:** the SEC-only scan is a **proxy family (THESIS_INVALIDATION_SEC_PROXY)**, never "COMPLETE" for the
+production family. Before any use it needs a validation: run the proxy over 2025-11-03 .. 2026-09 (where production
+sec_8k news and, since 2026-09-25, thesis_changes exist) and measure agreement / false positives / false negatives
+against the production labels (~1-2 days of work, minutes of compute). Whether a validated proxy may stand in for
+the production family in historical replays is a **user decision**; without it the family stays PARTIAL.
 **Leakage rule:** only documents accepted before the replay moment; no later classifier output, no later news.
 
 ## Summary
@@ -56,4 +60,4 @@ it the family stays PARTIAL by construction.
 |---|---|---|---|
 | CASH_RUNWAY | parser + formula ready (tested) | PIT facts table + backfill job + risk family | ~1 h, ~1 GB |
 | FINANCING_ACTIONS / DILUTION | page merge + acceptance map ready (tested) | submissions history job | ~1-1.5 h, ~0.5 GB |
-| THESIS_INVALIDATION | reconstructable only SEC-sourced | policy decision, then per-scope EFTS reconstruction | minutes per scope |
+| THESIS_INVALIDATION | only a SEC-sourced proxy is reconstructable | proxy validation vs 2025-11..2026-09 labels, then a user policy decision | minutes per scope |

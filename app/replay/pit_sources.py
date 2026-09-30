@@ -26,7 +26,8 @@ CONCEPTS = {  # our family -> (taxonomy, XBRL concepts in preference order, unit
     "SHARES_DEI": ("dei", ("EntityCommonStockSharesOutstanding",), "shares"),
     "SHARES_GAAP": ("us-gaap", ("CommonStockSharesOutstanding",), "shares"),
 }
-ANNUAL_DAYS = (330, 400)  # a fiscal-year duration fact (production uses the annual OCF)
+ANNUAL_DAYS = (330, 400)
+_RANK = {(fam, name): i for fam, (_t, names, _u) in CONCEPTS.items() for i, name in enumerate(names)}  # a fiscal-year duration fact (production uses the annual OCF)
 
 
 @dataclass(frozen=True)
@@ -71,8 +72,11 @@ def merge_submission_pages(recent: dict, pages: list[dict]) -> dict:
         n = len(block.get("accessionNumber") or [])
         for i in range(n):
             acc = block["accessionNumber"][i]
+            row = {c: (block.get(c) or [])[i] if i < len(block.get(c) or []) else None for c in cols}
             if acc not in rows:
-                rows[acc] = {c: (block.get(c) or [None] * n)[i] if i < len(block.get(c) or []) else None for c in cols}
+                rows[acc] = row
+            else:  # the same filing on two pages: keep what is known, fill what is missing (e.g. its acceptance time)
+                rows[acc] = {c: rows[acc].get(c) if rows[acc].get(c) not in (None, "") else row.get(c) for c in cols}
     ordered = sorted(rows.values(), key=lambda r: (r.get("filingDate") or "", r.get("acceptanceDateTime") or ""), reverse=True)
     return {c: [r.get(c) for r in ordered] for c in cols}
 
@@ -83,13 +87,22 @@ def acceptance_map(filings: dict) -> dict[str, datetime]:
     for acc, at in zip(filings.get("accessionNumber") or [], filings.get("acceptanceDateTime") or []):
         if acc and at:
             try:
-                out[acc] = datetime.fromisoformat(at.replace("Z", "+00:00")).astimezone(timezone.utc)
+                t = datetime.fromisoformat(at.replace("Z", "+00:00"))
             except ValueError:
                 continue
+            # EDGAR publishes UTC; a value without an offset is read as UTC explicitly, never in the host's zone
+            out[acc] = (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
     return out
 
 
+def _aware(at: datetime) -> datetime:
+    if at.tzinfo is None:
+        raise ValueError("a replay moment must be timezone-aware")
+    return at
+
+
 def visible(f: PitFact, acceptance: dict, at: datetime) -> bool:
+    at = _aware(at)
     t = acceptance.get(f.accession)
     if t is not None:
         return t <= at
@@ -102,7 +115,9 @@ def runway_months(facts: list[PitFact], acceptance: dict, at: datetime) -> float
     seen = [f for f in facts if visible(f, acceptance, at)]
 
     def latest(fs):
-        return max(fs, key=lambda x: (x.end, x.filed, x.accession)) if fs else None
+        # latest period, then latest filing (a restatement replaces); within ONE filing the production-preferred
+        # concept wins (CONCEPTS order); a remaining tie is broken by value - never by input order
+        return max(fs, key=lambda x: (x.end, x.filed, x.accession, -_RANK[(x.family, x.concept)], x.val)) if fs else None
     cash = latest([f for f in seen if f.family == "CASH"])
     ocf = latest([f for f in seen if f.family == "OCF" and f.start
                   and ANNUAL_DAYS[0] <= (f.end - f.start).days <= ANNUAL_DAYS[1]])
