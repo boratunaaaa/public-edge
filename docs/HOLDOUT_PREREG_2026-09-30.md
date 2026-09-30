@@ -29,3 +29,22 @@ evidence version and a user decision before any weight.
 ## Known limitation
 The subgroups were found in the 2026-09-30 night run on the FULL history, which includes the holdout years, so this is
 a temporal replication, not a clean out-of-sample test. The pre-holdout column is the discovery-period estimate.
+
+## Result (run 2026-09-30, code 59cd781, `docs/holdout_2026-09-30.json`; run 1 on a37dcbe identical)
+Holdout 2024-07-01..2026-06-29: 7,396 per-quarter events. No weight was changed.
+
+| subgroup | holdout cos | effect | bootstrap 95 % | BH p | verdict | pre-holdout effect |
+|---|---|---|---|---|---|---|
+| serial_3plus_issuers_2y | 137 | +21.37 pp | [+11.33, +31.17] | 0.0001 | REPLICATED | +14.71 pp (128 cos) |
+| owner_history_negative | 785 | +8.93 pp | [+4.60, +13.32] | 0.0002 | REPLICATED | +5.07 pp |
+| indirect_only | 142 | +10.92 pp | [+1.06, +21.01] | 0.070 | NOT_REPLICATED | +3.59 pp (n.s.) |
+| value_100k_1m | 1,096 | +3.84 pp | [+0.19, +7.45] | 0.070 | NOT_REPLICATED | +4.75 pp |
+| incr_10_50pct | 887 | +3.99 pp | [-0.18, +8.30] | 0.074 | NOT_REPLICATED | +3.80 pp |
+| first_buy_same_issuer_5y | 1,517 | +2.98 pp | [-0.28, +6.23] | 0.074 | NOT_REPLICATED | +3.26 pp |
+
+Reference: all discretionary buys +3.91 pp in the holdout but +0.97 pp (p 0.34) before it - the base effect is
+period-dependent, consistent with NOT_ROBUST. `ten_pct_any` +7.39 pp holdout (526 cos, [+2.15, +12.64]) and +4.37 pp
+before (p 0.051): the active weight holds in both periods. `role_10pct_only` +5.98 / +6.32 pp.
+
+REPLICATED is a necessary, not a sufficient, condition: serial buyer and owner-history-negative stay weight 0 until a
+new evidence version and a user decision (limitation above: temporal replication, not a clean out-of-sample test).

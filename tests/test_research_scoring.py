@@ -53,6 +53,9 @@ def test_derived_flags_use_only_earlier_events():
                                                                                    "direct_indirect": ["D"]}, "excess_ret": -0.5},
         {"id": 4, "issuer_cik": "A", "public_date": date(2020, 9, 15), "payload": {"owner_cik": "o2"}, "excess_ret": None},
     ]
+    from datetime import datetime, timezone
+    for r in rows:  # available the evening of the filing day (as in production: never more than a day later)
+        r["available_at"] = datetime(r["public_date"].year, r["public_date"].month, r["public_date"].day, 21, tzinfo=timezone.utc)
     f = derive_flags(rows)
     assert "first_buy_same_issuer_5y" in f[1] and "repeat_same_issuer_365d" not in f[1]
     assert {"repeat_same_issuer_365d", "owner_history_positive", "direct_only", "value_ge_250k"} <= f[3]
@@ -104,6 +107,8 @@ def test_owner_history_counts_only_filings_available_before_the_buy():
     late = row(3, "C3", date(2024, 3, 5), date(2024, 6, 10))  # dated earlier but only available after the buy
     assert "serial_3plus_issuers_2y" not in derive_flags([*early, late, buy])[9]
     assert "serial_3plus_issuers_2y" in derive_flags([*early, {**late, "available_at": early[1]["available_at"]}, buy])[9]
+    unproven = {**late, "available_at": None}  # never proven available: not history, whatever its date
+    assert "serial_3plus_issuers_2y" not in derive_flags([*early, unproven, buy])[9]
 
 
 def test_ten_pct_any_research_predicate_matches_sql_boolean_text():

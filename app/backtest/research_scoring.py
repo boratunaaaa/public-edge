@@ -22,7 +22,7 @@ import math
 import random
 import statistics
 from collections import defaultdict
-from datetime import datetime, time, timedelta, timezone
+from datetime import timedelta
 
 from sqlalchemy.engine import Connection
 
@@ -233,12 +233,12 @@ def derive_flags(rows: list[dict]) -> dict[int, set[str]]:
         by_issuer[r["issuer_cik"]].append(r)
     flags: dict[int, set[str]] = defaultdict(set)
 
-    def seen(x):  # when an earlier filing became available: history must be available strictly before this buy
-        return x.get("available_at") or datetime.combine(x["public_date"], time.min, timezone.utc)
+    def before(x, r):  # history must be AVAILABLE strictly before this buy; no available_at = never proven, excluded
+        return x.get("available_at") is not None and r.get("available_at") is not None and x["available_at"] < r["available_at"]
     for r in rows:
         p, d = r["payload"] or {}, r["public_date"]
         own = p.get("owner_cik")
-        prior = [x for x in by_owner.get(own, []) if seen(x) < seen(r) and x["public_date"] <= d] if own else []
+        prior = [x for x in by_owner.get(own, []) if before(x, r) and x["public_date"] <= d] if own else []
         same = [x for x in prior if x["issuer_cik"] == r["issuer_cik"]]
         if any(x["public_date"] >= d - timedelta(days=365) for x in same):
             flags[r["id"]].add("repeat_same_issuer_365d")
@@ -250,7 +250,7 @@ def derive_flags(rows: list[dict]) -> dict[int, set[str]]:
                 and x["excess_ret"] is not None]
         if len(hist) >= 2:
             flags[r["id"]].add("owner_history_positive" if statistics.fmean(hist) > 0 else "owner_history_negative")
-        if any(seen(x) < seen(r) and d - timedelta(days=30) <= x["public_date"] <= d
+        if any(before(x, r) and d - timedelta(days=30) <= x["public_date"] <= d
                and (x["payload"] or {}).get("owner_cik") != own for x in by_issuer[r["issuer_cik"]]):
             flags[r["id"]].add("cluster_context_30d")
         di = p.get("direct_indirect")
