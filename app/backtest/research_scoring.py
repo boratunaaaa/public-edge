@@ -340,3 +340,56 @@ def run_families(conn: Connection) -> dict:
     for et, p in adj.items():
         out[et]["bh_p"] = p
     return out
+
+
+# ================================================================== holdout 2026-09-30 (pre-registered, read-only)
+# Registered in docs/HOLDOUT_PREREG_2026-09-30.md and committed BEFORE the run. Nothing here changes a weight: a
+# replicated subgroup still needs a new evidence version and a user decision.
+
+HOLDOUT_START, HOLDOUT_END = _date(2024, 7, 1), _date(2026, 6, 30)  # last 2 years with a complete 90-day window
+HOLDOUT_FAMILY = ("serial_3plus_issuers_2y", "owner_history_negative", "indirect_only", "first_buy_same_issuer_5y",
+                  "value_100k_1m", "incr_10_50pct")
+HOLDOUT_REFERENCE = ("primary", "ten_pct_any", "role_10pct_only")  # stability of the active weight; no decision
+
+
+def holdout_verdict(s: dict, bh_p: float | None) -> str:
+    """Pre-registered rule: >= 100 companies, effect > 0, BH p <= 0.05 across the family, bootstrap lower bound > 0."""
+    if (s.get("companies") or 0) < MIN_COMPANIES_90D:
+        return "INSUFFICIENT_SAMPLE"
+    ok = (s.get("effect") or 0) > 0 and bh_p is not None and bh_p <= 0.05 and (s.get("boot_ci95") or [0])[0] > 0
+    return "REPLICATED" if ok else "NOT_REPLICATED"
+
+
+def run_holdout(conn: Connection) -> dict:
+    """Same design as the night expansion (per-quarter sample, discretionary buys, 60-day lookback matched control of the
+    same stock, same-family contamination, company bootstrap), split by the event's public date: holdout
+    [HOLDOUT_START, HOLDOUT_END] versus the earlier period. Point-in-time flags use history strictly before each buy."""
+    from app.scoring.engine import BUCKETS, _discretionary
+    rng = random.Random(SEED + 3)
+    et = "INSIDER_OPEN_MARKET_BUY"
+    rows = _all_rows(conn, et)
+    flags = derive_flags(rows)
+    disc = [r for r in rows if _discretionary(r["payload"] or {})]
+    preds = {"primary": lambda r: True,
+             "ten_pct_any": lambda r: (r["payload"] or {}).get("is_ten_pct") is True,
+             "role_10pct_only": lambda r: BUCKETS["role_10pct_only"](r["payload"] or {}) is True,
+             "value_100k_1m": lambda r: BUCKETS["value_100k_1m"](r["payload"] or {}) is True,
+             "incr_10_50pct": lambda r: BUCKETS["incr_10_50pct"](r["payload"] or {}) is True}
+    for k in ("serial_3plus_issuers_2y", "owner_history_negative", "indirect_only", "first_buy_same_issuer_5y"):
+        preds[k] = lambda r, k=k: k in flags.get(r["id"], ())
+    periods = {"holdout": lambda d: HOLDOUT_START <= d <= HOLDOUT_END, "pre_holdout": lambda d: d < HOLDOUT_START}
+    m = Matcher(conn, et, 60)
+    out: dict = {"holdout": [str(HOLDOUT_START), str(HOLDOUT_END)], "family": list(HOLDOUT_FAMILY),
+                 "reference": list(HOLDOUT_REFERENCE), "events_priced": len(rows)}
+    for period, inside in periods.items():
+        sample = per_quarter([r for r in disc if inside(r["public_date"])])
+        res = {"events": len(sample), "last_event": str(max((r["public_date"] for r in sample), default=None))}
+        cells = {k: summarize(company_diffs(m, [r for r in sample if preds[k](r)]), rng) for k in preds}
+        adj = bh({k: cells[k].get("t_p") for k in HOLDOUT_FAMILY})
+        for k in HOLDOUT_FAMILY:
+            cells[k]["bh_p"] = adj.get(k)
+            if period == "holdout":
+                cells[k]["verdict"] = holdout_verdict(cells[k], adj.get(k))
+        res["cells"] = cells
+        out[period] = res
+    return out

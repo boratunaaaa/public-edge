@@ -66,3 +66,25 @@ def test_per_quarter_thinning_keeps_the_first_event():
     rows = [{"id": i, "issuer_cik": "A", "public_date": d} for i, d in
             ((1, date(2020, 2, 1)), (2, date(2020, 1, 5)), (3, date(2020, 4, 1)))]
     assert [r["id"] for r in per_quarter(rows)] == [2, 3]
+
+
+@pytest.mark.parametrize("cell, bh_p, verdict", [
+    ({"companies": 99, "effect": 0.2, "boot_ci95": [0.1, 0.3]}, 0.001, "INSUFFICIENT_SAMPLE"),
+    ({"companies": 300, "effect": 0.05, "boot_ci95": [0.01, 0.09]}, 0.02, "REPLICATED"),
+    ({"companies": 300, "effect": 0.05, "boot_ci95": [0.01, 0.09]}, 0.06, "NOT_REPLICATED"),
+    ({"companies": 300, "effect": 0.05, "boot_ci95": [-0.01, 0.09]}, 0.02, "NOT_REPLICATED"),
+    ({"companies": 300, "effect": -0.05, "boot_ci95": [-0.09, -0.01]}, 0.02, "NOT_REPLICATED"),  # wrong sign
+    ({"companies": 300}, None, "NOT_REPLICATED"),
+])
+def test_holdout_verdict_follows_the_preregistered_rule(cell, bh_p, verdict):
+    from app.backtest.research_scoring import holdout_verdict
+    assert holdout_verdict(cell, bh_p) == verdict
+
+
+def test_holdout_window_and_family_are_the_preregistered_ones():
+    from datetime import date
+
+    from app.backtest.research_scoring import HOLDOUT_END, HOLDOUT_FAMILY, HOLDOUT_START
+    assert (HOLDOUT_START, HOLDOUT_END) == (date(2024, 7, 1), date(2026, 6, 30))
+    assert set(HOLDOUT_FAMILY) == {"serial_3plus_issuers_2y", "owner_history_negative", "indirect_only",
+                                   "first_buy_same_issuer_5y", "value_100k_1m", "incr_10_50pct"}
