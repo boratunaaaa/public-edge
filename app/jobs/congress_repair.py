@@ -164,7 +164,9 @@ def apply(conn: Connection, decisions: list[dict], run_id: str, now: datetime) -
         removed = conn.execute(text("DELETE FROM event_returns WHERE event_id = :i"), {"i": eid}).rowcount \
             if kind != "SAME" else 0
         # an earlier IDENTITY review is lifted once the identity is safe; a review for any other reason stays
-        was_id_review = "(missing_reason = 'IDENTITY_REVIEW' OR payload ? 'identity_review')"
+        # the review is lifted only when its CURRENT reason is the identity (a stale payload marker next to another
+        # reason - e.g. DATA_QUALITY - never lifts that review); the stale identity marker itself is always dropped
+        was_id_review = "(missing_reason = 'IDENTITY_REVIEW' OR (missing_reason IS NULL AND payload ? 'identity_review'))"
         if kind == "SAME":
             conn.execute(text(f"""UPDATE events SET identity_confidence = :cf,
                                   needs_review = CASE WHEN {was_id_review} THEN false ELSE needs_review END,

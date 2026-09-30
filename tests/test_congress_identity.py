@@ -287,6 +287,23 @@ def test_a_safe_identity_lifts_an_earlier_identity_review_and_fixes_the_name(eng
 
 @db
 @pytest.mark.usefixtures("clean")
+def test_a_stale_identity_marker_never_lifts_a_review_for_another_reason(engine):
+    from app.jobs.congress_repair import run
+    with engine.begin() as c:
+        _world(c)
+        _tx(c, "Q1", 0, "A Member", "RUSE", "Newco Robotics (RUSE) [ST]", date(2024, 5, 1), date(2024, 5, 1))
+        eid = _event(c, "CONG:house:Q1:0", "RUSE", NEW, date(2024, 5, 1))
+        c.execute(text("""UPDATE events SET needs_review = true, missing_reason = 'DATA_QUALITY',
+                          payload = payload || '{"identity_review": "stale"}'::jsonb WHERE id = :i"""), {"i": eid})
+    run(engine, do_apply=True)
+    with engine.connect() as c:
+        r = c.execute(text("SELECT needs_review, missing_reason, payload ? 'identity_review' ir FROM events WHERE id = :i"),
+                      {"i": eid}).mappings().one()
+    assert (r["needs_review"], r["missing_reason"], r["ir"]) == (True, "DATA_QUALITY", False)
+
+
+@db
+@pytest.mark.usefixtures("clean")
 def test_an_ambiguous_cluster_member_line_sends_the_cluster_to_review(engine):
     from app.db.store import create_event
     from app.jobs.congress_repair import run
