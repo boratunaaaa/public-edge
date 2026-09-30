@@ -87,8 +87,26 @@ def size_limits(market_cap: float | None, bucket: str | None, risk_names: set[st
     return cap
 
 
+ADV_SESSIONS = 30  # the same 30-day mean $ volume build_universe stores (app.discovery.sec_data.adv_dollar_30d)
+
+
+def adv_dollar_prior_sessions(conn: Connection, symbol: str | None, on: date) -> float | None:
+    """30-session mean close x volume of sessions BEFORE `on` (point in time: the decision day's own bar is never
+    used). The fallback when universe_snapshots has no value - build_universe fills it for MICRO / EARLY_SMALL only,
+    which made every larger company fail LOW_LIQUIDITY purely because of its market-cap class."""
+    if not symbol:
+        return None
+    from app.marketdata.provider import ensure_prices
+    try:
+        bars = ensure_prices(conn, symbol, on - timedelta(days=60), on)
+    except Exception:  # noqa: BLE001 - unknown liquidity stays unknown (-> LOW_LIQUIDITY), never guessed
+        return None
+    pairs = [(b.close, b.volume) for b in bars if b.date < on and b.close and b.volume is not None][-ADV_SESSIONS:]
+    return (sum(c * v for c, v in pairs) / len(pairs)) if len(pairs) >= 5 else None
+
+
 def evaluate_gate(conn: Connection, ev: dict, *, family_ok: tuple[bool, str], price_basis: str | None,
-                  now: datetime | None = None) -> GateResult:
+                  now: datetime | None = None, price_symbol: str | None = None) -> GateResult:
     now = now or datetime.now(timezone.utc)
     g = GateResult(ok=False)
     cik, ticker = ev.get("issuer_cik"), ev.get("ticker")
@@ -121,10 +139,14 @@ def evaluate_gate(conn: Connection, ev: dict, *, family_ok: tuple[bool, str], pr
                        .where(universe_snapshots.c.cik == cik).order_by(universe_snapshots.c.as_of.desc()).limit(1)).first() \
         if cik else None
     mcap, bucket, adv = (uni[0], uni[1], uni[2]) if uni else (None, None, None)
+    adv_source = "universe_snapshot" if adv is not None else None
+    if adv is None:  # independent of the market-cap class: measure it from prior sessions of the resolved series
+        adv = adv_dollar_prior_sessions(conn, price_symbol or ticker, now.date())
+        adv_source = "prior_sessions_30d" if adv is not None else "unknown"
     risks = {r[0]: r[1] for r in conn.execute(select(discovery_risks.c.risk, discovery_risks.c.severity)
                                              .where(discovery_risks.c.cik == cik)).all()} if cik else {}
     g.risks = sorted(risks)
-    g.info = {"market_cap": mcap, "bucket": bucket, "adv_dollar_30d": adv}
+    g.info = {"market_cap": mcap, "bucket": bucket, "adv_dollar_30d": adv, "adv_source": adv_source}
     if adv is None or adv < MIN_ADV or risks.get("LOW_LIQUIDITY") == "HIGH":
         g.failed.append("LOW_LIQUIDITY")
     else:
@@ -209,7 +231,7 @@ def create_proposal(engine: Engine, event_id: int, *, research_only: bool = Fals
         fam = EVENT_FAMILY.get(ev["event_type"], ev["event_type"])
         fam_ok = proposal_allowed(conn, ev["event_type"], research_mode() or research_only)
         sym, basis, _ = get_security_master(conn).price_symbol(ev.get("issuer_cik"), now.date(), ev.get("ticker"))
-        g = evaluate_gate(conn, ev, family_ok=fam_ok, price_basis=basis, now=now)
+        g = evaluate_gate(conn, ev, family_ok=fam_ok, price_basis=basis, now=now, price_symbol=sym)
         ref = reference_price(conn, sym, now.date()) if (sym and g.ok) else None
         if ref is None and g.ok:
             g.failed.append("NO_REFERENCE_PRICE")
