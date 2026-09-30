@@ -230,7 +230,10 @@ def _first_fillable(conn: Connection, o, today: date, fresh: dict) -> date | Non
     return sb.date if sb else None
 
 
-def fill_orders(conn: Connection, today: date) -> dict:
+def fill_orders(conn: Connection, today: date, wall_today: date | None = None) -> dict:
+    """Fill every PENDING order due by `today` (the processed day). wall_today = the real date of the run (default
+    `today`): a session before it is an earlier session, whose 10-K supersession state is unknown (see below)."""
+    wall_today = wall_today or today
     out = {"filled": 0, "cancelled": 0, "waiting": 0}
     # every pending order row is locked up front, always in id order (no lock-order inversion between concurrent runs,
     # whatever their dates); a row a concurrent run already filled / cancelled drops out of the locked set
@@ -303,7 +306,7 @@ def fill_orders(conn: Connection, today: date) -> dict:
             # a catch-up fill (an earlier session) cannot know that session's supersession state: like a retry, it
             # counts superseded changes too (the conservative side); today's session uses today's state
             tk = tenk_risk(conn, info.get("cik"), datetime.combine(b.date, time(9, 30), NY), lock=True,
-                           include_superseded=b.date < today)
+                           include_superseded=b.date < wall_today)
             if tk.vetoes:
                 conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING"))
                              .values(status="CANCELLED", note=tk.note))
@@ -451,20 +454,68 @@ def snapshot(conn: Connection, today: date) -> int:
     return n
 
 
+MAX_CATCHUP_DAYS = 60  # a longer outage is worked off oldest-first over several runs (reported, never skipped)
+RUN_LOCK = "pe:paper_ledger_run"
+
+
+def ledger_days(last_done: date | None, today: date) -> tuple[list[date], int]:
+    """The days to process, oldest first: every calendar day after the last completed one up to today - exactly
+    the days the daily scheduler would have run - capped at MAX_CATCHUP_DAYS (the rest is returned as remaining).
+    No history, or today already done, means just today (a re-run is idempotent: snapshots upsert)."""
+    if last_done is None or last_done >= today:
+        return [today], 0
+    days = [last_done + timedelta(days=i) for i in range(1, (today - last_done).days + 1)]
+    return days[:MAX_CATCHUP_DAYS], max(0, len(days) - MAX_CATCHUP_DAYS)
+
+
+def run_day(engine: Engine, day: date, wall_today: date) -> dict:
+    """One ledger day, in the daily order: fills due that day, exits detected that day, the exits' fills, snapshot.
+    A catch-up therefore lets an earlier day's exit release cash before a later day's BUY is sized."""
+    out = {}
+    with engine.begin() as conn:
+        out["fills"] = fill_orders(conn, day, wall_today)
+    with engine.begin() as conn:
+        out["exits"] = check_exits(conn, day)
+    with engine.begin() as conn:
+        out["fills_after_exit"] = fill_orders(conn, day, wall_today)
+        out["snapshots"] = snapshot(conn, day)
+    return out
+
+
 def run(engine: Engine, today: date | None = None) -> dict:
+    """The daily paper ledger. After an outage the missed days are processed one by one (ledger_days), so a catch-up
+    produces the same trades as the daily runs would have. Runs are mutually exclusive (session advisory lock): a
+    second run while one is in progress is skipped, never interleaved."""
+    import logging
+
     from app.paper.proposals import expire
     today = today or date.today()
-    out = {"expired": expire(engine)}
-    with engine.begin() as conn:
-        ensure_accounts(conn)
-        ensure_accounts(conn, book="RESEARCH")
-        out["fills"] = fill_orders(conn, today)
-    with engine.begin() as conn:
-        out["exits"] = check_exits(conn, today)
-    with engine.begin() as conn:
-        out["fills_after_exit"] = fill_orders(conn, today)
-        out["snapshots"] = snapshot(conn, today)
-    return out
+    with engine.connect() as guard:
+        got = guard.execute(text("SELECT pg_try_advisory_lock(hashtextextended(:k, 0))"), {"k": RUN_LOCK}).scalar()
+        guard.commit()  # the session lock outlives the transaction; no transaction stays open during the run
+        if not got:
+            return {"skipped": "another paper ledger run is in progress"}
+        try:
+            out = {"expired": expire(engine)}
+            with engine.begin() as conn:
+                ensure_accounts(conn)
+                ensure_accounts(conn, book="RESEARCH")
+                last_done = conn.execute(select(func.max(paper_performance.c.on_date))).scalar()
+            days, remaining = ledger_days(last_done, today)
+            if len(days) > 1 or remaining:
+                logging.getLogger(__name__).warning("paper ledger catch-up: %s..%s (%d days, %d left for later runs)",
+                                                    days[0], days[-1], len(days), remaining)
+            per_day = {str(d): run_day(engine, d, today) for d in days}
+            out.update(per_day[str(days[-1])])  # the last processed day, as before
+            out["days"] = list(per_day) if len(days) > 1 else [str(days[0])]
+            if len(days) > 1:
+                out["catch_up"] = per_day
+            if remaining:
+                out["remaining_days"] = remaining
+            return out
+        finally:
+            guard.execute(text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), {"k": RUN_LOCK})
+            guard.commit()
 
 
 # ------------------------------------------------------------------ dashboard metrics
