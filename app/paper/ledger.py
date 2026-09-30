@@ -390,7 +390,10 @@ def thesis_invalidated(conn: Connection, pos: dict, until: date, include_superse
 def check_exits(conn: Connection, today: date, wall_today: date | None = None) -> dict:
     out = {"exit_orders": 0}
     rows = conn.execute(select(paper_positions, paper_accounts.c.strategy).join(
-        paper_accounts, paper_accounts.c.id == paper_positions.c.account_id).where(paper_positions.c.status == "OPEN")).mappings().all()
+        paper_accounts, paper_accounts.c.id == paper_positions.c.account_id).where(paper_positions.c.status == "OPEN")
+        # id order: without it PostgreSQL returns physical order, which an UPDATE changes - two identical runs would
+        # create the same exit orders under swapped ids (found by the 2023-H1 replay pilot)
+        .order_by(paper_positions.c.id)).mappings().all()
     for p in rows:
         p = dict(p)
         rule = STRATEGIES[p["strategy"]][2]
