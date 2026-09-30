@@ -271,7 +271,7 @@ def test_migration_0015_round_trip():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
         seen = []
-        for args in (["upgrade", "head"], ["downgrade", "0014"], ["upgrade", "head"]):
+        for args in (["upgrade", "0015"], ["downgrade", "0014"], ["upgrade", "0015"]):
             p = subprocess.run(["alembic", *args], cwd=root, env=env, capture_output=True, text=True, timeout=300)
             assert p.returncode == 0, p.stderr[-2000:]
             eng = create_engine(url)
