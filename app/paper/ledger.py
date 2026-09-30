@@ -366,14 +366,16 @@ def fill_orders(conn: Connection, today: date, wall_today: date | None = None) -
     return out
 
 
-def thesis_invalidated(conn: Connection, pos: dict, until: date) -> date | None:
-    """First date after entry with a thesis-breaking public fact for this company."""
+def thesis_invalidated(conn: Connection, pos: dict, until: date, include_superseded: bool = False) -> date | None:
+    """First date after entry with a thesis-breaking public fact for this company. include_superseded (a catch-up of
+    an earlier day, whose supersession state is unknown): a going-concern 10-K superseded since still counts - for
+    an exit the conservative side is to exit."""
     if not pos.get("cik"):
         return None
     r = conn.execute(text("""
         SELECT min(d) FROM (
           SELECT e.public_date d FROM events e WHERE e.issuer_cik = :cik AND e.public_date > :entry AND e.public_date <= :until
-             AND NOT e.superseded
+             AND (:all OR NOT e.superseded)
              AND e.event_type = 'TENK_CHANGE' AND e.payload->'change_types' ? 'NEW_GOING_CONCERN'
           UNION ALL
           SELECT tc.created_at::date FROM thesis_changes tc WHERE tc.cik = :cik AND tc.change = 'THESIS_INVALIDATION'
@@ -381,11 +383,11 @@ def thesis_invalidated(conn: Connection, pos: dict, until: date) -> date | None:
           UNION ALL
           SELECT dr.detected_at::date FROM discovery_risks dr WHERE dr.cik = :cik AND dr.risk = 'GOING_CONCERN'
              AND dr.severity = 'HIGH' AND dr.detected_at::date > :entry AND dr.detected_at::date <= :until) x"""),
-        {"cik": pos["cik"], "entry": pos["entry_date"], "until": until}).scalar()
+        {"cik": pos["cik"], "entry": pos["entry_date"], "until": until, "all": include_superseded}).scalar()
     return r
 
 
-def check_exits(conn: Connection, today: date) -> dict:
+def check_exits(conn: Connection, today: date, wall_today: date | None = None) -> dict:
     out = {"exit_orders": 0}
     rows = conn.execute(select(paper_positions, paper_accounts.c.strategy).join(
         paper_accounts, paper_accounts.c.id == paper_positions.c.account_id).where(paper_positions.c.status == "OPEN")).mappings().all()
@@ -409,7 +411,7 @@ def check_exits(conn: Connection, today: date) -> dict:
                     trigger, reason = b.date, "STOP"
                     break
         if rule == "THESIS" and trigger is None:
-            d = thesis_invalidated(conn, p, today)
+            d = thesis_invalidated(conn, p, today, include_superseded=today < (wall_today or today))
             if d:
                 trigger, reason = d, "THESIS_INVALIDATION"
         if trigger is not None:
@@ -456,6 +458,7 @@ def snapshot(conn: Connection, today: date) -> int:
 
 MAX_CATCHUP_DAYS = 60  # a longer outage is worked off oldest-first over several runs (reported, never skipped)
 RUN_LOCK = "pe:paper_ledger_run"
+LEDGER_JOB = "paper_ledger"  # processing_jobs marker: {"last_day": ISO date}, advanced with the day's snapshot
 
 
 def ledger_days(last_done: date | None, today: date) -> tuple[list[date], int]:
@@ -475,17 +478,38 @@ def run_day(engine: Engine, day: date, wall_today: date) -> dict:
     with engine.begin() as conn:
         out["fills"] = fill_orders(conn, day, wall_today)
     with engine.begin() as conn:
-        out["exits"] = check_exits(conn, day)
+        out["exits"] = check_exits(conn, day, wall_today)
     with engine.begin() as conn:
         out["fills_after_exit"] = fill_orders(conn, day, wall_today)
         out["snapshots"] = snapshot(conn, day)
+        # the day is complete only here, atomically with its last fills and snapshot: a run that fails earlier
+        # reprocesses the day (fills are PENDING-guarded, an exiting position is no longer OPEN, snapshots upsert)
+        from app.db.store import save_job_state
+        save_job_state(conn, LEDGER_JOB, {"last_day": day.isoformat()})
     return out
+
+
+def last_completed_day(conn: Connection) -> date | None:
+    """The explicit marker; before its first write (the first run of this version), the last snapshot day that EVERY
+    account has reached (min over accounts of their latest snapshot) - never a day some account has not completed."""
+    from app.db.store import job_state
+    d = job_state(conn, LEDGER_JOB).get("last_day")
+    if d:
+        return date.fromisoformat(d)
+    return conn.execute(text("""SELECT min(last) FROM (SELECT a.id, max(p.on_date) last FROM paper_accounts a
+                                LEFT JOIN paper_performance p ON p.account_id = a.id GROUP BY a.id) x""")).scalar()
 
 
 def run(engine: Engine, today: date | None = None) -> dict:
     """The daily paper ledger. After an outage the missed days are processed one by one (ledger_days), so a catch-up
-    produces the same trades as the daily runs would have. Runs are mutually exclusive (session advisory lock): a
-    second run while one is in progress is skipped, never interleaved."""
+    sees each day's portfolio as the daily run did: an earlier day's exit releases cash before a later day's BUY is
+    sized. Runs are mutually exclusive (session advisory lock): a second run while one is in progress is skipped.
+
+    What a catch-up cannot replay - WHEN an event was superseded or a source fell under review (no timestamps) - is
+    decided on the conservative side, deliberately: a BUY whose source no longer stands is cancelled (expire, fill
+    re-check), a 10-K veto superseded since still vetoes an earlier session's BUY, and a going-concern 10-K superseded
+    since still triggers an earlier day's THESIS exit. Point-in-time data (prices, public dates, detection times) is
+    read as of each processed day."""
     import logging
 
     from app.paper.proposals import expire
@@ -500,7 +524,7 @@ def run(engine: Engine, today: date | None = None) -> dict:
             with engine.begin() as conn:
                 ensure_accounts(conn)
                 ensure_accounts(conn, book="RESEARCH")
-                last_done = conn.execute(select(func.max(paper_performance.c.on_date))).scalar()
+                last_done = last_completed_day(conn)
             days, remaining = ledger_days(last_done, today)
             if len(days) > 1 or remaining:
                 logging.getLogger(__name__).warning("paper ledger catch-up: %s..%s (%d days, %d left for later runs)",

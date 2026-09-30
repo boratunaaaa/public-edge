@@ -23,14 +23,14 @@ def _series(start, n, price=10.0, step=0.01, volume=300_000):
     return out
 
 
-def _setup(engine, monkeypatch):
+def _setup(engine, monkeypatch, strategy="B_90D", exit_day=TUE):
     """Friday: a 90 % position in AAA; it is due to exit on Tuesday; a 50 % BUY of BBB is due on Wednesday."""
     from app.db.models import paper_orders, paper_positions, proposed_trades
     from app.paper.ledger import ensure_accounts, run
     _serve(monkeypatch, AAA=_series(date(2024, 1, 2), 60, 10.0, 0.05), BBB=_series(date(2024, 1, 2), 60, 20.0, 0.02),
            SPY=_series(date(2024, 1, 2), 60, 400.0, 0.5))
     with engine.begin() as c:
-        aid = ensure_accounts(c, book="RESEARCH")["B_90D"]
+        aid = ensure_accounts(c, book="RESEARCH")[strategy]
         c.execute(text("UPDATE paper_accounts SET active = (id = :a)"), {"a": aid})  # one book keeps the test readable
         pids = {}
         for tk, cik in (("AAA", "0000000101"), ("BBB", "0000000102")):
@@ -47,7 +47,7 @@ def _setup(engine, monkeypatch):
                                                target_pct=0.9, status="PENDING"))
     assert run(engine, today=FRI)["fills"]["filled"] == 1
     with engine.begin() as c:
-        c.execute(paper_positions.update().values(planned_exit_date=TUE))
+        c.execute(paper_positions.update().values(planned_exit_date=exit_day))
         c.execute(paper_orders.insert().values(account_id=aid, proposal_id=pids["BBB"], ticker="BBB", side="BUY",
                                                requested_at=datetime(2024, 3, 1, tzinfo=timezone.utc), not_before=WED,
                                                target_pct=0.5, status="PENDING"))
@@ -129,3 +129,107 @@ def test_ledger_runs_never_overlap(engine, monkeypatch):
             holder.execute(text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), {"k": RUN_LOCK})
             holder.commit()
     assert run(engine, today=date(2024, 3, 2))["days"] == ["2024-03-02"]  # released: the next run proceeds
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_a_capped_catch_up_continues_on_the_next_run_and_still_equals_the_daily_runs(engine, monkeypatch):
+    from app.paper import ledger
+    aid = _setup(engine, monkeypatch)
+    for d in (date(2024, 3, 2), date(2024, 3, 3), date(2024, 3, 4), TUE, WED, THU):
+        ledger.run(engine, today=d)
+    daily = _result(engine, aid)
+    _truncate(engine)
+    aid = _setup(engine, monkeypatch)
+    monkeypatch.setattr(ledger, "MAX_CATCHUP_DAYS", 4)
+    first = ledger.run(engine, today=THU)
+    assert first["days"][-1] == "2024-03-05" and first["remaining_days"] == 2
+    second = ledger.run(engine, today=THU)  # the next run continues from the marker
+    assert second["days"] == ["2024-03-06", "2024-03-07"]
+    assert _result(engine, aid) == daily
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_a_failed_day_is_reprocessed_and_the_result_still_equals_the_daily_runs(engine, monkeypatch):
+    from app.paper import ledger
+    aid = _setup(engine, monkeypatch)
+    for d in (date(2024, 3, 2), date(2024, 3, 3), date(2024, 3, 4), TUE, WED, THU):
+        ledger.run(engine, today=d)
+    daily = _result(engine, aid)
+    _truncate(engine)
+    aid = _setup(engine, monkeypatch)
+    real = ledger.snapshot
+
+    def boom(conn, today):
+        if today == TUE:
+            raise RuntimeError("snapshot failed")
+        return real(conn, today)
+    monkeypatch.setattr(ledger, "snapshot", boom)
+    with pytest.raises(RuntimeError):
+        ledger.run(engine, today=THU)  # Tuesday's exit fills committed, its snapshot / marker did not
+    with engine.connect() as c:
+        assert ledger.last_completed_day(c) == date(2024, 3, 4)
+    monkeypatch.setattr(ledger, "snapshot", real)
+    assert ledger.run(engine, today=THU)["days"][0] == "2024-03-05"  # the lock was released; Tuesday is redone
+    assert _result(engine, aid) == daily
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_without_a_marker_the_last_day_every_account_completed_counts(engine):
+    from app.db.models import paper_performance
+    from app.paper.ledger import ensure_accounts, last_completed_day
+    with engine.begin() as c:
+        ids = list(ensure_accounts(c, book="RESEARCH").values())[:2]
+        for aid, d in ((ids[0], THU), (ids[1], date(2024, 3, 4))):
+            c.execute(paper_performance.insert().values(account_id=aid, on_date=d, nav=1, cash=1, positions_value=0,
+                                                        spy_nav=1, n_open=0))
+        assert last_completed_day(c) == date(2024, 3, 4)  # never a day one account has not reached
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_a_going_concern_exit_superseded_during_the_outage_still_happens_in_the_catch_up(engine, monkeypatch):
+    """The daily run on Tuesday saw the going-concern 10-K (superseded only later) and exited on Wednesday; the
+    catch-up cannot know when it was superseded and takes the conservative side: the same exit."""
+    from app.paper.ledger import run
+
+    def tenk(c, superseded):
+        tid = _event(c, et="TENK_CHANGE", ticker="AAA", cik="0000000101", d=TUE, key="gc",
+                     payload={"direction": "NEGATIVE", "change_types": ["NEW_GOING_CONCERN"]})
+        c.execute(text("UPDATE events SET superseded = :s WHERE id = :i"), {"s": superseded, "i": tid})
+        return tid
+    aid = _setup(engine, monkeypatch, strategy="D_THESIS", exit_day=date(2024, 6, 1))
+    for d in (date(2024, 3, 2), date(2024, 3, 3), date(2024, 3, 4)):
+        run(engine, today=d)
+    with engine.begin() as c:
+        tid = tenk(c, False)
+    for d in (TUE, WED, THU):
+        run(engine, today=d)
+    with engine.begin() as c:
+        c.execute(text("UPDATE events SET superseded = true WHERE id = :i"), {"i": tid})
+    daily = _result(engine, aid)
+    assert any(t[0] == "AAA" and t[1] == "SELL" and t[2] == WED for t in daily["trades"])
+    _truncate(engine)
+    aid = _setup(engine, monkeypatch, strategy="D_THESIS", exit_day=date(2024, 6, 1))
+    with engine.begin() as c:
+        tenk(c, True)  # already superseded when the catch-up runs
+    run(engine, today=THU)
+    assert _result(engine, aid) == daily
+
+
+@db
+@pytest.mark.usefixtures("clean", "offline_prices")
+def test_a_buy_whose_source_fell_under_review_during_the_outage_is_cancelled_conservatively(engine, monkeypatch):
+    """Documented, deliberate divergence: the review time is unknown, so the catch-up does not buy on a signal that no
+    longer stands (the daily run on Wednesday might have filled it)."""
+    from app.db.models import paper_orders
+    from app.paper.ledger import run
+    _setup(engine, monkeypatch)
+    with engine.begin() as c:
+        c.execute(text("UPDATE events SET needs_review = true WHERE ticker = 'BBB'"))
+    run(engine, today=THU)
+    with engine.connect() as c:
+        o = c.execute(select(paper_orders).where(paper_orders.c.ticker == "BBB")).mappings().one()
+    assert o["status"] == "CANCELLED" and o["fill_date"] is None
