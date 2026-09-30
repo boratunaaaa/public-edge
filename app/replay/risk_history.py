@@ -496,8 +496,10 @@ def gc_missing(rec: dict, start: date, end: date, jobs: dict | None) -> list[str
     """Why the GOING_CONCERN state of ONE issuer cannot be known over [start, end] from the exported profiles (empty =
     every 10-K that matters was profiled). The export lists only status='ok' profiles in rec['tenk']; everything else
     must be declared: rec['tenk_other'] (failed / unparsable / not-found / superseded-without-replacement 10-Ks) and
-    meta['tenk_jobs'] (issuers whose 10-K ingestion never completed or was given up). An export without these
-    inventories cannot prove completeness."""
+    meta['tenk_jobs'] (issuers whose 10-K ingestion never completed, was given up or is queued; failed / pending SEC
+    daily indexes, which can hide any issuer's report; the backfill's rolling horizon - a window reaching before it is
+    not covered). An issuer with no known 10-K at all is never complete. An export without these inventories cannot
+    prove completeness."""
     lo = start - timedelta(days=400)
     why = []
     if "tenk_other" not in rec:
@@ -513,6 +515,15 @@ def gc_missing(rec: dict, start: date, end: date, jobs: dict | None) -> list[str
         q = (jobs.get("live_queue") or {}).get(cik)
         if q and str(q) <= end.isoformat():
             why.append(f"10-K queued since {q}, not yet processed")
+        hf = jobs.get("history_from")
+        if hf is None:
+            why.append("export has no 10-K ingestion horizon")
+        elif start - timedelta(days=400) < date.fromisoformat(str(hf)):
+            why.append(f"window (with its previous annual report) starts before the 10-K ingestion horizon {hf}")
+        for kind in ("index_failed", "index_pending"):
+            for d in jobs.get(kind) or []:
+                if start - timedelta(days=400) <= date.fromisoformat(str(d)) <= end:
+                    why.append(f"SEC daily 10-K index {d} {kind.split('_')[1]}")
     ok = {f["accession"][:20] for f in rec.get("tenk", [])}
     for f in rec.get("tenk_other") or []:
         if lo <= f["filing_date"] <= end and f["accession"][:20] not in ok:
@@ -520,6 +531,8 @@ def gc_missing(rec: dict, start: date, end: date, jobs: dict | None) -> list[str
     # at every moment of [start, end] the latest report must be at most ANNUAL_GAP_DAYS old (a new issuer with no
     # report yet is not flagged here; its first report is covered by the status checks above)
     known = sorted({f["filing_date"] for f in rec.get("tenk", []) + (rec.get("tenk_other") or []) if f["filing_date"] <= end})
+    if not known:
+        why.append("no 10-K known for this issuer (never ingested, or it files no 10-K): going-concern state unknowable")
     upto_start = [d for d in known if d <= start]
     if upto_start and (start - upto_start[-1]).days > ANNUAL_GAP_DAYS:
         why.append(f"no 10-K between {upto_start[-1]} and the window start {start}")

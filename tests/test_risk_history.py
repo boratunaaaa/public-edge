@@ -122,7 +122,8 @@ def _meta(**kw):
     m = {"ciks": [CIK], "start": "2021-03-01", "end": "2021-06-30", "tenk_by_year": {"2020": 1900, "2021": 5400, "2022": 6300},
          "thesis_changes_from": "2026-09-25",
          "efts_scan": {"done": True, "from": "2020-03-01", "to": "2021-06-30", "truncated": False},
-         "tenk_jobs": {"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {}}}
+         "tenk_jobs": {"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {},
+                       "index_failed": [], "index_pending": [], "history_from": "2016-01-01"}}
     m.update(kw)
     return m
 
@@ -535,6 +536,7 @@ def _other(acc, d, status):
     ({"tenk_other": [_other("old", "2015-03-01", "no_sections")]}, True),  # outside the window's reach
     ({"tenk": [_tenk("a-2019", datetime(2019, 3, 10, 20, tzinfo=UTC), 0), _tenk("a-2021", GC_2021, 3)]}, False),  # 2020 missing
     ({"tenk": [_tenk("a-2019", datetime(2019, 3, 10, 20, tzinfo=UTC), 0)], "delisting_date": None}, False),  # none since
+    ({"tenk": [], "tenk_other": []}, False),  # an issuer with no 10-K at all: never ingested, or files none
 ])
 def test_going_concern_is_complete_only_when_every_10k_was_profiled(kw, complete):
     from app.replay.risk_history import coverage_policy
@@ -545,16 +547,26 @@ def test_going_concern_is_complete_only_when_every_10k_was_profiled(kw, complete
         assert "GOING_CONCERN" in coverage_policy(cov, date(2021, 3, 1), date(2021, 6, 30))["not_complete"]
 
 
-@pytest.mark.parametrize("jobs, complete", [
-    ({"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {}}, True),
-    ({"backfill_done": [], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {}}, False),  # not processed yet
-    ({"backfill_done": [CIK], "backfill_gave_up": [CIK], "live_gave_up": [], "live_queue": {}}, False),
-    ({"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [CIK], "live_queue": {}}, False),
-    ({"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {CIK: "2021-05-01"}}, False),
-    ({"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {CIK: "2026-09-29"}}, True),
+J = {"backfill_done": [CIK], "backfill_gave_up": [], "live_gave_up": [], "live_queue": {}, "index_failed": [],
+     "index_pending": [], "history_from": "2016-01-01"}
+
+
+@pytest.mark.parametrize("change, complete", [
+    ({}, True),
+    ({"backfill_done": []}, False),  # not processed yet
+    ({"backfill_gave_up": [CIK]}, False),
+    ({"live_gave_up": [CIK]}, False),
+    ({"live_queue": {CIK: "2021-05-01"}}, False),
+    ({"live_queue": {CIK: "2026-09-29"}}, True),  # queued after the window
+    ({"index_failed": ["2021-04-12"]}, False),  # a failed daily index can hide any issuer's 10-K
+    ({"index_pending": ["2020-06-01"]}, False),  # inside the previous-report reach of the window
+    ({"index_failed": ["2026-09-01"]}, True),  # after the window
+    ({"history_from": "2020-06-01"}, False),  # the window's previous annual report predates the backfill horizon
+    ({"history_from": None}, False),
     (None, False),  # an export without the ingestion state proves nothing
 ])
-def test_unprocessed_or_abandoned_10k_ingestion_is_never_complete(jobs, complete):
+def test_unprocessed_or_abandoned_10k_ingestion_is_never_complete(change, complete):
+    jobs = None if change is None else {k: v for k, v in {**J, **change}.items() if v is not None}
     m = _meta(tenk_jobs=jobs)
     if jobs is None:
         del m["tenk_jobs"]

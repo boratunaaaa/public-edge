@@ -77,13 +77,20 @@ def main() -> int:
             "SELECT extract(year FROM filing_date), count(*) FROM tenk_filings GROUP BY 1 ORDER BY 1")).all()}
         meta["thesis_changes_from"] = c.execute(text("SELECT min(created_at)::date FROM thesis_changes")).scalar()
         # 10-K ingestion state per issuer (app.tenk.engine job states): not completed / given up / still queued
+        from app.tenk.engine import HISTORY_YEARS
         st = dict(c.execute(text("SELECT name, state FROM processing_jobs WHERE name IN ('tenk_backfill', 'tenk_live_queue')")).all())
         bf, lq = st.get("tenk_backfill") or {}, st.get("tenk_live_queue") or {}
         want = set(ciks)
         meta["tenk_jobs"] = {"backfill_done": sorted(want & set(bf.get("done_ciks") or [])),
                              "backfill_gave_up": sorted(want & set(bf.get("gave_up") or [])),
                              "live_gave_up": sorted(want & set(lq.get("gave_up") or {})),
-                             "live_queue": {k: v.get("first_seen") for k, v in (lq.get("queue") or {}).items() if k in want}}
+                             "live_queue": {k: v.get("first_seen") for k, v in (lq.get("queue") or {}).items() if k in want},
+                             # market-wide: a failed / not yet published SEC daily index can hide ANY issuer's 10-K
+                             "index_failed": sorted(k[len("index:"):] for k in (lq.get("gave_up") or {}) if k.startswith("index:")),
+                             "index_pending": sorted(lq.get("index_pending") or []),
+                             # the backfill covers a ROLLING horizon (HISTORY_YEARS back from each run); the latest
+                             # possible start of what a completed issuer covers is the export date minus that horizon
+                             "history_from": (date.today() - timedelta(days=365 * HISTORY_YEARS)).isoformat()}
         c.rollback()
     lo = start - timedelta(days=365)
     if a.efts:
