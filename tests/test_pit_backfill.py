@@ -77,7 +77,8 @@ def test_apply_is_idempotent_resumable_and_isolates_a_failing_company(engine, se
     assert again["queued"] == 1 and all(C in u for u in sec)
     for _ in range(MAX_ATTEMPTS):
         run(engine, "xbrl", ciks=[A, C, B], apply=True)
-    assert run(engine, "xbrl", ciks=[A, C, B], apply=True)["queued"] == 0  # given up after MAX_ATTEMPTS
+    last = run(engine, "xbrl", ciks=[A, C, B], apply=True)
+    assert last["queued"] == 0 and last["gave_up"] == 1  # given up after MAX_ATTEMPTS - and reported
     with engine.connect() as c:
         assert c.execute(text("SELECT count(*) FROM pit_facts")).scalar() == 4  # nothing duplicated
         assert c.execute(text("SELECT count(DISTINCT run_id) FROM pit_facts")).scalar() == 1  # provenance kept
@@ -97,6 +98,28 @@ def test_submissions_merge_the_older_page_and_fill_missing_acceptance(engine, se
     assert rows["b-1"][0] == "S-3" and rows["b-1"][2].endswith("-001.json")
     with engine.connect() as c:
         assert c.execute(text("SELECT count(*) FROM corporate_actions")).scalar() == 0  # production actions untouched
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_two_values_for_one_fact_are_counted(engine, sec, monkeypatch):
+    from app import http
+    from app.jobs.pit_backfill import run
+    cf = _cf(120)
+    usd = cf["facts"]["us-gaap"]["CashAndCashEquivalentsAtCarryingValue"]["units"]["USD"]
+    usd.append({**usd[0], "val": 99})
+    monkeypatch.setattr(http, "get", lambda url, **kw: _Resp(cf))
+    assert run(engine, "xbrl", ciks=[A], apply=False)["value_conflicts"] == 1
+
+
+def test_apply_refuses_a_process_local_sec_budget(monkeypatch):
+    import sys
+    from app.jobs import pit_backfill
+    monkeypatch.delenv("PE_SHARED_RATELIMIT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["pit_backfill", "xbrl", "--limit", "1", "--apply"])
+    with pytest.raises(SystemExit) as e:
+        pit_backfill.main()
+    assert e.value.code == 2
 
 
 @db

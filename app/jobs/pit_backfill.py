@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import time
 import uuid
@@ -183,7 +184,7 @@ def run(engine: Engine, job: str, *, ciks: list[str] | None = None, limit: int |
     queue = todo(engine, job, ciks, limit if apply else (limit or sample))
     t0, out = time.time(), {"job": job, "mode": "APPLY" if apply else "DRY_RUN", "run_id": run_id, "queued": len(queue),
                             "done": 0, "not_found": 0, "failed": 0, "rows": 0, "bytes": 0, "pages": 0, "errors": {},
-                            "exact_acceptance": 0}
+                            "exact_acceptance": 0, "value_conflicts": 0}
     for cik in queue:
         if free_gb() < min_free_gb:
             out["stopped"] = f"free disk {free_gb():.1f} GB < {min_free_gb} GB"
@@ -212,6 +213,9 @@ def run(engine: Engine, job: str, *, ciks: list[str] | None = None, limit: int |
                 known = set(c.execute(text("SELECT accession FROM sec_filings WHERE cik = :c AND acceptance_at IS NOT NULL"),
                                       {"c": cik}).scalars())
             out["exact_acceptance"] += sum(1 for r in rows if r["accession"] in known)
+            # the same fact (concept, period, filing) with two values: both are stored, made visible here
+            keys = [(r["concept"], r["period_start"], r["period_end"], r["accession"]) for r in rows]
+            out["value_conflicts"] += len(keys) - len(set(keys))
         out["done" if rows else "not_found"] += 1
         if apply:
             store(engine, job, cik, rows, run_id)
@@ -228,6 +232,11 @@ def run(engine: Engine, job: str, *, ciks: list[str] | None = None, limit: int |
                            "rows": int(out["rows"] / n * remaining),
                            "db_gb": round(out["rows"] / n * remaining * (260 if job == "xbrl" else 330) / 1024 ** 3, 2),
                            "transfer_gb": round(out["bytes"] / n * remaining / 1024 ** 3, 1)}
+    if apply:  # companies abandoned after MAX_ATTEMPTS: never silently lost
+        with engine.connect() as c:
+            out["gave_up"] = c.execute(text("""SELECT count(*) FROM pit_backfill_progress WHERE job = :j
+                                               AND status = 'failed' AND attempts >= :m"""),
+                                       {"j": job, "m": MAX_ATTEMPTS}).scalar()
     out["free_gb"] = round(free_gb(), 1)
     return out
 
@@ -240,6 +249,9 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--max-minutes", type=float)
     a = ap.parse_args()
+    if a.apply and os.environ.get("PE_SHARED_RATELIMIT") != "1":
+        # without it app.http falls back to a process-local bucket and SEC sees live workers + this job
+        ap.error("--apply needs PE_SHARED_RATELIMIT=1 (one SEC budget shared with the live workers)")
     from app.db.session import get_engine
     ciks = [c.strip().zfill(10) for c in a.ciks.split(",")] if a.ciks else None
     print(json.dumps(run(get_engine(), a.job, ciks=ciks, limit=a.limit, apply=a.apply, max_minutes=a.max_minutes),
