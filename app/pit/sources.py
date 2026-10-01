@@ -12,7 +12,7 @@ Nothing here reads the database or the network."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from app.marketdata.calendar import NY
 
@@ -31,7 +31,15 @@ CONCEPTS = {  # our family -> (taxonomy, XBRL concepts in preference order, unit
 # (365 +/- 30 days) of any form. The runway uses exactly those two concepts; the other concepts are stored for
 # research but never replace them.
 RUNWAY_CASH, RUNWAY_OCF = "CashAndCashEquivalentsAtCarryingValue", "NetCashProvidedByUsedInOperatingActivities"
-ANNUAL_DAYS = (335, 395)
+# an ANNUAL operating cash flow: 300-395 days. The SEC CY frames production reads also take a fiscal-year-change
+# report's shortened year (e.g. 2025-06-07..2026-04-30, 327 days - the only one of 362 production CASH_RUNWAY_RISK
+# events the 335-day bound missed); a 10-Q's nine-month year-to-date (~273 days) stays out.
+ANNUAL_DAYS = (300, 395)
+# insider ownership reports: never part of the filing history a replay reads (app.pit.readers filters on every read)
+INSIDER_FORMS = frozenset({"3", "4", "5", "3/A", "4/A", "5/A"})
+# a depositary (ADR) programme: the listed security is a depositary share whose ratio to the cover-page share count
+# is not in any SEC dataset we hold (app.marketdata.market_cap)
+DEPOSITARY_FORMS = frozenset({"F-6", "F-6EF", "F-6 POS", "F-6/A"})
 _RANK = {(fam, name): i for fam, (_t, names, _u) in CONCEPTS.items() for i, name in enumerate(names)}
 
 
@@ -126,9 +134,27 @@ def _accepted(f: PitFact, acceptance: dict) -> datetime:
     return datetime.combine(f.filed, time(23, 59, 59), NY).astimezone(timezone.utc)
 
 
+def filing_day_end(d: date) -> datetime:
+    """A document known only by its filing DATE is public at the end of that day in New York."""
+    return datetime.combine(d, time(23, 59, 59), NY).astimezone(timezone.utc)
+
+
+def public_from(f: PitFact, acceptance: dict) -> datetime:
+    """The first moment `visible` holds: the exact acceptance time, else the start of the next New York day."""
+    t = acceptance.get(f.accession)
+    if t is not None:
+        return t.astimezone(timezone.utc)
+    return datetime.combine(f.filed + timedelta(days=1), time(0), NY).astimezone(timezone.utc)
+
+
 def runway_months(facts: list[PitFact], acceptance: dict, at: datetime) -> float | None:
     """Production formula on what was public at `at`: the latest cash instant and the latest annual operating cash
     flow (by period end, then by filing - a restatement replaces), runway only when that OCF is negative."""
+    return runway_inputs(facts, acceptance, at)[0]
+
+
+def runway_inputs(facts: list[PitFact], acceptance: dict, at: datetime) -> tuple[float | None, PitFact | None, PitFact | None]:
+    """(runway, cash fact, annual OCF fact) public at `at` - the facts are the provenance of the decision."""
     at = _aware(at)  # rejected even when there is no fact to look at
     seen = [f for f in facts if visible(f, acceptance, at)]
 
@@ -141,8 +167,13 @@ def runway_months(facts: list[PitFact], acceptance: dict, at: datetime) -> float
     ocf = latest([f for f in seen if f.concept == RUNWAY_OCF and f.start
                   and ANNUAL_DAYS[0] <= (f.end - f.start).days <= ANNUAL_DAYS[1]])
     if cash is None or ocf is None or ocf.val >= 0:
-        return None
-    return cash.val / (-ocf.val / 12)
+        return None, cash, ocf
+    return cash.val / (-ocf.val / 12), cash, ocf
+
+
+def runway_moments(facts: list[PitFact], acceptance: dict) -> list[datetime]:
+    """Every moment the runway can change: when a fact of a runway concept becomes public."""
+    return sorted({public_from(f, acceptance) for f in facts if f.concept in (RUNWAY_CASH, RUNWAY_OCF)})
 
 
 def acceptance_coverage(facts: list[PitFact], acceptance: dict) -> dict:

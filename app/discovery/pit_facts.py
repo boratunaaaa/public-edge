@@ -114,4 +114,5 @@ def market_cap_pit(conn: Connection, cik: str | None, on: date) -> float | None:
     closes = [b for b in ps.bars if b.date <= on and b.close]
     if not closes:
         return None
-    return float(got[0]) * float(closes[-1].close)
+    from app.marketdata.market_cap import depositary_since, live_moment, market_cap
+    return market_cap(closes[-1].close, got[0], depositary_since(conn, [cik]).get(cik), live_moment(on))[0]

@@ -48,12 +48,19 @@ FAMILY_CONSUMERS = {
 def risk_history(cfg: ReplayConfig, src: SourceData) -> dict:
     """Explicit risk-history coverage of the run (app.replay.risk_history.coverage_policy): FULL only when every
     required family is COMPLETE over the window. Past labels are never invented."""
-    from app.replay.risk_history import Coverage, coverage_policy
+    from app.replay.risk_history import COMPLETE, PARTIAL, Coverage, coverage_policy
     days = sessions(cfg.start.astimezone(NY).date(), cfg.end.astimezone(NY).date())
     # the coverage must span the sessions the run actually trades (a UTC-midnight start is the previous NY day)
     s, e = (days[0], days[-1]) if days else (cfg.start.date(), cfg.end.date())
-    pol = coverage_policy(src.risk_cov if isinstance(src.risk_cov, Coverage) else Coverage(), s, e)
+    cov = Coverage(dict((src.risk_cov.families if isinstance(src.risk_cov, Coverage) else {})))
+    fa = cov.families.get("FINANCING_ACTIONS") or {}
+    if fa.get("status") == COMPLETE and src.actions_source != "sec_filings":
+        # the reconstruction vouches for the SEC history, but this snapshot stages production's (recent-block) table
+        cov.families["FINANCING_ACTIONS"] = {**fa, "status": PARTIAL,
+                                             "why": f"snapshot actions from {src.actions_source}, not the SEC history"}
+    pol = coverage_policy(cov, s, e, allow_proxy=cfg.thesis_proxy)
     pol["gates_not_applied"] = sorted({g for fam in pol["not_complete"] for g in FAMILY_CONSUMERS.get(fam, ())})
+    pol["gates_on_proxy"] = sorted({g for fam in pol["proxy"] for g in FAMILY_CONSUMERS.get(fam, ())})
     pol["labels"] = len(src.risk_labels)
     return pol
 
@@ -115,7 +122,7 @@ class ReplayRun:
         self.guards = Guards()
         self.vis = Visibility()
         self.index = PriceIndex(source)
-        self.stager = Stager(source, self.guards, self.index)
+        self.stager = Stager(source, self.guards, self.index, thesis_proxy=config.thesis_proxy)
         self.provider = ReplayPriceProvider(source, self.vis, self.guards, self.index)
         self.risk = risk_history(config, source)
         self.clock = ReplayClock(_at(config.start.astimezone(NY).date(), PRE_OPEN) - timedelta(minutes=1))
@@ -141,6 +148,9 @@ class ReplayRun:
                 price_cap -= timedelta(days=1)
         with self.store.engine.begin() as c:
             self.stager.stage_reference(c, today)
+            # corporate actions public by this step's moment (exact acceptance times): the depositary check of the
+            # market cap and the financing assessment below read them
+            self.stager.stage_actions(c, self.clock.now())
             # today's point-in-time capitalisation for every issuer seen so far, BEFORE the financing assessment
             self.stager.build_universe(c, today, self.stager.issuers, price_cap, self.clock.now())
             self.stager.stage_risks(c, self.clock.now(), today)
@@ -173,7 +183,8 @@ class ReplayRun:
         from app.paper.ledger import STRATEGIES, check_exits, ensure_accounts, fill_orders, snapshot
         from app.paper.proposals import expire
         cfg = self.cfg
-        prov = {"config": cfg.as_dict(), "config_hash": cfg.config_hash(), "code_commit": code_commit(),
+        prov = {"config": cfg.as_dict(), "config_hash": cfg.config_hash(), "comparison_key": cfg.comparison_key(),
+                "code_commit": code_commit(),
                 "data_snapshot": self.src.snapshot_id(), "data_label": self.src.label, "strategies": list(STRATEGIES),
                 "risk_history": self.risk}
         self.result.provenance = prov

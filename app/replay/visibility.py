@@ -14,9 +14,10 @@ from sqlalchemy.engine import Connection
 from app import http
 from app.core import clock
 from app.db.models import (companies, corporate_actions, discovery_risks, events, security_master, security_symbols,
-                           tickers, universe_snapshots)
+                           thesis_changes, tickers, universe_snapshots)
 from app.entities.names import normalize_company
 from app.marketdata.calendar import NY
+from app.marketdata.market_cap import DEPOSITARY_ACTION, market_cap
 from app.marketdata.provider import Bar, MarketDataProvider, shares_as_of
 from app.replay.errors import ReplayLeakage
 from app.replay.source import BENCHMARK_SERIES, SourceData
@@ -137,8 +138,12 @@ class Stager:
     observation moving forward, a registry entry that changed owner, a delisting that became public, a dated corporate
     action) - the result equals a full rebuild at that date (tested)."""
 
-    def __init__(self, src: SourceData, guards: Guards, index: PriceIndex | None = None):
+    def __init__(self, src: SourceData, guards: Guards, index: PriceIndex | None = None, thesis_proxy: bool = False):
         self.src, self.guards = src, guards
+        # stage the SEC-only THESIS_INVALIDATION proxy (risk_history.THESIS_PROXY) as thesis_changes rows - only when the
+        # run asks for it (ReplayConfig.thesis_proxy), so the same snapshot replays with and without it
+        self.thesis_proxy = thesis_proxy
+        self._theses: set[str] = set()
         self.index = index or PriceIndex(src)
         self.staged: set[int] = set()
         self.by_time = sorted(src.events, key=lambda e: (e["available_at"], e["id"]))
@@ -172,6 +177,8 @@ class Stager:
         `today` (the financing rule needs today's market capitalisation)."""
         from app.replay.risk_history import active_risks
         want: dict[tuple, dict] = {}
+        if self.thesis_proxy:
+            self._stage_thesis_proxy(conn, now)
         for cik in sorted(self.issuers):
             rows = active_risks(self.src.risk_labels, cik, now)
             fin = self._financing(conn, cik, rows, now)
@@ -204,8 +211,11 @@ class Stager:
                             {"c": cik, "t": now.date()}).scalar()
         if mcap is not None and mcap >= SUB_BILLION:
             return None
-        dil = rows.get("DILUTION")
-        metrics = {"share_growth_yoy": (0.5 if dil["severity"] == "HIGH" else 0.2) if dil else None, "runway_months": None}
+        dil, rw = rows.get("DILUTION"), rows.get("CASH_RUNWAY")
+        # the financing rule only compares against its thresholds (growth 20 % / 50 %, runway 9 / 18 months): the
+        # label's severity carries exactly that (risk_history.detect_cash_runway / detect_dilution)
+        metrics = {"share_growth_yoy": (0.5 if dil["severity"] == "HIGH" else 0.2) if dil else None,
+                   "runway_months": (8.0 if rw["severity"] == "HIGH" else 17.0) if rw else None}
         flags = financing_flags(conn, cik, metrics, [{"risk": k, "severity": v["severity"]} for k, v in rows.items()])
         score = financing_score(flags)
         if not is_high(flags, score):
@@ -214,8 +224,23 @@ class Stager:
         return {"severity": "HIGH", "value": f"score {score}/10: {', '.join(flags)}", "source_url": "derived:financing_flags",
                 "detected_at": max([v["detected_at"] for v in rows.values()] or [now]), "evidence": ev}
 
-    def desired_reference(self, today: date) -> dict:
-        """The point-in-time reference state on `today` (pure; used by the incremental stager and by the tests)."""
+    def _stage_thesis_proxy(self, conn: Connection, now: datetime) -> None:
+        """thesis_changes THESIS_INVALIDATION rows from the proxy labels public by `now` (production D_THESIS reads them).
+        Created at the source filing's public time; the evidence is the 8-K itself."""
+        from app.replay.risk_history import THESIS_PROXY
+        for x in self.src.risk_labels:
+            if x.risk_type != THESIS_PROXY or x.available_at > now or x.source_document_id in self._theses:
+                continue
+            conn.execute(thesis_changes.insert().values(
+                cik=x.cik, news_cluster_id=None, change="THESIS_INVALIDATION", created_at=x.available_at,
+                explanation=f"SEC-only proxy ({x.detector} v{x.detector_version}): {x.value}",
+                evidence=[{"url": x.source_url, "accession": x.source_document_id, "proxy": True}]))
+            self._theses.add(x.source_document_id)
+            self.writes += 1
+
+    def desired_reference(self, today: date, now: datetime | None = None) -> dict:
+        """The point-in-time reference state on `today` (pure; used by the incremental stager and by the tests).
+        `now` = the step's moment for the corporate actions (default: the start of `today` in New York)."""
         sym = {}
         for s in self.src.symbols:
             if s["first_seen"] <= today:
@@ -231,11 +256,11 @@ class Stager:
         return {"symbols": sym, "registry": {k: v[0] for k, v in reg.items()}, "companies": {k[0] for k in sym},
                 "delistings": {m["cik"]: (m["delisting_date"] if m.get("delisting_date") and m["delisting_date"] <= today
                                           else None) for m in self.src.security_master},
-                # a filing known only by its DATE is public at the end of that day in New York (end_of_public_day):
-                # no step of `today` (the last one is 18:00 ET) may see today's filings, so an afternoon 8-K / 424B
-                # can never move that morning's financing decision
-                "actions": {(a["cik"], a["action"], a.get("accession") or "", a["action_date"])
-                            for a in self.src.corporate_actions if a["action_date"] < today}}
+                # a filing is public from its exact SEC acceptance time; one known only by its DATE at the end of that
+                # day in New York (end_of_public_day): no step of `today` sees it, so an afternoon 8-K / 424B without a
+                # time can never move that morning's financing decision
+                "actions": {_action_key(a) for a in self.src.corporate_actions
+                            if action_public_at(a) <= (now or datetime.combine(today, datetime.min.time(), NY))}}
 
     def stage_reference(self, conn: Connection, today: date) -> int:
         if self.ref_day == today:
@@ -283,15 +308,26 @@ class Stager:
                          .on_conflict_do_update(index_elements=["cik"], set_=vals))
             self._sm[m["cik"]] = known
             w += 1
-        for a in self.src.corporate_actions:
-            key = (a["cik"], a["action"], a.get("accession") or "", a["action_date"])
-            if key in want["actions"] and key not in self._acts:
-                conn.execute(corporate_actions.insert().values(cik=a["cik"], action=a["action"], action_date=a["action_date"],
-                                                               accession=a.get("accession") or "", source=a.get("source") or "",
-                                                               details=a.get("details") or {}))
-                self._acts.add(key)
-                w += 1
         self.ref_day = today
+        self.writes += w
+        return w
+
+    def stage_actions(self, conn: Connection, now: datetime) -> int:
+        """Corporate actions public by `now` (every step: an action accepted during the session is known at its
+        close step). The acceptance time travels in details for the leakage audit (check_state)."""
+        w = 0
+        for a in self.src.corporate_actions:
+            key = _action_key(a)
+            if key in self._acts or action_public_at(a) > now:
+                continue
+            det = dict(a.get("details") or {})
+            if a.get("accepted_at"):
+                det["accepted_at"] = a["accepted_at"].isoformat()
+            conn.execute(corporate_actions.insert().values(cik=a["cik"], action=a["action"], action_date=a["action_date"],
+                                                           accession=a.get("accession") or "", source=a.get("source") or "",
+                                                           details=det))
+            self._acts.add(key)
+            w += 1
         self.writes += w
         return w
 
@@ -314,7 +350,9 @@ class Stager:
             if not sym or not bars or sh is None or (today - sh[1].end).days > UNIVERSE_STALE_DAYS:
                 continue
             price, shares = bars[-1].close, sh[0]
-            mcap = price * shares
+            # the live rule (app.marketdata.market_cap): a depositary programme public by now -> unknown, never price x
+            # the ORDINARY share count
+            mcap, _why = market_cap(price, shares, self.depositary_since(cik, now), now)
             bucket = mcap_bucket(mcap)
             pairs = [(b.close, b.volume) for b in bars[-30:] if b.volume is not None]
             adv = (sum(c * v for c, v in pairs) / len(pairs)) if (bucket in ADV_BUCKETS and pairs) else None
@@ -324,6 +362,22 @@ class Stager:
                          .on_conflict_do_update(index_elements=["as_of", "cik"], set_=vals))
             n += 1
         return n
+
+
+    def depositary_since(self, cik: str, now: datetime) -> datetime | None:
+        ts = [action_public_at(a) for a in self.src.corporate_actions
+              if a["cik"] == cik and a["action"] == DEPOSITARY_ACTION and action_public_at(a) <= now]
+        return min(ts) if ts else None
+
+
+def _action_key(a: dict) -> tuple:
+    return (a["cik"], a["action"], a.get("accession") or "", a["action_date"])
+
+
+def action_public_at(a: dict) -> datetime:
+    """An action is public from its filing's exact acceptance time, else from the end of its filing day (New York)."""
+    from app.pit.sources import filing_day_end
+    return a.get("accepted_at") or filing_day_end(a["action_date"])
 
 
 def share_fact_visible(f, acceptance: dict, now: datetime) -> bool:
@@ -381,13 +435,16 @@ def check_state(conn: Connection, guards: Guards, now: datetime, today: date, ca
     if q("SELECT count(*) FROM event_returns"):
         guards.fail("FUTURE_OUTCOME", "event_returns rows exist during the run (outcomes are evaluated after it)")
     for sql, kind in (("SELECT count(*) FROM security_master WHERE delisting_date > :t", "FUTURE_DELISTING"),
-                      ("SELECT count(*) FROM corporate_actions WHERE action_date >= :t", "FUTURE_CORPORATE_ACTION"),
+                      # an action with an acceptance time is public from it; one without from the end of its day
+                      ("""SELECT count(*) FROM corporate_actions WHERE CASE WHEN details ? 'accepted_at'
+                            THEN (details->>'accepted_at')::timestamptz > :n ELSE action_date >= :t END""",
+                       "FUTURE_CORPORATE_ACTION"),
                       ("SELECT count(*) FROM universe_snapshots WHERE as_of > :t", "FUTURE_UNIVERSE"),
                       ("SELECT count(*) FROM security_symbols WHERE last_seen > :t OR first_seen > :t", "FUTURE_SYMBOL_PERIOD"),
                       ("SELECT count(*) FROM discovery_risks WHERE detected_at::date > :t", "FUTURE_REGULATORY_LABEL"),
-                      ("SELECT count(*) FROM thesis_changes WHERE created_at::date > :t", "FUTURE_THESIS_LABEL"),
+                      ("SELECT count(*) FROM thesis_changes WHERE created_at > :n", "FUTURE_THESIS_LABEL"),
                       ("SELECT count(*) FROM paper_orders WHERE fill_date > :t", "FUTURE_FILL")):
-        if q(sql, t=today):
+        if q(sql, t=today, n=now):
             guards.fail(kind, sql)
     if q("SELECT count(*) FROM events WHERE needs_review OR superseded"):
         guards.fail("FUTURE_REVIEW_LABEL", "a later review / supersession label reached the replay")

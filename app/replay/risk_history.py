@@ -11,15 +11,18 @@ Families (production consumers):
                      acceptance time, production classifier tags) + EDGAR full-text hits on 10-K / 10-Q
   FINANCING_TEXT     ATM / registered direct / reverse split / min bid / convertible / warrants / material weakness /
                      late filing (production TEXT_RISKS phrases + severity rules) <- EDGAR full-text hits (filing date)
-  FINANCING_ACTIONS  shelf / 424B / 3.02 PIPE / 3.01 deficiency <- corporate_actions (SEC filing dates; staged by the
-                     replay itself, no reconstruction needed)
-  DILUTION           cover-page share growth >= 20 % YoY (production formula) <- shares_outstanding_facts (filed dates)
-  CASH_RUNWAY        runway from cash / operating cash flow <- NOT reconstructable from the database (no filed-date
-                     cash / OCF facts): UNAVAILABLE
-  THESIS_INVALIDATION news-based thesis_changes (since 2026-09-25 only) + 10-K going concern: PARTIAL at best
+  FINANCING_ACTIONS  shelf / 424B / 3.02 PIPE / 3.01 deficiency <- the COMPLETE SEC filing history (sec_filings, production
+                     mapping, app.replay.actions; exact acceptance times; staged by the replay itself)
+  DILUTION           cover-page share growth >= 20 % YoY (production formula) <- dei cover-page facts (pit_facts) with
+                     their filings' acceptance times
+  CASH_RUNWAY        runway < 18 months (production metrics formula + derived_risks severity) <- pit_facts cash /
+                     annual operating cash flow, public at their filings' acceptance times
+  THESIS_INVALIDATION news-based thesis_changes exist only since 2026-09-25. Before that only an SEC-only PROXY (8-K items
+                     1.03 / 3.01): status PROXY_VALIDATED - never COMPLETE, used by a run only when it asks for it
 
 A replay is FULL only when every family in REQUIRED_FOR_FULL is COMPLETE over its window for its issuers
-(coverage_policy). Nothing here changes a production threshold: the rules are imported from production modules."""
+(coverage_policy); a run that uses the proxy is FULL_WITH_PROXY at best - a different comparability class. Nothing here
+changes a production threshold: the rules are imported from production modules."""
 from __future__ import annotations
 
 import hashlib
@@ -35,6 +38,9 @@ from app.replay.store import guard_isolation
 
 SCHEMA = "risk_hist_v3"  # v3: run-scoped labels keyed per assessment interval, related documents, run fingerprints
 COMPLETE, PARTIAL, UNAVAILABLE = "COMPLETE", "PARTIAL", "UNAVAILABLE"
+# a family reconstructed from a VALIDATED proxy of its production source: never COMPLETE, never FULL
+PROXY_VALIDATED = "PROXY_VALIDATED"
+PROXY_FAMILIES = ("THESIS_INVALIDATION",)
 FAMILIES = ("GOING_CONCERN", "FINANCING_TEXT", "FINANCING_ACTIONS", "DILUTION", "CASH_RUNWAY", "THESIS_INVALIDATION")
 # every production decision that reads risk history needs these to be complete for a FULL replay
 REQUIRED_FOR_FULL = FAMILIES
@@ -45,6 +51,25 @@ TEXT_DETECTOR = "efts_text_phrase"
 TEXT_DETECTOR_VERSION = "1"
 DILUTION_DETECTOR = "cover_page_share_growth"
 DILUTION_DETECTOR_VERSION = "2"  # v2: one label per assessment (triggering filing)
+DILUTION_DETECTOR_VERSION_ACCEPTED = "3"  # v3: public from the triggering filings' acceptance time (when known)
+RUNWAY_DETECTOR = "pit_cash_runway"
+RUNWAY_DETECTOR_VERSION = "1"
+RUNWAY_RULE = "metrics.runway_months<18 (HIGH<9); cash=CashAndCashEquivalentsAtCarryingValue, annual OCF 300-395d"
+THESIS_PROXY = "THESIS_INVALIDATION_PROXY"  # label type: staged as thesis_changes, never as a discovery risk
+THESIS_PROXY_DETECTOR = "sec_8k_items_103_301"
+THESIS_PROXY_DETECTOR_VERSION = "1"
+THESIS_PROXY_ITEMS = ("1.03", "3.01")  # bankruptcy / receivership, notice of delisting
+# validation against production (read-only, 2026-10-01): clusters labelled BANKRUPTCY_RISK since 2025-11-03 vs 8-Ks
+# with these items of the same issuer (cluster time -3d..+1d); thesis_changes THESIS_INVALIDATION by their cluster time
+PROXY_VALIDATION = {"measured": "2026-10-01", "unit": "news story cluster (BANKRUPTCY_RISK) / proxy 8-K",
+                    "precision": 0.869, "recall": 0.888, "proxy_8k": 1248, "production_clusters": 1221,
+                    "thesis_changes_recall": 0.80, "thesis_changes": 240,
+                    "caveat": "production labels include non-thesis delistings (preferred / warrants / notes); the proxy "
+                              "misses invalidations announced only in news (no 8-K item)"}
+# from when each SEC source is complete for EVERY issuer (not the issuer's own history, which starts when it does)
+XBRL_COMPLETE_FROM = date(2012, 7, 1)  # all filers tag XBRL for periods after 2011-06-15: first annual OCF by mid-2012
+EDGAR_COMPLETE_FROM = date(2001, 1, 1)  # electronic filing mandatory since 1996; submissions history complete since
+ITEMS_COMPLETE_FROM = date(2005, 1, 1)  # 8-K item codes exist since the August 2004 Form 8-K reform
 
 
 def _rule_version_text() -> str:
@@ -151,7 +176,56 @@ def detect_text_hits(hits: list[dict]) -> list[RiskLabel]:
     return out
 
 
-def detect_dilution(cik: str, facts: list[tuple]) -> list[RiskLabel]:
+def detect_cash_runway(cik: str, facts: list, acceptance: dict) -> list[RiskLabel]:
+    """facts: app.pit.sources.PitFact (cash / OCF) of ONE issuer. At every moment a runway fact becomes public the
+    production rule is applied to what is public then (app.pit.sources.runway_inputs = metrics.compute's formula on the
+    production concepts) and production's derived_risks severity: runway < 9 months HIGH, < 18 MEDIUM. Each assessment is
+    its own interval until the next one; the filing that triggered it is the source document, the cash and the OCF
+    facts used are related documents."""
+    from app.pit.sources import public_from, runway_inputs, runway_moments
+    moments = runway_moments(facts, acceptance)
+    out = []
+    for i, m in enumerate(moments):
+        rw, cash, ocf = runway_inputs(facts, acceptance, m)
+        if rw is None or rw >= 18:
+            continue
+        trig = sorted({f.accession for f in facts if public_from(f, acceptance) == m})
+        doc = next((a for a in (cash.accession, ocf.accession) if a in trig), trig[0])
+        out.append(RiskLabel("CASH_RUNWAY", cik, "HIGH" if rw < 9 else "MEDIUM", doc,
+                             f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{doc.replace('-', '')}/",
+                             "XBRL cash / annual operating cash flow", acceptance.get(doc), m, m,
+                             moments[i + 1] if i + 1 < len(moments) else None, RUNWAY_DETECTOR, RUNWAY_DETECTOR_VERSION,
+                             RUNWAY_RULE, "HIGH" if acceptance.get(doc) else "MEDIUM",
+                             f"~{rw:.1f} months: cash {cash.val:.0f} ({cash.end}) / annual OCF {ocf.val:.0f} "
+                             f"({ocf.start}..{ocf.end})",
+                             related_documents=tuple(sorted({cash.accession, ocf.accession} - {doc}))))
+    return out
+
+
+def detect_thesis_proxy(cik: str, filings: list[dict]) -> list[RiskLabel]:
+    """filings: 8-K / 8-K/A rows of ONE issuer (accession, form, filing_date, acceptance_at, items). An 8-K reporting a
+    bankruptcy / receivership (1.03) or a delisting notice (3.01) is the SEC-only proxy of production's news-based
+    THESIS_INVALIDATION (thesis.INVALIDATE = BANKRUPTCY_RISK: delisting, bankruptcy, chapter 11 ...): an event, public
+    from the 8-K's acceptance time."""
+    import re
+    rx = re.compile(r"(?:^|,)\s*(" + "|".join(re.escape(i) for i in THESIS_PROXY_ITEMS) + r")\s*(?=,|$)")
+    out = []
+    for f in filings:
+        if f["form"] not in ("8-K", "8-K/A"):
+            continue
+        hit = sorted(set(rx.findall(f.get("items") or "")))
+        if not hit:
+            continue
+        avail = f.get("acceptance_at") or end_of_public_day(f["filing_date"])
+        out.append(RiskLabel(THESIS_PROXY, cik, "HIGH", f["accession"],
+                             f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{f['accession'].replace('-', '')}/",
+                             "8-K item", f.get("acceptance_at"), avail, avail, None, THESIS_PROXY_DETECTOR,
+                             THESIS_PROXY_DETECTOR_VERSION, "thesis.INVALIDATE~8-K items " + "/".join(THESIS_PROXY_ITEMS),
+                             "MEDIUM", f"{f['form']} items {f.get('items')} ({f['filing_date']})"))
+    return out
+
+
+def detect_dilution(cik: str, facts: list[tuple], acceptance: dict | None = None) -> list[RiskLabel]:
     """facts: (accession, end_date, filed, form, val). At each new filing the production formula is applied to what
     was filed by then: last cover-page count vs the one 300-430 days earlier (discovery.metrics.compute). Every
     assessment is its own interval: the triggering filing (the one filed that day) is the source document, the two
@@ -174,22 +248,35 @@ def detect_dilution(cik: str, facts: list[tuple]) -> list[RiskLabel]:
         if g < 0.2:
             continue
         nxt = min((x[2] for x in facts if x[2] > filed), default=None)
-        avail = end_of_public_day(filed)
+        avail = _group_public(filed, trigger, acceptance)
         base = ya[0]
         out.append(RiskLabel("DILUTION", cik, "HIGH" if g >= 0.5 else "MEDIUM", trigger[0],
                              f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{trigger[0].replace('-', '')}/",
-                             "cover-page share fact", None, avail, avail, end_of_public_day(nxt) if nxt else None,
-                             DILUTION_DETECTOR, DILUTION_DETECTOR_VERSION, "metrics.share_growth_yoy>=0.2", "HIGH",
+                             "cover-page share fact", (acceptance or {}).get(trigger[0]), avail, avail,
+                             _group_public(nxt, sorted({x[0] for x in facts if x[2] == nxt}), acceptance) if nxt else None,
+                             DILUTION_DETECTOR, DILUTION_DETECTOR_VERSION if acceptance is None else
+                             DILUTION_DETECTOR_VERSION_ACCEPTED, "metrics.share_growth_yoy>=0.2", "HIGH",
                              f"shares outstanding +{g:.0%} YoY: {last[4]} ({last[0]}, {last[1]}) vs {base[4]} "
                              f"({base[0]}, {base[1]})",
                              related_documents=tuple(sorted({last[0], base[0], *trigger[1:]} - {trigger[0]}))))
     return out
 
 
+def _group_public(filed: date, accessions: list[str], acceptance: dict | None) -> datetime:
+    """The facts filed on one day are decided together: public once ALL of their filings are (each from its exact
+    acceptance time, a filing without one from the end of the day)."""
+    eod = end_of_public_day(filed)
+    if acceptance is None:
+        return eod
+    return max(acceptance.get(a) or eod for a in accessions)
+
+
 def active_risks(labels: list[RiskLabel], cik: str, at: datetime) -> dict[str, dict]:
     """Production-shaped discovery_risks rows of one issuer at `at` from the labels public by then (severity
     escalation and FREQUENT_CAPITAL_RAISES exactly as scan_text_risks). Each row keeps its evidence."""
-    live = [x for x in labels if x.cik == cik and x.available_at <= at and (x.valid_to is None or at < x.valid_to)]
+    # the THESIS proxy is not a production discovery risk (it is staged as thesis_changes, only when a run asks for it)
+    live = [x for x in labels if x.cik == cik and x.risk_type != THESIS_PROXY and x.available_at <= at
+            and (x.valid_to is None or at < x.valid_to)]
     out: dict[str, dict] = {}
     by: dict[str, list[RiskLabel]] = {}
     for x in live:
@@ -222,20 +309,31 @@ class Coverage:
         return (self.families.get(family) or {}).get("status", UNAVAILABLE)
 
 
-def coverage_policy(cov: Coverage, start: date, end: date) -> dict:
-    """FULL iff every REQUIRED_FOR_FULL family is COMPLETE and its covered range contains [start, end]."""
-    missing = {}
+def coverage_policy(cov: Coverage, start: date, end: date, allow_proxy: bool = False) -> dict:
+    """FULL iff every REQUIRED_FOR_FULL family is COMPLETE and its covered range contains [start, end].
+
+    A PROXY_VALIDATED family (PROXY_FAMILIES) never makes a run FULL: without allow_proxy it is simply not complete
+    (LIMITED); with it - the run stages the proxy - the best a run can reach is FULL_WITH_PROXY, a comparability class
+    of its own that a final (holdout) verdict never pools with FULL (app.replay.campaign)."""
+    missing, proxied = {}, {}
     for fam in REQUIRED_FOR_FULL:
         f = cov.families.get(fam) or {}
         st = f.get("status", UNAVAILABLE)
         lo, hi = f.get("from"), f.get("to")
-        if st != COMPLETE or lo is None or lo > start or (hi is not None and hi < end):
+        spans = lo is not None and lo <= start and (hi is None or hi >= end)
+        if st == PROXY_VALIDATED and fam in PROXY_FAMILIES and allow_proxy and spans:
+            proxied[fam] = {"from": lo, "to": hi, "validation": f.get("validation")}
+        elif st != COMPLETE or not spans:
             missing[fam] = st if st != COMPLETE else PARTIAL
-    flag = ("RISK_HISTORY_COMPLETE" if not missing else
-            "RISK_HISTORY_UNAVAILABLE" if all(v == UNAVAILABLE for v in missing.values()) and
-            len(missing) == len(REQUIRED_FOR_FULL) else "RISK_HISTORY_PARTIAL")
-    return {"flag": flag, "comparability": "FULL" if not missing else "LIMITED", "families": cov.families,
-            "not_complete": missing}
+    if missing:
+        flag = ("RISK_HISTORY_UNAVAILABLE" if all(v == UNAVAILABLE for v in missing.values()) and
+                len(missing) == len(REQUIRED_FOR_FULL) else "RISK_HISTORY_PARTIAL")
+        comparability = "LIMITED"
+    else:
+        flag = "RISK_HISTORY_COMPLETE_WITH_PROXY" if proxied else "RISK_HISTORY_COMPLETE"
+        comparability = "FULL_WITH_PROXY" if proxied else "FULL"
+    return {"flag": flag, "comparability": comparability, "families": cov.families, "not_complete": missing,
+            "proxy": proxied, "proxy_allowed": allow_proxy}
 
 
 # ------------------------------------------------------------------ store (replay database only)
@@ -425,6 +523,10 @@ def compute_coverage(meta: dict, inv: dict[str, dict], ciks: list[str]) -> Cover
                                 "why": " | ".join(reasons), "missing_issuers": sorted(missing)}
     fam["FINANCING_TEXT"] = ({"status": COMPLETE, "from": e_lo, "to": min(e_hi, horizon), "why": "full-text scan"}
                              if scanned else {"status": UNAVAILABLE, "why": "no untruncated full-text scan for this scope"})
+    pit = meta.get("pit")  # the export read the point-in-time tables (sec_filings / pit_facts) for these issuers
+    if pit:
+        _pit_coverage(fam, meta, inv, ciks, horizon)
+        return Coverage(fam)
     act = [inv.get(c, {}).get("actions") or {} for c in ciks]
     if all(a.get("earliest") and a.get("fetched") for a in act) and act:
         lo = max(date.fromisoformat(a["earliest"]) for a in act) + timedelta(days=730)
@@ -451,6 +553,56 @@ def compute_coverage(meta: dict, inv: dict[str, dict], ciks: list[str]) -> Cover
                                    "why": f"news thesis_changes only since {thesis}; 10-K going concern before"}
                                   if gc_from else {"status": UNAVAILABLE, "why": "no thesis inputs"})
     return Coverage(fam)
+
+
+def _pit_coverage(fam: dict, meta: dict, inv: dict[str, dict], ciks: list[str], horizon: date) -> None:
+    """FINANCING_ACTIONS / DILUTION / CASH_RUNWAY / THESIS from the point-in-time tables. A family is COMPLETE when the
+    backfill verifiably holds EVERY issuer's source (pit_backfill_progress: submissions 'done'; XBRL 'done', or
+    'not_found' = the issuer never filed XBRL, so production has no value either) and the window lies inside the period
+    the SEC source is complete for all filers. An issuer whose rule is undecidable at some moment (no 300-430-day share
+    pair yet, a non-negative OCF) is NOT a gap: production has no value then either - the replay reproduces that."""
+    st = {c: (inv.get(c) or {}).get("pit") or {} for c in ciks}
+    sub_ok = [c for c in ciks if (st[c].get("submissions") or {}).get("status") == "done"]
+    x_ok = [c for c in ciks if (st[c].get("xbrl") or {}).get("status") in ("done", "not_found")]
+    sub_bad = sorted(set(ciks) - set(sub_ok))
+    x_bad = sorted(set(ciks) - set(x_ok))
+
+    def upto(jobs) -> date:
+        ds = [date.fromisoformat(st[c][j]["date"]) for c in ciks for j in jobs if (st[c].get(j) or {}).get("date")]
+        return min([horizon] + ds)
+    actions_src = meta.get("actions_source") == "sec_filings"
+    if not sub_bad and ciks and actions_src:
+        fam["FINANCING_ACTIONS"] = {"status": COMPLETE, "from": EDGAR_COMPLETE_FROM + timedelta(days=730),
+                                    "to": upto(["submissions"]),
+                                    "why": "complete SEC filing history of every issuer (production action mapping, "
+                                           "acceptance times) + the 730-day shelf lookback"}
+    else:
+        fam["FINANCING_ACTIONS"] = {"status": PARTIAL if len(sub_bad) < len(ciks) else UNAVAILABLE,
+                                    "why": ("actions not exported from sec_filings; " if not actions_src else "") +
+                                           f"submissions history missing for {sub_bad[:10]} ({len(sub_bad)})"}
+    both_bad = sorted(set(sub_bad) | set(x_bad))
+    undecidable = sorted(c for c in ciks if not ((inv.get(c) or {}).get("dilution") or {}).get("from"))
+    if not both_bad and ciks:
+        fam["DILUTION"] = {"status": COMPLETE, "from": XBRL_COMPLETE_FROM + timedelta(days=430),
+                           "to": upto(["xbrl", "submissions"]),
+                           "why": "every issuer's dei cover-page facts + acceptance times (+ the 430-day comparison base)"
+                                  + (f"; no comparison pair at some moment for {len(undecidable)} issuer(s) - production "
+                                     "has no growth figure then either" if undecidable else "")}
+        fam["CASH_RUNWAY"] = {"status": COMPLETE, "from": XBRL_COMPLETE_FROM, "to": upto(["xbrl", "submissions"]),
+                              "why": "every issuer's XBRL cash / annual OCF + acceptance times (production concepts)"}
+    else:
+        for f in ("DILUTION", "CASH_RUNWAY"):
+            fam[f] = {"status": PARTIAL if len(both_bad) < len(ciks) else UNAVAILABLE,
+                      "why": f"XBRL / submissions backfill missing for {both_bad[:10]} ({len(both_bad)})"}
+    news_from = meta.get("thesis_changes_from")
+    if not sub_bad and ciks:
+        fam["THESIS_INVALIDATION"] = {"status": PROXY_VALIDATED, "from": ITEMS_COMPLETE_FROM, "to": upto(["submissions"]),
+                                      "validation": PROXY_VALIDATION,
+                                      "why": f"production's news-based thesis_changes exist only since {news_from}; "
+                                             "SEC-only proxy (8-K items 1.03 / 3.01) validated against them"}
+    else:
+        fam["THESIS_INVALIDATION"] = {"status": UNAVAILABLE if len(sub_bad) == len(ciks) else PARTIAL,
+                                      "why": f"no proxy: submissions history missing for {sub_bad[:10]}"}
 
 
 TRAILER = "_trailer"
@@ -486,6 +638,14 @@ def _issuer(rec: dict) -> dict:
     if rec.get("delisting_date"):
         rec["delisting_date"] = _d(rec["delisting_date"])
     rec["shares"] = [(f[0], _d(f[1]), _d(f[2]), f[3], int(f[4])) for f in rec.get("shares", [])]
+    if "acceptance" in rec:  # point-in-time export: accession -> exact acceptance time of the issuer's filings
+        rec["acceptance"] = {k: _dt(v) for k, v in rec["acceptance"].items() if v}
+    from app.pit.sources import PitFact
+    rec["runway"] = [PitFact(rec["cik"], f[0], f[1], _d(f[2]) if f[2] else None, _d(f[3]), float(f[4]), _d(f[5]), f[6], f[7])
+                     for f in rec.get("runway", [])]
+    for f in rec.get("proxy_8k", []):
+        f["filing_date"] = _d(f["filing_date"])
+        f["acceptance_at"] = _dt(f["acceptance_at"]) if f.get("acceptance_at") else None
     return rec
 
 
@@ -553,7 +713,7 @@ def issuer_inventory(rec: dict, start: date, end: date, jobs: dict | None = None
                 and ((f.get("profile") or {}).get("_meta") or {}).get("v", 1) != CLASSIFIER_VERSION]
     d = dilution_inventory(rec.get("shares", []))
     return {"outdated_profiles": outdated, "gc_missing": gc_missing(rec, start, end, jobs), "actions": rec.get("actions") or {},
-            "dilution": {k: (str(v) if isinstance(v, date) else v) for k, v in d.items()}}
+            "dilution": {k: (str(v) if isinstance(v, date) else v) for k, v in d.items()}, "pit": rec.get("pit") or {}}
 
 
 def source_digest(path) -> str:
@@ -568,7 +728,15 @@ def run_config() -> dict:
     """Everything besides the source that decides a label: detector + rule versions."""
     return {"gc": [GC_DETECTOR, GC_DETECTOR_VERSION, _rule_version_gc()],
             "text": [TEXT_DETECTOR, TEXT_DETECTOR_VERSION, _rule_version_text(), TEXT_LOOKBACK_DAYS],
-            "dilution": [DILUTION_DETECTOR, DILUTION_DETECTOR_VERSION, "metrics.share_growth_yoy>=0.2"]}
+            "dilution": [DILUTION_DETECTOR, DILUTION_DETECTOR_VERSION, DILUTION_DETECTOR_VERSION_ACCEPTED,
+                         "metrics.share_growth_yoy>=0.2"],
+            "runway": [RUNWAY_DETECTOR, RUNWAY_DETECTOR_VERSION, RUNWAY_RULE, _annual_days()],
+            "thesis_proxy": [THESIS_PROXY_DETECTOR, THESIS_PROXY_DETECTOR_VERSION, list(THESIS_PROXY_ITEMS)]}
+
+
+def _annual_days() -> list[int]:
+    from app.pit.sources import ANNUAL_DAYS
+    return list(ANNUAL_DAYS)
 
 
 def verify_export(meta: dict, trailer: dict | None, seen: list[str]) -> list[str]:
@@ -615,7 +783,7 @@ def reconstruct(store: RiskHistoryStore, run_id: str, path) -> dict:
     inv: dict[str, dict] = {}
     seen: list[str] = []
     trailer = None
-    done = {f: store.done(run_id, f) for f in ("GOING_CONCERN_10K", "TEXT", "DILUTION")}
+    done = {f: store.done(run_id, f) for f in ("GOING_CONCERN_10K", "TEXT", "DILUTION", "CASH_RUNWAY", "THESIS_PROXY")}
     for kind, rec in it:
         if kind == "trailer":
             trailer = rec
@@ -628,9 +796,12 @@ def reconstruct(store: RiskHistoryStore, run_id: str, path) -> dict:
         if rec.get("efts_truncated") and meta.get("efts_scan"):
             meta["efts_scan"]["truncated"] = True  # an incomplete query leaves its scope's text coverage incomplete
         inv[cik] = issuer_inventory(rec, start, end, meta.get("tenk_jobs"))
+        acc = rec.get("acceptance")  # None = an export without the point-in-time tables (filing dates only)
         for fam, detect in (("GOING_CONCERN_10K", lambda r: detect_going_concern_10k(r.get("tenk", []))),
                             ("TEXT", lambda r: detect_text_hits(r.get("efts_hits", []))),
-                            ("DILUTION", lambda r: detect_dilution(r["cik"], r.get("shares", [])))):
+                            ("DILUTION", lambda r: detect_dilution(r["cik"], r.get("shares", []), acc)),
+                            ("CASH_RUNWAY", lambda r: detect_cash_runway(r["cik"], r["runway"], acc or {})),
+                            ("THESIS_PROXY", lambda r: detect_thesis_proxy(r["cik"], r.get("proxy_8k", [])))):
             if cik in done[fam]:
                 out["skipped_done"] += 1
                 continue

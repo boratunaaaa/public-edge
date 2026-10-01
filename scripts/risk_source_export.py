@@ -32,9 +32,11 @@ def ensure_db_free_http() -> None:
         raise SystemExit("refusing to run: the shared (database-writing) HTTP rate limiter is enabled")
 
 
-def _batch_rows(c, ciks: list[str]) -> dict[str, dict]:
+def _batch_rows(c, ciks: list[str], pit: bool = False) -> dict[str, dict]:
     recs = {cik: {"cik": cik, "tenk": [], "tenk_other": [], "shares": [], "efts_hits": [], "actions": {},
                   "delisting_date": None} for cik in ciks}
+    if pit:
+        _pit_rows(c, ciks, recs)
     for r in c.execute(text("""SELECT accession, cik, form, accepted_at, filing_date, source_url, profile FROM tenk_filings
                                WHERE cik = ANY(:c) AND status = 'ok' ORDER BY cik, filing_date"""), {"c": ciks}).mappings():
         recs[r["cik"]]["tenk"].append(dict(r))
@@ -46,9 +48,9 @@ def _batch_rows(c, ciks: list[str]) -> dict[str, dict]:
         recs[r["cik"]]["tenk_other"].append(dict(r))
     for cik, dd in c.execute(text("SELECT cik, delisting_date FROM security_master WHERE cik = ANY(:c)"), {"c": ciks}):
         recs[cik]["delisting_date"] = dd
-    for cik, acc, e, f, form, val in c.execute(text("""SELECT cik, accession, end_date, filed, form, val
+    for cik, acc, e, f, form, val in ([] if pit else c.execute(text("""SELECT cik, accession, end_date, filed, form, val
                                                       FROM shares_outstanding_facts WHERE cik = ANY(:c)
-                                                      ORDER BY cik, filed, end_date"""), {"c": ciks}):
+                                                      ORDER BY cik, filed, end_date"""), {"c": ciks})):
         recs[cik]["shares"].append([acc, e, f, form, val])
     for cik, earliest, fetched in c.execute(text("""SELECT sm.cik, (SELECT min(action_date) FROM corporate_actions ca
                                                           WHERE ca.cik = sm.cik AND ca.source = 'sec_submissions'),
@@ -58,12 +60,40 @@ def _batch_rows(c, ciks: list[str]) -> dict[str, dict]:
     return recs
 
 
+def _pit_rows(c, ciks: list[str], recs: dict[str, dict]) -> None:
+    """The point-in-time tables (app.pit.readers: no insider filing and no fact citing one is ever read): every issuer's
+    dei cover-page share facts
+    (the DILUTION input, same concept production stores in shares_outstanding_facts - but complete), the production
+    runway concepts (cash, annual OCF), the 8-Ks of the THESIS proxy, the acceptance time of every filing behind them and
+    the backfill state that proves completeness."""
+    from app.pit import readers
+    from app.pit.sources import RUNWAY_CASH, RUNWAY_OCF
+    from app.replay.risk_history import THESIS_PROXY_ITEMS
+    shares = readers.facts(c, ciks, ["EntityCommonStockSharesOutstanding"])
+    runway = readers.facts(c, ciks, [RUNWAY_CASH, RUNWAY_OCF])
+    acc = readers.acceptance(c, ciks)
+    k8 = readers.filings(c, ciks, ["8-K", "8-K/A"])
+    prog = readers.progress(c, ciks)
+    for cik in ciks:
+        r = recs[cik]
+        r["shares"] = [[f.accession, f.end, f.filed, f.form, int(f.val)] for f in shares.get(cik, [])]
+        r["runway"] = [[f.family, f.concept, f.start, f.end, f.val, f.filed, f.accession, f.form] for f in runway.get(cik, [])]
+        used = {f.accession for f in shares.get(cik, []) + runway.get(cik, [])}
+        r["proxy_8k"] = [f for f in k8.get(cik, []) if any(i in (f.get("items") or "") for i in THESIS_PROXY_ITEMS)]
+        used |= {f["accession"] for f in r["proxy_8k"]}
+        r["acceptance"] = {a: t for a, t in acc.get(cik, {}).items() if a in used}
+        r["pit"] = prog.get(cik, {})
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ciks", required=True)
     ap.add_argument("--start", required=True)
     ap.add_argument("--end", required=True)
     ap.add_argument("--efts", action="store_true", help="also scan the production TEXT_RISKS phrases (network)")
+    ap.add_argument("--source", choices=("pit", "production"), default="pit",
+                    help="pit: shares / runway / actions / thesis proxy from the point-in-time tables (sec_filings, "
+                         "pit_facts); production: the pre-2026-10 inputs (shares_outstanding_facts, no runway)")
     a = ap.parse_args()
     ensure_db_free_http()
     from app.db.session import get_engine
@@ -71,6 +101,10 @@ def main() -> int:
     start, end = date.fromisoformat(a.start), date.fromisoformat(a.end)
     eng = get_engine()
     meta: dict = {"ciks": ciks, "start": a.start, "end": a.end}
+    pit = a.source == "pit"
+    if pit:
+        # the snapshot export (replay_export_snapshot --source pit) derives the corporate actions from sec_filings
+        meta.update(pit=True, actions_source="sec_filings")
     with eng.connect() as c:
         c.execute(text("SET TRANSACTION READ ONLY"))
         meta["tenk_by_year"] = {str(int(y)): n for y, n in c.execute(text(
@@ -105,7 +139,7 @@ def main() -> int:
         part = ciks[i:i + BATCH]
         with eng.connect() as c:
             c.execute(text("SET TRANSACTION READ ONLY"))
-            recs = _batch_rows(c, part)
+            recs = _batch_rows(c, part, pit)
             c.rollback()
         if a.efts:
             from app.discovery.risks import TEXT_RISKS

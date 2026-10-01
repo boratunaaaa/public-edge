@@ -119,4 +119,24 @@ def holdout_verdict_inputs(conn) -> dict:
                                  WHERE sealed AND period_role = 'holdout' AND status = 'COMPLETED'
                                  ORDER BY replay_id""")).mappings().all()
     return {"full": [dict(r) for r in rows if r["comparability"] == "FULL"],
-            "limited_excluded": [dict(r) for r in rows if r["comparability"] != "FULL"]}
+            # a run on the SEC-only THESIS proxy is reported on its own - never pooled with FULL
+            "full_with_proxy_separate": [dict(r) for r in rows if r["comparability"] == "FULL_WITH_PROXY"],
+            "limited_excluded": [dict(r) for r in rows if r["comparability"] not in ("FULL", "FULL_WITH_PROXY")]}
+
+
+def proxy_pairs(conn) -> list[dict]:
+    """Completed runs that differ ONLY in thesis_proxy (same comparison key and input snapshot), side by side: what the
+    SEC-only THESIS proxy changes. A run without its counterpart is not listed."""
+    rows = conn.execute(text(f"""SELECT replay_id, comparability, data_snapshot, result FROM {META_SCHEMA}.replay_runs
+                                 WHERE status = 'COMPLETED' ORDER BY replay_id""")).mappings().all()
+    groups: dict[tuple, dict] = {}
+    for r in rows:
+        prov = (r["result"] or {}).get("provenance") or {}
+        key = (prov.get("comparison_key"), r["data_snapshot"])
+        if key[0] is None:
+            continue
+        side = "with_proxy" if (prov.get("config") or {}).get("thesis_proxy") else "without_proxy"
+        groups.setdefault(key, {})[side] = {"replay_id": r["replay_id"], "comparability": r["comparability"],
+                                            "metrics": (r["result"] or {}).get("metrics")}
+    return [{"comparison_key": k[0], "data_snapshot": k[1], **v} for k, v in sorted(groups.items())
+            if "with_proxy" in v and "without_proxy" in v]

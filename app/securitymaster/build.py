@@ -41,7 +41,10 @@ ITEM_ACTIONS = {"1.03": "BANKRUPTCY", "5.01": "CHANGE_IN_CONTROL", "2.01": "ACQ_
 FORM_ACTIONS = {"S-3": "SHELF_REGISTRATION", "S-3ASR": "SHELF_REGISTRATION", "F-3": "SHELF_REGISTRATION",
                 "S-1": "REGISTRATION_S1", "424B5": "PROSPECTUS_424B", "424B3": "PROSPECTUS_424B", "424B4": "PROSPECTUS_424B",
                 "424B7": "PROSPECTUS_424B", "25-NSE": "FORM25_NSE", "25": "FORM25", "15-12B": "FORM15", "15-12G": "FORM15",
-                "DEFM14A": "MERGER_PROXY", "SC 14D9": "TENDER_TARGET"}
+                "DEFM14A": "MERGER_PROXY", "SC 14D9": "TENDER_TARGET",
+                # a depositary (ADR) programme: its market cap is unknown (app.marketdata.market_cap)
+                "F-6": "DEPOSITARY_PROGRAM", "F-6EF": "DEPOSITARY_PROGRAM", "F-6 POS": "DEPOSITARY_PROGRAM",
+                "F-6/A": "DEPOSITARY_PROGRAM"}
 
 
 def _now() -> datetime:

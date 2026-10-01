@@ -130,7 +130,8 @@ def test_a_same_day_filing_without_acceptance_time_counts_as_the_later_one():
     assert runway_months(facts, acc, datetime(2023, 3, 2, 15, tzinfo=timezone.utc)) == pytest.approx(6.0)  # next day: unknown wins
 
 
-@pytest.mark.parametrize("days, annual", [(364, True), (335, True), (395, True), (334, False), (396, False), (273, False)])
+@pytest.mark.parametrize("days, annual", [(364, True), (327, True), (300, True), (395, True), (299, False), (396, False),
+                                          (273, False)])  # 327: a fiscal-year change (production frames count it)
 def test_annual_ocf_is_a_one_year_duration_like_the_production_cy_frames(days, annual):
     from datetime import timedelta
 

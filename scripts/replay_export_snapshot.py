@@ -26,6 +26,10 @@ def main() -> int:
     ap.add_argument("--end", required=True)
     ap.add_argument("--event-types", default="INSIDER_OPEN_MARKET_BUY")
     ap.add_argument("--label", default="snapshot")
+    ap.add_argument("--source", choices=("pit", "production"), default="pit",
+                    help="pit: corporate actions derived from the complete SEC filing history (sec_filings, production "
+                         "mapping, acceptance times) and dei share facts from pit_facts; production: corporate_actions + "
+                         "shares_outstanding_facts as before")
     a = ap.parse_args()
     ciks = [c.strip().zfill(10) for c in a.ciks.split(",") if c.strip()]
     start, end = date.fromisoformat(a.start), date.fromisoformat(a.end)
@@ -71,19 +75,39 @@ def main() -> int:
                                                                        AND detected_at <= :e"""),
                                                              {"c": ciks, "e": end + timedelta(days=1)}).mappings()]
         out["share_facts"] = {}
-        for cik, acc, e, f, form, val in c.execute(text("""SELECT cik, accession, end_date, filed, form, val
-                                                          FROM shares_outstanding_facts WHERE cik = ANY(:c)
-                                                          ORDER BY cik, filed, end_date"""), {"c": ciks}):
-            out["share_facts"].setdefault(cik, []).append([acc, e, f, form, val])
-        # exact acceptance time of the filings behind those facts, where production has it (10-K: tenk_filings)
-        out["share_fact_acceptance"] = dict(c.execute(text("""
-            SELECT tf.accession, tf.accepted_at FROM tenk_filings tf WHERE tf.accepted_at IS NOT NULL
-              AND tf.accession IN (SELECT accession FROM shares_outstanding_facts WHERE cik = ANY(:c))"""), {"c": ciks}).all())
+        if a.source == "pit":
+            from app.pit import readers
+            facts = readers.facts(c, ciks, ["EntityCommonStockSharesOutstanding"])
+            acc = readers.acceptance(c, ciks)
+            for cik in ciks:
+                for f in facts.get(cik, []):
+                    out["share_facts"].setdefault(cik, []).append([f.accession, f.end, f.filed, f.form, int(f.val)])
+            used = {x[0] for fs in out["share_facts"].values() for x in fs}
+            out["share_fact_acceptance"] = {k: v for m in acc.values() for k, v in m.items() if k in used}
+        else:
+            for cik, acc_, e, f, form, val in c.execute(text("""SELECT cik, accession, end_date, filed, form, val
+                                                               FROM shares_outstanding_facts WHERE cik = ANY(:c)
+                                                               ORDER BY cik, filed, end_date"""), {"c": ciks}):
+                out["share_facts"].setdefault(cik, []).append([acc_, e, f, form, val])
+            # exact acceptance time of the filings behind those facts, where production has it (10-K: tenk_filings)
+            out["share_fact_acceptance"] = dict(c.execute(text("""
+                SELECT tf.accession, tf.accepted_at FROM tenk_filings tf WHERE tf.accepted_at IS NOT NULL
+                  AND tf.accession IN (SELECT accession FROM shares_outstanding_facts WHERE cik = ANY(:c))"""),
+                {"c": ciks}).all())
         out["security_master"] = [dict(r) for r in c.execute(text("""SELECT cik, name, sector, delisting_date, delisting_reason
                                                                       FROM security_master WHERE cik = ANY(:c)"""), {"c": ciks}).mappings()]
-        out["corporate_actions"] = [dict(r) for r in c.execute(text("""SELECT cik, action, action_date, accession, source
-                                                                        FROM corporate_actions WHERE cik = ANY(:c)"""),
-                                                               {"c": ciks}).mappings()]
+        if a.source == "pit":
+            from app.pit import readers
+            from app.replay.actions import actions_from_filings
+            out["corporate_actions"] = [x for cik, rows in sorted(readers.filings(c, ciks).items())
+                                        for x in actions_from_filings(cik, rows)]
+            out["actions_source"] = "sec_filings"
+        else:
+            out["corporate_actions"] = [dict(r) for r in c.execute(text("""SELECT cik, action, action_date, accession, source
+                                                                            FROM corporate_actions WHERE cik = ANY(:c)
+                                                                            ORDER BY cik, action_date, accession, action"""),
+                                                                   {"c": ciks}).mappings()]
+            out["actions_source"] = "corporate_actions"
         all_ciks = sorted({r["cik"] for r in syms} | set(ciks))
         out["companies"] = dict(c.execute(text("SELECT cik, name FROM companies WHERE cik = ANY(:c)"), {"c": all_ciks}).all())
         c.rollback()

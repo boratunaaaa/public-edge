@@ -129,6 +129,9 @@ def build_universe(engine: Engine, as_of: date | None = None, with_adv: bool = T
         primary.setdefault(cik, (sym, name))  # first listed symbol = primary class
     cands = {cik: v for cik, v in primary.items() if cik in shares}
     prices = spark_closes([v[0] for v in cands.values()])
+    from app.marketdata.market_cap import depositary_since, live_moment, market_cap
+    with engine.connect() as conn:
+        dep = depositary_since(conn, sorted(cands))
     recs = []
     for cik, (sym, name) in cands.items():
         p = prices.get(sym)
@@ -137,7 +140,9 @@ def build_universe(engine: Engine, as_of: date | None = None, with_adv: bool = T
         sh, end = shares[cik]
         if (as_of - end).days > 400:
             continue  # stale cover page -> unknown market cap
-        mcap = p[0] * sh
+        # an ADR's price x the ORDINARY share count is not a market cap: written as unknown (NULL), so this row - not
+        # an older inflated one - is what the gate reads (app.marketdata.market_cap)
+        mcap, _why = market_cap(p[0], sh, dep.get(cik), live_moment(as_of))
         recs.append({"as_of": as_of, "cik": cik, "ticker": sym, "name": name, "price": p[0], "shares": sh, "shares_end": end,
                      "market_cap": mcap, "bucket": mcap_bucket(mcap), "adv_dollar_30d": None})
     if with_adv:

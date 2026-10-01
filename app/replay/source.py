@@ -30,7 +30,12 @@ class SourceData:
     # filings: tenk_filings.accepted_at). A fact without one is known by its filing DATE only (visibility.share_fact_visible)
     acceptance: dict[str, datetime] = field(default_factory=dict)
     security_master: list[dict] = field(default_factory=list)  # cik, name, sector, delisting_date, delisting_reason
-    corporate_actions: list[dict] = field(default_factory=list)  # cik, action, action_date, accession, source
+    # cik, action, action_date, accession, source, accepted_at (exact SEC acceptance time when known; a row without one
+    # is public at the end of its filing day). actions_source = where they come from: "sec_filings" = derived with the
+    # production mapping from the COMPLETE SEC filing history (app.replay.actions) - the only source that can make
+    # FINANCING_ACTIONS complete; "corporate_actions" = production's table (recent submissions block only)
+    corporate_actions: list[dict] = field(default_factory=list)
+    actions_source: str = "corporate_actions"
     # price identity catalog: which stored vendor series holds WHICH issuer's prices for WHICH dates
     # ({"series", "cik", "valid_from", "valid_to"}; None = open-ended). PriceIndex adds a symbol-period entry for every
     # (issuer, stored symbol) the catalog does not list explicitly (derive_series).
@@ -75,6 +80,8 @@ def _plain(src: SourceData) -> dict:
             "risk_labels": sorted(tuple(str(v) for v in x.__dict__.values()) for x in src.risk_labels),
             "risk_cov": getattr(src.risk_cov, "families", None),
             "security_master": src.security_master, "corporate_actions": src.corporate_actions,
+            # only when not the default: snapshots exported before the field keep their id
+            **({"actions_source": src.actions_source} if src.actions_source != "corporate_actions" else {}),
             "bars": {s: [list(b.__dict__.values()) for b in bs] for s, bs in sorted(src.bars.items())},
             "share_facts": {c: [list(f.__dict__.values()) for f in fs] for c, fs in sorted(src.share_facts.items())},
             "acceptance": {k: str(v) for k, v in sorted(src.acceptance.items())}}
@@ -103,9 +110,11 @@ def load_snapshot(path: str | Path) -> SourceData:
     facts = {c: [ShareFact(f[0], _d(f[1]), _d(f[2]), f[3], int(f[4])) for f in fs] for c, fs in raw.get("share_facts", {}).items()}
     symbols = [{**s, "first_seen": _d(s["first_seen"]), "last_seen": _d(s["last_seen"])} for s in raw.get("symbols", [])]
     sm = [{**r, "delisting_date": _d(r.get("delisting_date"))} for r in raw.get("security_master", [])]
-    ca = [{**r, "action_date": _d(r["action_date"])} for r in raw.get("corporate_actions", [])]
+    ca = [{**r, "action_date": _d(r["action_date"]), **({"accepted_at": _dt(r["accepted_at"])} if r.get("accepted_at") else {})}
+          for r in raw.get("corporate_actions", [])]
     series = [{**x, "valid_from": _d(x.get("valid_from")), "valid_to": _d(x.get("valid_to"))} for x in raw.get("series", [])]
     acceptance = {k: _dt(v) for k, v in (raw.get("share_fact_acceptance") or {}).items() if v}
     return SourceData(events=events, bars=bars, symbols=symbols, companies=raw.get("companies", {}), share_facts=facts,
                       acceptance=acceptance, security_master=sm, corporate_actions=ca, series=series,
+                      actions_source=raw.get("actions_source", "corporate_actions"),
                       label=raw.get("label", Path(path).name))

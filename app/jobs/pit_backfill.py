@@ -31,6 +31,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 
 from app import http
+from app.pit.sources import INSIDER_FORMS
 
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
@@ -38,9 +39,8 @@ PAGE_URL = "https://data.sec.gov/submissions/{name}"
 MIN_FREE_GB = 8.0
 MAX_ATTEMPTS = 3
 BATCH = 1000
-# insider ownership reports (~46% of all filings): production ingests Form 4 through its own pipeline and they carry no
-# financing / dilution information - not stored, so the complete history fits the disk budget
-INSIDER_FORMS = frozenset({"3", "4", "5", "3/A", "4/A", "5/A"})
+# insider ownership reports (~46% of all filings, app.pit.sources.INSIDER_FORMS): production ingests Form 4 through its
+# own pipeline and they carry no financing / dilution information - not stored, so the complete history fits the disk
 
 
 def free_gb(path: str = "/") -> float:

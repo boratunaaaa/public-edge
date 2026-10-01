@@ -30,6 +30,9 @@ class ReplayConfig:
     seed: int = 0
     signal_version: str = SIGNAL_VERSION
     execution_model_version: str = EXECUTION_MODEL_VERSION
+    # stage the SEC-only THESIS_INVALIDATION proxy (risk_history.THESIS_PROXY) as thesis_changes: the run's best
+    # comparability is then FULL_WITH_PROXY, never FULL. Off by default; the same snapshot replays both ways
+    thesis_proxy: bool = False
     notes: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -59,6 +62,13 @@ class ReplayConfig:
     def config_hash(self) -> str:
         """Hash of everything that can change a result (the replay_id / notes only name the run)."""
         d = {k: v for k, v in self.as_dict().items() if k not in ("replay_id", "notes")}
+        if not d.get("thesis_proxy"):
+            d.pop("thesis_proxy", None)  # runs configured before the option keep their hash
+        return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:16]
+
+    def comparison_key(self) -> str:
+        """Equal for two runs that differ ONLY in thesis_proxy: the with / without-proxy pair (campaign.proxy_pairs)."""
+        d = {k: v for k, v in self.as_dict().items() if k not in ("replay_id", "notes", "thesis_proxy")}
         return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:16]
 
 

@@ -185,7 +185,7 @@ def test_reconstruction_job_is_idempotent_and_restartable(tmp_path):
     src = _write(tmp_path / "s.jsonl", _meta(), [_issuer()])
     r1 = reconstruct(st, "job1", src)
     r2 = reconstruct(st, "job1", src)  # restart: every (issuer, family) is checkpointed
-    assert r1["labels_written"] > 0 and r2["labels_written"] == 0 and r2["skipped_done"] == 3
+    assert r1["labels_written"] > 0 and r2["labels_written"] == 0 and r2["skipped_done"] == 5  # 5 detector families
     labels, cov = st.load([CIK], datetime(2021, 6, 30, tzinfo=UTC), "job1")
     assert len(labels) == r1["labels_written"] and cov.status("CASH_RUNWAY") == "UNAVAILABLE"
     assert cov.status("FINANCING_TEXT") == "COMPLETE" and r1["policy"] == "RISK_HISTORY_PARTIAL"
@@ -327,9 +327,13 @@ def test_full_policy_is_checked_against_the_sessions_actually_replayed():
     from app.replay.source import SourceData
     cov = Coverage({f: {"status": "COMPLETE", "from": date(2021, 3, 1), "to": date(2021, 6, 30)} for f in FAMILIES})
     cfg = ReplayConfig(replay_id="x", start=datetime(2021, 3, 1, tzinfo=UTC), end=datetime(2021, 6, 30, 23, tzinfo=UTC))
-    assert risk_history(cfg, SourceData(risk_cov=cov))["comparability"] == "FULL"  # UTC midnight = Feb 28 in New York
+    src = SourceData(risk_cov=cov, actions_source="sec_filings")
+    assert risk_history(cfg, src)["comparability"] == "FULL"  # UTC midnight = Feb 28 in New York
     cfg2 = ReplayConfig(replay_id="x", start=datetime(2021, 2, 26, tzinfo=UTC), end=datetime(2021, 6, 30, 23, tzinfo=UTC))
-    assert risk_history(cfg2, SourceData(risk_cov=cov))["comparability"] == "LIMITED"  # Friday Feb 26 is not covered
+    assert risk_history(cfg2, src)["comparability"] == "LIMITED"  # Friday Feb 26 is not covered
+    # a snapshot that stages production's corporate_actions (recent block only) cannot be FULL, whatever the coverage says
+    h = risk_history(cfg, SourceData(risk_cov=cov))
+    assert h["comparability"] == "LIMITED" and h["not_complete"] == {"FINANCING_ACTIONS": "PARTIAL"}
 
 
 # ------------------------------------------------------------------ financing assessment inside a replay
