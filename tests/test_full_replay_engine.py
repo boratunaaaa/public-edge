@@ -554,3 +554,16 @@ def test_store_export_takes_late_filing_from_sec_filings_not_from_the_store(engi
         rse.attach_store_hits(c, recs, [CIK], hits, D(2020, 3, 1), True)
     assert [(h["risk_key"], h["adsh"]) for h in recs[CIK]["efts_hits"]] == [("LATE_FILING", "nt21")]
     assert recs[CIK]["acceptance"]["nt21"] == t
+
+
+def test_the_store_is_only_read_together_with_the_point_in_time_tables(monkeypatch):
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location("rse", "scripts/risk_source_export.py")
+    rse = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rse)
+    monkeypatch.setattr(sys, "argv", ["x", "--ciks", "1", "--start", "2021-01-04", "--end", "2021-06-30",
+                                      "--source", "production", "--efts-store", "/nonexistent"])
+    with pytest.raises(SystemExit) as e:
+        rse.main()
+    assert e.value.code == 2  # LATE_FILING would otherwise come from the (incomplete) store

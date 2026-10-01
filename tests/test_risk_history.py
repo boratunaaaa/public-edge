@@ -185,7 +185,7 @@ def test_reconstruction_job_is_idempotent_and_restartable(tmp_path):
     src = _write(tmp_path / "s.jsonl", _meta(), [_issuer()])
     r1 = reconstruct(st, "job1", src)
     r2 = reconstruct(st, "job1", src)  # restart: every (issuer, family) is checkpointed
-    assert r1["labels_written"] > 0 and r2["labels_written"] == 0 and r2["skipped_done"] == 5  # 5 detector families
+    assert r1["labels_written"] > 0 and r2["labels_written"] == 0 and r2["skipped_done"] == 6  # 6 detector families
     labels, cov = st.load([CIK], datetime(2021, 6, 30, tzinfo=UTC), "job1")
     assert len(labels) == r1["labels_written"] and cov.status("CASH_RUNWAY") == "UNAVAILABLE"
     assert cov.status("FINANCING_TEXT") == "COMPLETE" and r1["policy"] == "RISK_HISTORY_PARTIAL"

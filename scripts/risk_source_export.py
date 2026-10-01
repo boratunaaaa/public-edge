@@ -148,6 +148,12 @@ def main() -> int:
                     help="pit: shares / runway / actions / thesis proxy from the point-in-time tables (sec_filings, "
                          "pit_facts); production: the pre-2026-10 inputs (shares_outstanding_facts, no runway)")
     a = ap.parse_args()
+    if a.efts_store and a.efts:
+        ap.error("--efts and --efts-store are exclusive")
+    if a.efts_store and a.source != "pit":
+        # only the point-in-time path rebuilds LATE_FILING from the complete NT filing history; the store alone
+        # falls short on deadline days and must never read as a complete FINANCING_TEXT scan
+        ap.error("--efts-store needs --source pit")
     ensure_db_free_http()
     from app.db.session import get_engine
     ciks = sorted({c.strip().zfill(10) for c in a.ciks.split(",") if c.strip()})
@@ -182,8 +188,6 @@ def main() -> int:
     lo = start - timedelta(days=365)
     store_hits: dict[str, list[dict]] = {}
     if a.efts_store:
-        if a.efts:
-            ap.error("--efts and --efts-store are exclusive")
         store_hits = _store_meta(meta, Path(a.efts_store), ciks, start, end, lo)
     if a.efts:
         from app.discovery.risks import TEXT_RISKS
