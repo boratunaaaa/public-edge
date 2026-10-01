@@ -14,7 +14,7 @@ Every strategy book (A-E) is a separate account with its own cash - results are 
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.engine import Connection, Engine
@@ -299,6 +299,44 @@ def fill_orders(conn: Connection, today: date, wall_today: date | None = None) -
                     out["cancelled"] += 1
                 else:
                     out["waiting"] += 1
+                continue
+            # the validated 10-K hard veto at THIS fill's moment (the session open): a change public strictly before
+            # it - e.g. after the proposal / approval - cancels the BUY. The issuer's shared lock is held until the
+            # fill commits, so no 10-K write can interleave. SELL / exit orders never reach this check.
+            from app.core.tenk_policy import tenk_risk
+            from app.marketdata.calendar import NY
+            # a catch-up fill (an earlier session) cannot know that session's supersession state: like a retry, it
+            # counts superseded changes too (the conservative side); today's session uses today's state
+            tk = tenk_risk(conn, info.get("cik"), datetime.combine(b.date, time(9, 30), NY), lock=True,
+                           include_superseded=b.date < wall_today)
+            if tk.vetoes:
+                conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING"))
+                             .values(status="CANCELLED", note=tk.note))
+                out["cancelled"] += 1
+                continue
+            bps = fq.cost_bps
+            px = b.open * (1 + bps / 1e4)
+            shares = fq.shares * b.open / px
+            notional = shares * px
+            if notional < 10:
+                conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(status="CANCELLED",
+                                                                                                note="insufficient paper cash"))
+                out["cancelled"] += 1
+                continue
+            strat = acct["strategy"]
+            hold = STRATEGIES[strat][1]
+            sector = conn.execute(select(security_master.c.sector).where(security_master.c.cik == info.get("cik"))).scalar() \
+                if info.get("cik") else None
+            from app.backtest.sector import etf_for_sector
+            pos_id = conn.execute(paper_positions.insert().values(
+                account_id=o["account_id"], proposal_id=o["proposal_id"], ticker=o["ticker"], cik=info.get("cik"),
+                shares=shares, entry_date=b.date, entry_price=px, cost=notional + comm, adj_factor=1.0,
+                stop_price=px * (1 - STOP_PCT), planned_exit_date=b.date + timedelta(days=hold),
+                sector_etf=etf_for_sector(sector), status="OPEN", last_price=px, last_price_date=b.date,
+            ).returning(paper_positions.c.id)).scalar_one()
+            gross = notional
+            _move_cash(conn, o["account_id"], b.date, -(notional + comm), "BUY", o["id"])
+        else:
             # exits never expire, but a session without an opening trade cannot sell either: first one that has it
             # (the same cached series the chronological ordering used)
             pos, series, g, sb = _sell_session(conn, o, today, fresh)
@@ -407,7 +445,7 @@ def snapshot(conn: Connection, today: date) -> int:
         n_open = 0
         for p in conn.execute(select(paper_positions).where(and_(paper_positions.c.account_id == a["id"],
                                                                  paper_positions.c.status != "CLOSED"))
-                              .order_by(paper_positions.c.id)).mappings():
+                          .order_by(paper_positions.c.id)).mappings():
             pv += position_value(conn, dict(p), today)[0]
             n_open += 1
         first = conn.execute(select(func.min(paper_trades.c.trade_date)).where(paper_trades.c.account_id == a["id"])).scalar()
