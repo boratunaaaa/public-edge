@@ -59,7 +59,9 @@ def returns_loop(engine) -> None:
             with engine.begin() as conn:
                 save_job_state(conn, "backfill_returns", r, status="running")
             log.info("backfill returns batch %s", r)
-            if r.get("processed") or r.get("no_data"):
+            # progress (priced / confirmed no-data / handed to the vendor lane): go on. A batch of only temporary
+            # failures (provider outage) pauses instead of sweeping the whole queue into `retry`.
+            if r.get("processed") or r.get("no_data") or r.get("vendor_queued"):
                 continue
         except Exception:
             log.exception("backfill returns loop failed")
@@ -67,6 +69,29 @@ def returns_loop(engine) -> None:
             if _stop:
                 return
             time.sleep(10)
+
+
+def vendor_loop(engine) -> None:
+    """Delisted-price vendor lane (Tiingo): its own thread, paced by the vendor's shared rate limiter and quota.
+    The main returns loop never waits on it; events that need the vendor sit in returns_status 'vendor_wait'."""
+    from app.backtest.jobs import compute_vendor_lane
+    from app.securitymaster.vendors import delisted_price_provider
+    if delisted_price_provider() is None:
+        log.info("vendor lane off: no delisted-price vendor configured")
+        return
+    while not _stop:
+        pause = 900
+        try:
+            r = compute_vendor_lane(engine)
+            log.info("vendor lane batch %s", r)
+            if r.get("candidates") and not r.get("stopped"):
+                pause = 5
+        except Exception:
+            log.exception("vendor lane failed")
+        for _ in range(pause // 5):
+            if _stop:
+                return
+            time.sleep(5)
 
 
 def tenk_loop(engine) -> None:
@@ -132,6 +157,7 @@ def main() -> None:
     rt.start()
     if loop:
         threading.Thread(target=tenk_loop, args=(engine,), name="tenk", daemon=True).start()
+        threading.Thread(target=vendor_loop, args=(engine,), name="vendor", daemon=True).start()
     while not _stop:
         run_once(engine)
         if not loop:

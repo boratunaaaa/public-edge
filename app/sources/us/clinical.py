@@ -148,7 +148,10 @@ class ClinicalTrialsSource(Source):
     country, dataset, license_status, parser_version = "US", "us_clinical_trials", "PUBLIC_WITH_TERMS", PARSER_VERSION
     stale_after = timedelta(days=2)
 
-    def run_live(self, engine: Engine, since: date | None = None, max_pages: int = 40) -> RunResult:
+    def run_live(self, engine: Engine, since: date | None = None, max_pages: int = 40, historical: bool = False) -> RunResult:
+        """historical=True: an explicit historical load (v2_steps.backfill_health_gov) - every event goes to the backfill
+        lane. Otherwise only the very first run (no watermark yet) is backfill; a live run never guesses from event age
+        (a delayed poll or an outage must not turn genuine live events into history)."""
         with engine.connect() as c:
             wm = since or c.execute(text("SELECT max(as_of_date) FROM dataset_records WHERE dataset = 'us_clinical_trials'")).scalar()
         since = (wm - timedelta(days=1)) if wm else date.today() - timedelta(days=3)
@@ -159,7 +162,7 @@ class ClinicalTrialsSource(Source):
             page = fetch_page(since, token)
             for s in page.get("studies", []):
                 with engine.begin() as c:
-                    out = process_study(c, s, first_seen=now, is_backfill=wm is None)
+                    out = process_study(c, s, first_seen=now, is_backfill=historical or wm is None)
                 stats[out["status"]] = stats.get(out["status"], 0) + 1
                 res.items += 1
                 res.events += out.get("events", [])

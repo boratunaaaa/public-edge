@@ -82,6 +82,9 @@ def create_event(conn: Connection, *, event_type: str, dedupe_key: str, public_d
     first_seen = None if is_backfill else now
     avail = available_at_override or _avail(public_date=public_date, public_at=public_at, date_quality=date_quality,
                                             is_backfill=is_backfill, first_seen_at=first_seen, country=country)
+    if event_type == "TENK_CHANGE" and issuer_cik:  # a 10-K risk can veto paper decisions: serialize with them
+        from app.core.tenk_policy import lock_issuer
+        lock_issuer(conn, issuer_cik, exclusive=True)
     res = conn.execute(pg_insert(events).values(
         event_type=event_type, dedupe_key=dedupe_key[:200], ticker=ticker, company_name=company_name, issuer_cik=issuer_cik,
         public_date=public_date, public_at=public_at, transaction_date=transaction_date, priority=priority, title=title[:500],

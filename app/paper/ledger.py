@@ -14,7 +14,7 @@ Every strategy book (A-E) is a separate account with its own cash - results are 
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.engine import Connection, Engine
@@ -193,19 +193,74 @@ def _proposal_info(conn: Connection, proposal_id: int | None) -> dict:
     return {"gate": (r[0] or {}) if r else {}, "cik": r[1] if r else None}
 
 
-def fill_orders(conn: Connection, today: date) -> dict:
+def _buy_sessions(conn: Connection, o, today: date, snap: dict) -> tuple[list, list]:
+    """(candidate sessions inside the BUY's validity, price history) from ONE price read per order and run, kept in
+    `snap`: ordering and execution see the same snapshot even when that read filled a missing cache range."""
+    key = ("buy", o["id"])
+    if key not in snap:
+        hist = _bars(conn, o["ticker"], o["not_before"] - timedelta(days=45), today)
+        bars = [b for b in hist if b.date >= o["not_before"] and sessions_since(o["not_before"], b.date) <= ORDER_VALID_SESSIONS]
+        snap[key] = (bars, hist)
+    return snap[key]
+
+
+def _prior(hist: list, cand) -> list:
+    return [x for x in hist if cand.date - timedelta(days=45) <= x.date < cand.date]
+
+
+def _sell_session(conn: Connection, o, today: date, fresh: dict):
+    """(position, growth, first series bar with an opening trade on/after not_before) for an exit - cached per run so
+    ordering and execution read the same freshly fetched series."""
+    key = o["id"]
+    if key not in fresh:
+        pos = dict(conn.execute(select(paper_positions).where(paper_positions.c.id == o["position_id"])).mappings().first())
+        series = fresh_bars(conn, o["ticker"], pos["entry_date"], today) or []
+        g = Growth(series, pos["entry_date"], _entry_open(conn, pos))
+        sb = next((x for x in series if x.date >= o["not_before"] and x.open and x.volume), None) if g.ok else None
+        fresh[key] = (pos, series, g, sb)
+    return fresh[key]
+
+
+def _first_fillable(conn: Connection, o, today: date, fresh: dict) -> date | None:
+    """The session this order will fill on - computed with exactly the execution's rule (fills.fillable on the same
+    history window for a BUY, the same cached series for an exit): the chronological processing key."""
+    from app.paper.fills import fillable
+    if o["side"] == "BUY":
+        bars, hist = _buy_sessions(conn, o, today, fresh)
+        return next((c.date for c in bars if fillable(_prior(hist, c), c)), None)
+    sb = _sell_session(conn, o, today, fresh)[3]
+    return sb.date if sb else None
+
+
+def fill_orders(conn: Connection, today: date, wall_today: date | None = None) -> dict:
+    """Fill every PENDING order due by `today` (the processed day). wall_today = the real date of the run (default
+    `today`): a session before it is an earlier session, whose 10-K supersession state is unknown (see below)."""
+    wall_today = wall_today or today
     out = {"filled": 0, "cancelled": 0, "waiting": 0}
+    # every pending order row is locked up front, always in id order (no lock-order inversion between concurrent runs,
+    # whatever their dates); a row a concurrent run already filled / cancelled drops out of the locked set
     rows = conn.execute(select(paper_orders).where(and_(paper_orders.c.status == "PENDING", paper_orders.c.not_before <= today))
-                        .order_by(paper_orders.c.id)).mappings().all()
+                        .order_by(paper_orders.c.id).with_for_update()).mappings().all()
+    # the issuers of every pending BUY: their 10-K risk locks (shared, app.core.tenk_policy) are taken up front in CIK
+    # order, like the order rows in id order, so a multi-issuer 10-K writer and this run can never deadlock
+    from app.core.tenk_policy import lock_issuers
+    pids = [o["proposal_id"] for o in rows if o["side"] == "BUY" and o["proposal_id"]]
+    lock_issuers(conn, conn.execute(select(proposed_trades.c.cik).where(proposed_trades.c.id.in_(pids))).scalars().all()
+                 if pids else [], exclusive=False)
     from app.paper.fills import quote
+    fresh: dict = {}
+    # chronological: a catch-up run (after a halt or a missed day) fills in session order, so every sizing sees the
+    # portfolio as it stood on that session - never a later session's fill
+    rows = sorted(rows, key=lambda o: (_first_fillable(conn, o, today, fresh) or date.max, o["id"]))
     for o in rows:
         fq = None
-        bars = [b for b in _bars(conn, o["ticker"], o["not_before"], today) if b.date >= o["not_before"]]
         if o["side"] == "BUY":  # only sessions inside the order's validity may fill it
-            bars = [b for b in bars if sessions_since(o["not_before"], b.date) <= ORDER_VALID_SESSIONS]
+            bars, hist = _buy_sessions(conn, o, today, fresh)
+        else:
+            bars = [b for b in _bars(conn, o["ticker"], o["not_before"], today) if b.date >= o["not_before"]]
         if not bars:
             if o["side"] == "BUY" and sessions_since(o["not_before"], today) > ORDER_VALID_SESSIONS:
-                conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
+                conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(
                     status="CANCELLED", note=f"expired: no fillable session within {ORDER_VALID_SESSIONS} sessions"))
                 out["cancelled"] += 1
             else:
@@ -218,19 +273,19 @@ def fill_orders(conn: Connection, today: date) -> dict:
         bps = slippage_bps(g.get("market_cap"), g.get("bucket"))
         comm = float(acct["commission_per_trade"])
         if o["side"] == "BUY":
-            from app.paper.proposals import source_valid
+            from app.paper.proposals import SOURCE_NOTE, source_block
             ev_id = conn.execute(select(proposed_trades.c.event_id).where(proposed_trades.c.id == o["proposal_id"])).scalar() \
                 if o["proposal_id"] else None
-            if not source_valid(conn, ev_id, lock=True):  # row stays locked until the fill commits
-                conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
-                    status="CANCELLED", note="source event superseded"))
+            why = source_block(conn, ev_id, lock=True)  # superseded / identity unsafe / under review; row stays locked
+            if why:                                     # until the fill commits
+                conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(
+                    status="CANCELLED", note=SOURCE_NOTE[why]))
                 out["cancelled"] += 1
                 continue
             # first session (within validity) with an opening trade and a prior-session liquidity estimate; the
             # sizing uses only what was known at that open (fills.v3). A session without one is skipped, not fatal.
-            hist = _bars(conn, o["ticker"], o["not_before"] - timedelta(days=45), today)
             for cand in bars:
-                prior = [x for x in hist if cand.date - timedelta(days=45) <= x.date < cand.date]
+                prior = _prior(hist, cand)
                 nav = nav_of(conn, o["account_id"], cand.date - timedelta(days=1))
                 want = min(o["target_pct"] * nav, cash_of(conn, o["account_id"]) - comm)
                 fq = quote(prior, cand, want / cand.open if cand.open else 0.0, bps)
@@ -239,40 +294,14 @@ def fill_orders(conn: Connection, today: date) -> dict:
                     break
             if fq is None:  # no fillable session yet: never assume a fill
                 if sessions_since(o["not_before"], today) > ORDER_VALID_SESSIONS:
-                    conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
+                    conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(
                         status="CANCELLED", note=f"expired: no fillable session within {ORDER_VALID_SESSIONS} sessions"))
                     out["cancelled"] += 1
                 else:
                     out["waiting"] += 1
-                continue
-            bps = fq.cost_bps
-            px = b.open * (1 + bps / 1e4)
-            shares = fq.shares * b.open / px
-            notional = shares * px
-            if notional < 10:
-                conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(status="CANCELLED",
-                                                                                                note="insufficient paper cash"))
-                out["cancelled"] += 1
-                continue
-            strat = acct["strategy"]
-            hold = STRATEGIES[strat][1]
-            sector = conn.execute(select(security_master.c.sector).where(security_master.c.cik == info.get("cik"))).scalar() \
-                if info.get("cik") else None
-            from app.backtest.sector import etf_for_sector
-            pos_id = conn.execute(paper_positions.insert().values(
-                account_id=o["account_id"], proposal_id=o["proposal_id"], ticker=o["ticker"], cik=info.get("cik"),
-                shares=shares, entry_date=b.date, entry_price=px, cost=notional + comm, adj_factor=1.0,
-                stop_price=px * (1 - STOP_PCT), planned_exit_date=b.date + timedelta(days=hold),
-                sector_etf=etf_for_sector(sector), status="OPEN", last_price=px, last_price_date=b.date,
-            ).returning(paper_positions.c.id)).scalar_one()
-            gross = notional
-            _move_cash(conn, o["account_id"], b.date, -(notional + comm), "BUY", o["id"])
-        else:
-            pos = dict(conn.execute(select(paper_positions).where(paper_positions.c.id == o["position_id"])).mappings().first())
-            series = fresh_bars(conn, o["ticker"], pos["entry_date"], today) or []
-            g = Growth(series, pos["entry_date"], _entry_open(conn, pos))
             # exits never expire, but a session without an opening trade cannot sell either: first one that has it
-            sb = next((x for x in series if x.date >= o["not_before"] and x.open and x.volume), None) if g.ok else None
+            # (the same cached series the chronological ordering used)
+            pos, series, g, sb = _sell_session(conn, o, today, fresh)
             if sb is None:  # no consistent series yet: the sale waits, it is never priced from the cache
                 out["waiting"] += 1
                 continue
@@ -289,7 +318,7 @@ def fill_orders(conn: Connection, today: date) -> dict:
                 status="CLOSED", exit_date=b.date, exit_price=px, realized_pnl=proceeds - pos["cost"],
                 last_price=px, last_price_date=b.date))
             _move_cash(conn, o["account_id"], b.date, proceeds, "SELL", o["id"])
-        conn.execute(paper_orders.update().where(paper_orders.c.id == o["id"]).values(
+        conn.execute(paper_orders.update().where(and_(paper_orders.c.id == o["id"], paper_orders.c.status == "PENDING")).values(
             status="FILLED", fill_date=b.date, fill_price=px, shares=shares, slippage_bps=bps, commission=comm,
             position_id=pos_id, fill_model=fq.model if fq else "ILLIQUID", spread_bps=fq.spread_bps if fq else None,
             participation=fq.participation if fq else None, adv_shares=fq.adv_shares if fq else None,
@@ -301,14 +330,16 @@ def fill_orders(conn: Connection, today: date) -> dict:
     return out
 
 
-def thesis_invalidated(conn: Connection, pos: dict, until: date) -> date | None:
-    """First date after entry with a thesis-breaking public fact for this company."""
+def thesis_invalidated(conn: Connection, pos: dict, until: date, include_superseded: bool = False) -> date | None:
+    """First date after entry with a thesis-breaking public fact for this company. include_superseded (a catch-up of
+    an earlier day, whose supersession state is unknown): a going-concern 10-K superseded since still counts - for
+    an exit the conservative side is to exit."""
     if not pos.get("cik"):
         return None
     r = conn.execute(text("""
         SELECT min(d) FROM (
           SELECT e.public_date d FROM events e WHERE e.issuer_cik = :cik AND e.public_date > :entry AND e.public_date <= :until
-             AND NOT e.superseded
+             AND (:all OR NOT e.superseded)
              AND e.event_type = 'TENK_CHANGE' AND e.payload->'change_types' ? 'NEW_GOING_CONCERN'
           UNION ALL
           SELECT tc.created_at::date FROM thesis_changes tc WHERE tc.cik = :cik AND tc.change = 'THESIS_INVALIDATION'
@@ -316,15 +347,17 @@ def thesis_invalidated(conn: Connection, pos: dict, until: date) -> date | None:
           UNION ALL
           SELECT dr.detected_at::date FROM discovery_risks dr WHERE dr.cik = :cik AND dr.risk = 'GOING_CONCERN'
              AND dr.severity = 'HIGH' AND dr.detected_at::date > :entry AND dr.detected_at::date <= :until) x"""),
-        {"cik": pos["cik"], "entry": pos["entry_date"], "until": until}).scalar()
+        {"cik": pos["cik"], "entry": pos["entry_date"], "until": until, "all": include_superseded}).scalar()
     return r
 
 
-def check_exits(conn: Connection, today: date) -> dict:
+def check_exits(conn: Connection, today: date, wall_today: date | None = None) -> dict:
     out = {"exit_orders": 0}
     rows = conn.execute(select(paper_positions, paper_accounts.c.strategy).join(
         paper_accounts, paper_accounts.c.id == paper_positions.c.account_id).where(paper_positions.c.status == "OPEN")
-        .order_by(paper_positions.c.id)).mappings().all()  # id order: exit orders are created deterministically
+        # id order: without it PostgreSQL returns physical order, which an UPDATE changes - two identical runs would
+        # create the same exit orders under swapped ids (found by the 2023-H1 replay pilot)
+        .order_by(paper_positions.c.id)).mappings().all()
     for p in rows:
         p = dict(p)
         rule = STRATEGIES[p["strategy"]][2]
@@ -345,7 +378,7 @@ def check_exits(conn: Connection, today: date) -> dict:
                     trigger, reason = b.date, "STOP"
                     break
         if rule == "THESIS" and trigger is None:
-            d = thesis_invalidated(conn, p, today)
+            d = thesis_invalidated(conn, p, today, include_superseded=today < (wall_today or today))
             if d:
                 trigger, reason = d, "THESIS_INVALIDATION"
         if trigger is not None:
@@ -391,20 +424,90 @@ def snapshot(conn: Connection, today: date) -> int:
     return n
 
 
+MAX_CATCHUP_DAYS = 60  # a longer outage is worked off oldest-first over several runs (reported, never skipped)
+RUN_LOCK = "pe:paper_ledger_run"
+LEDGER_JOB = "paper_ledger"  # processing_jobs marker: {"last_day": ISO date}, advanced with the day's snapshot
+
+
+def ledger_days(last_done: date | None, today: date) -> tuple[list[date], int]:
+    """The days to process, oldest first: every calendar day after the last completed one up to today - exactly
+    the days the daily scheduler would have run - capped at MAX_CATCHUP_DAYS (the rest is returned as remaining).
+    No history, or today already done, means just today (a re-run is idempotent: snapshots upsert)."""
+    if last_done is None or last_done >= today:
+        return [today], 0
+    days = [last_done + timedelta(days=i) for i in range(1, (today - last_done).days + 1)]
+    return days[:MAX_CATCHUP_DAYS], max(0, len(days) - MAX_CATCHUP_DAYS)
+
+
+def run_day(engine: Engine, day: date, wall_today: date) -> dict:
+    """One ledger day, in the daily order: fills due that day, exits detected that day, the exits' fills, snapshot.
+    A catch-up therefore lets an earlier day's exit release cash before a later day's BUY is sized."""
+    out = {}
+    with engine.begin() as conn:
+        out["fills"] = fill_orders(conn, day, wall_today)
+    with engine.begin() as conn:
+        out["exits"] = check_exits(conn, day, wall_today)
+    with engine.begin() as conn:
+        out["fills_after_exit"] = fill_orders(conn, day, wall_today)
+        out["snapshots"] = snapshot(conn, day)
+        # the day is complete only here, atomically with its last fills and snapshot: a run that fails earlier
+        # reprocesses the day (fills are PENDING-guarded, an exiting position is no longer OPEN, snapshots upsert)
+        from app.db.store import save_job_state
+        save_job_state(conn, LEDGER_JOB, {"last_day": day.isoformat()})
+    return out
+
+
+def last_completed_day(conn: Connection) -> date | None:
+    """The explicit marker; before its first write (the first run of this version), the last snapshot day that EVERY
+    account has reached (min over accounts of their latest snapshot) - never a day some account has not completed."""
+    from app.db.store import job_state
+    d = job_state(conn, LEDGER_JOB).get("last_day")
+    if d:
+        return date.fromisoformat(d)
+    return conn.execute(text("""SELECT min(last) FROM (SELECT a.id, max(p.on_date) last FROM paper_accounts a
+                                LEFT JOIN paper_performance p ON p.account_id = a.id GROUP BY a.id) x""")).scalar()
+
+
 def run(engine: Engine, today: date | None = None) -> dict:
+    """The daily paper ledger. After an outage the missed days are processed one by one (ledger_days), so a catch-up
+    sees each day's portfolio as the daily run did: an earlier day's exit releases cash before a later day's BUY is
+    sized. Runs are mutually exclusive (session advisory lock): a second run while one is in progress is skipped.
+
+    What a catch-up cannot replay - WHEN an event was superseded or a source fell under review (no timestamps) - is
+    decided on the conservative side, deliberately: a BUY whose source no longer stands is cancelled (expire, fill
+    re-check), a 10-K veto superseded since still vetoes an earlier session's BUY, and a going-concern 10-K superseded
+    since still triggers an earlier day's THESIS exit. Point-in-time data (prices, public dates, detection times) is
+    read as of each processed day."""
+    import logging
+
     from app.paper.proposals import expire
     today = today or _clock.today()
-    out = {"expired": expire(engine)}
-    with engine.begin() as conn:
-        ensure_accounts(conn)
-        ensure_accounts(conn, book="RESEARCH")
-        out["fills"] = fill_orders(conn, today)
-    with engine.begin() as conn:
-        out["exits"] = check_exits(conn, today)
-    with engine.begin() as conn:
-        out["fills_after_exit"] = fill_orders(conn, today)
-        out["snapshots"] = snapshot(conn, today)
-    return out
+    with engine.connect() as guard:
+        got = guard.execute(text("SELECT pg_try_advisory_lock(hashtextextended(:k, 0))"), {"k": RUN_LOCK}).scalar()
+        guard.commit()  # the session lock outlives the transaction; no transaction stays open during the run
+        if not got:
+            return {"skipped": "another paper ledger run is in progress"}
+        try:
+            out = {"expired": expire(engine)}
+            with engine.begin() as conn:
+                ensure_accounts(conn)
+                ensure_accounts(conn, book="RESEARCH")
+                last_done = last_completed_day(conn)
+            days, remaining = ledger_days(last_done, today)
+            if len(days) > 1 or remaining:
+                logging.getLogger(__name__).warning("paper ledger catch-up: %s..%s (%d days, %d left for later runs)",
+                                                    days[0], days[-1], len(days), remaining)
+            per_day = {str(d): run_day(engine, d, today) for d in days}
+            out.update(per_day[str(days[-1])])  # the last processed day, as before
+            out["days"] = list(per_day) if len(days) > 1 else [str(days[0])]
+            if len(days) > 1:
+                out["catch_up"] = per_day
+            if remaining:
+                out["remaining_days"] = remaining
+            return out
+        finally:
+            guard.execute(text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), {"k": RUN_LOCK})
+            guard.commit()
 
 
 # ------------------------------------------------------------------ dashboard metrics

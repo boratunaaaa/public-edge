@@ -79,8 +79,12 @@ def capture_pending(engine: Engine, max_age_hours: int = 36, limit: int = 200) -
             ORDER BY e.available_at LIMIT :n"""), {"h": max_age_hours, "n": limit}).mappings()]
     out: dict[str, int] = {}
     for ev in evs:
-        with engine.begin() as c:
-            st = capture(c, ev)
+        try:  # one event that cannot be stored must never block every later event of the window (head-of-line)
+            with engine.begin() as c:
+                st = capture(c, ev)
+        except Exception:  # noqa: BLE001
+            log.exception("snapshot of event %s failed", ev["id"])
+            st = "FAILED"
         out[st] = out.get(st, 0) + 1
     return out
 

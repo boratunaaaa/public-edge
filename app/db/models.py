@@ -271,6 +271,24 @@ market_prices = Table(
     Column("volume", BigInteger),
 )
 
+# confirmed provider absences ("404 / no such symbol") so the return queue does not ask again every round
+# (migration 0013). Identity-scoped - a ticker is never an identity: identity is the security (security_id) or the
+# issuer + the symbol period it used the ticker in, so another issuer reusing the symbol, another market, or a
+# predecessor / successor security period is NOT covered. Interval-bounded: a row only covers requests whose
+# [start, end] lies inside the confirmed [window_start, window_end]. Only a 404 is recorded - never a network / 5xx /
+# rate-limit failure.
+price_absences = Table(
+    "price_absences", metadata,
+    Column("provider", String(16), primary_key=True),
+    Column("identity", String(64), primary_key=True),  # "SEC:<security_id>" or "CIK:<cik>|SYM:<symbol period start>"
+    Column("market", String(8), primary_key=True),  # e.g. US
+    Column("symbol", String(16), primary_key=True),
+    Column("window_start", Date, primary_key=True),  # the 404'd request's interval
+    Column("window_end", Date, primary_key=True),
+    _ts("checked_at", nullable=False),
+    Column("hits", Integer, nullable=False, server_default="1"),
+)
+
 events = Table(
     "events", metadata,
     Column("id", BigInteger, primary_key=True),
@@ -325,10 +343,16 @@ events = Table(
     Column("episode_id", String(64)),
     Column("feature_source_event_ids", JSONB),  # derived events: the primary events they were built from
     _ts("updated_at"),
+    # ---- return queue (migration 0013) ----
+    # earliest moment the event is worth pricing again: the next missing horizon's end (partial), the retry backoff
+    # (retry) or the monthly re-verification (no_data). NULL = decided by returns_checked_at (legacy rows).
+    _ts("returns_next_at"),
+    Column("returns_lease", String(32)),  # vendor-lane claim token (claim_vendor / _fence)
 )
 Index("ix_events_type_public", events.c.event_type, events.c.public_date)
 Index("ix_events_issuer", events.c.issuer_cik)
 Index("ix_events_returns_status", events.c.returns_status)
+Index("ix_events_returns_queue", events.c.returns_status, events.c.returns_next_at)
 Index("ix_events_available_at", events.c.available_at)
 Index("ix_events_country_exchange_ticker", events.c.country, events.c.exchange, events.c.ticker, events.c.public_date)
 
@@ -1302,7 +1326,7 @@ event_market_snapshots = Table(
     Column("sector_price", Float),
     Column("provider", String(24)),
     Column("lag_seconds", Float),  # captured_at - available_at
-    Column("status", String(16), nullable=False),  # CAPTURED | NO_QUOTE | NOT_TRADEABLE | IDENTITY_UNRESOLVED
+    Column("status", String(24), nullable=False),  # CAPTURED | NO_QUOTE | NOT_TRADEABLE | IDENTITY_UNRESOLVED (19 chars: 0014)
     # forward gold dataset (V2 #22)
     _ts("available_at"),
     Column("security_id", String(48)),
@@ -1460,3 +1484,70 @@ hypothesis_log = Table(
     Column("params", JSONB, nullable=False, server_default="{}"),
 )
 Index("ix_hypothesis_log_family", hypothesis_log.c.family, hypothesis_log.c.run_at)
+
+# research-only investment score V1 (app.scoring.engine): one row per event and model version; never read by the gate
+signal_scores = Table(
+    "signal_scores", metadata,
+    Column("event_id", BigInteger, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True),
+    Column("model_version", String(32), primary_key=True),
+    Column("evidence_version", String(64), nullable=False),
+    Column("scored_at", DateTime(timezone=True), nullable=False),
+    Column("score_pp", Float, nullable=False),  # probability points of beating SPY over 90d vs a matched control
+    Column("cell", String(64), nullable=False),
+    Column("components", JSONB, nullable=False),
+    Column("vetoes", JSONB, nullable=False, server_default="[]"),  # the gate's failed rules, kept apart from the score
+    Column("research_only", Boolean, nullable=False, server_default="true"),
+)
+Index("ix_signal_scores_scored_at", signal_scores.c.scored_at)
+
+# ------------------------------------------------------------------ point-in-time sources for historical replay (0016)
+# XBRL facts with the filing that disclosed them (cash, operating cash flow, debt, shares). Replay-only data: no live
+# production decision reads this table.
+pit_facts = Table(
+    "pit_facts", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("cik", String(10), nullable=False),
+    Column("family", String(16), nullable=False),  # CASH | OCF | DEBT | SHARES_DEI | SHARES_GAAP
+    Column("concept", String(96), nullable=False),
+    Column("period_start", Date),
+    Column("period_end", Date, nullable=False),
+    Column("val", Float, nullable=False),
+    Column("filed", Date, nullable=False),
+    Column("accession", String(25), nullable=False),
+    Column("form", String(16)),
+    Column("run_id", String(40), nullable=False),  # provenance: the backfill run that stored it
+    _created(),
+)
+Index("ix_pit_facts_cik_family", pit_facts.c.cik, pit_facts.c.family, pit_facts.c.filed)
+Index("uq_pit_facts_fact", pit_facts.c.cik, pit_facts.c.concept, pit_facts.c.period_end, pit_facts.c.period_start,
+      pit_facts.c.accession, pit_facts.c.val, unique=True, postgresql_nulls_not_distinct=True)
+
+# every SEC filing of an issuer (submissions "recent" block + all older pages), with its acceptance time
+sec_filings = Table(
+    "sec_filings", metadata,
+    Column("cik", String(10), primary_key=True),
+    Column("accession", String(25), primary_key=True),
+    Column("form", String(24), nullable=False),
+    Column("filing_date", Date, nullable=False),
+    Column("report_date", Date),
+    Column("acceptance_at", DateTime(timezone=True)),  # NULL when EDGAR gives none (then: next-day rule)
+    Column("items", Text),
+    Column("primary_document", Text),
+    Column("source_block", String(64), nullable=False),  # recent | CIK##########-submissions-NNN.json
+    Column("run_id", String(40), nullable=False),
+    _created(),
+)
+Index("ix_sec_filings_cik_date", sec_filings.c.cik, sec_filings.c.filing_date)
+
+# per-company progress of the backfill jobs (resumable, idempotent, failures isolated per company)
+pit_backfill_progress = Table(
+    "pit_backfill_progress", metadata,
+    Column("job", String(24), primary_key=True),  # xbrl | submissions
+    Column("cik", String(10), primary_key=True),
+    Column("status", String(12), nullable=False),  # done | failed | not_found
+    Column("rows", Integer, nullable=False, server_default="0"),
+    Column("attempts", Integer, nullable=False, server_default="0"),
+    Column("error", Text),
+    Column("run_id", String(40), nullable=False),
+    _ts("updated_at", nullable=False, server_default=func.now()),
+)

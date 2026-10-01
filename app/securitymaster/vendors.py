@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import math
 import os
 import zipfile
 from datetime import date
@@ -90,15 +91,68 @@ class TiingoPriceProvider(MarketDataProvider):
         except http.HttpError as e:
             # never echo the request headers; the status is enough
             raise http.HttpError(TIINGO_PRICES_URL.format(symbol=symbol), e.status, "tiingo request failed") from None
-        out = []
-        for x in r.json() or []:
-            try:
-                d = date.fromisoformat(x["date"][:10])
-            except (KeyError, ValueError):
-                continue
-            close, adj = x.get("close"), x.get("adjClose")
-            out.append(Bar(d, x.get("open"), x.get("high"), x.get("low"), close, adj, x.get("volume")))
-        return out
+        try:
+            return parse_tiingo_prices(r.json(), symbol)
+        except http.HttpError as e:
+            if e.status == 429:  # allocation message inside a 200: push the shared slot out like a real 429
+                from app.core import ratelimit
+                ratelimit.record_429("tiingo", backoff_s=900.0)
+            raise
+
+
+def _price(v) -> float | None:
+    """A finite, positive number, else None (strings, NaN, inf, 0, negatives and booleans are not prices)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    f = float(v)
+    return f if math.isfinite(f) and f > 0 else None
+
+
+def _volume(v) -> int | None:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)) or v < 0:
+        return None
+    return int(v)
+
+
+def parse_tiingo_prices(payload, symbol: str) -> list[Bar]:
+    """Tiingo answers a price list, but some errors arrive as HTTP 200 with a JSON object ({"detail": "..."}).
+    Iterating that object yielded its keys (str) and x["date"] failed with "string indices must be integers" -
+    every such event then sat in `retry` forever. An object is classified instead:
+      * "not found" / unknown ticker -> HttpError 404 (a confirmed absence, handled like any provider 404);
+      * anything else (hourly/daily allocation, maintenance, unexpected shape) -> HttpError 429 / 502 (temporary).
+    [] is a genuine empty answer; a non-empty list without a single valid bar (a parseable date AND a finite positive
+    close) is malformed -> 502 (temporary)."""
+    if payload is None:
+        return []
+    if isinstance(payload, dict):
+        detail = str(payload.get("detail") or payload.get("message") or payload)[:200]
+        low = detail.lower()
+        url = TIINGO_PRICES_URL.format(symbol=symbol)
+        if "not found" in low or "no data" in low or "does not exist" in low:
+            raise http.HttpError(url, 404, "tiingo: ticker not found")
+        if "allocation" in low or "limit" in low or "too many" in low:
+            raise http.HttpError(url, 429, "tiingo: request allocation exhausted")
+        raise http.HttpError(url, 502, "tiingo: unexpected response object")
+    if not isinstance(payload, list):
+        raise http.HttpError(TIINGO_PRICES_URL.format(symbol=symbol), 502, "tiingo: unexpected response type")
+    out = []
+    for x in payload:
+        if not isinstance(x, dict):
+            continue
+        try:
+            d = date.fromisoformat(str(x["date"])[:10])
+        except (KeyError, ValueError):
+            continue
+        close = _price(x.get("close"))
+        if close is None:
+            continue  # a bar without a usable close is not a price
+        out.append(Bar(d, _price(x.get("open")), _price(x.get("high")), _price(x.get("low")), close,
+                       _price(x.get("adjClose")), _volume(x.get("volume"))))
+    if payload and not out:
+        # a non-empty answer without one usable bar is a provider/schema failure, NOT "no data": temporary, and never
+        # written to the absence cache (only [] - Tiingo's genuine empty answer - means no prices in the window)
+        raise http.HttpError(TIINGO_PRICES_URL.format(symbol=symbol), 502, "tiingo: malformed price list")
+    return out
 
 
 def delisted_price_provider() -> MarketDataProvider | None:

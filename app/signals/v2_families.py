@@ -28,8 +28,21 @@ ACCUM_MANAGERS = 3
 
 
 def _ticker(conn, cik):
+    """Display / paper ticker only (never the identity: prices resolve by CIK in the security master). The in-memory
+    CIK->ticker map is empty in a fresh process (v2 historical runner, worker) until loaded - before 0013 every 13F
+    event was written with ticker NULL for that reason. load() is a no-op while the map is fresh (1 h)."""
     from app.entities.registry import resolver
+    if cik:
+        resolver.load(conn)
     return resolver.ticker_for_cik(cik)
+
+
+def _review(conf: str, why: str, payload: dict) -> bool:
+    """LOW identity (prefix-only CUSIP / name contradiction): kept for audit, never validated or traded."""
+    if conf == "LOW":
+        payload["identity_review"] = why
+        return True
+    return False
 
 
 def ftd_spikes(conn: Connection, source_file: str, *, is_backfill: bool) -> list[int]:
@@ -120,35 +133,40 @@ def thirteen_f(conn: Connection, accession: str, *, is_backfill: bool) -> list[i
     for ch in changes:
         if ch["change"] in ("EXIT", "DECREASE"):
             # context only (not a candidate family): a focused manager leaving / cutting a position it held
-            cik, conf, _why = cusip_to_cik(conn, ch["cusip"])
+            cik, conf, why = cusip_to_cik(conn, ch["cusip"], ch["issuer_name"])
             if cik and ch["prev_shares"]:
                 et = "INST_13F_EXIT" if ch["change"] == "EXIT" else "INST_13F_DECREASE"
+                payload = {"manager_cik": f["manager_cik"], "manager": f["manager_name"], "period": str(f["period"]),
+                           "shares": ch["shares"], "prev_shares": ch["prev_shares"], "cusip": ch["cusip"]}
+                review = _review(conf, why, payload)
                 eid = create_event(conn, event_type=et, dedupe_key=f"13F{et[-4:]}:{accession}:{ch['cusip']}", public_date=f["filed_date"],
                                    ticker=_ticker(conn, cik), issuer_cik=cik, company_name=ch["issuer_name"],
                                    title=f"{f['manager_name']} {'exited' if et.endswith('EXIT') else 'cut'} {ch['issuer_name']} (Q {f['period']})",
-                                   payload={"manager_cik": f["manager_cik"], "manager": f["manager_name"], "period": str(f["period"]),
-                                            "shares": ch["shares"], "prev_shares": ch["prev_shares"], "cusip": ch["cusip"]},
+                                   payload=payload,
                                    source_url="https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets", is_backfill=is_backfill,
                                    event_family="US_13F_CONTEXT", identity_confidence=conf, source_accession=accession,
-                                   available_at_override=f["available_at"], date_quality="date")
+                                   available_at_override=f["available_at"], date_quality="date", needs_review=review)
                 if eid:
                     out.append(eid)
             continue
         if ch["change"] not in ("NEW", "INCREASE"):
             continue
-        cik, conf, _why = cusip_to_cik(conn, ch["cusip"])
+        cik, conf, why = cusip_to_cik(conn, ch["cusip"], ch["issuer_name"])
         if not cik:
             continue
         ticker = _ticker(conn, cik)
         if ch["change"] == "NEW" and ch["weight"] >= NEWPOS_WEIGHT:
+            payload = {"manager_cik": f["manager_cik"], "manager": f["manager_name"], "period": str(f["period"]),
+                       "weight": ch["weight"], "shares": ch["shares"], "cusip": ch["cusip"], "entries": f["entries"]}
+            review = _review(conf, why, payload)
             eid = create_event(conn, event_type="INST_13F_NEW_POSITION", dedupe_key=f"13FN:{accession}:{ch['cusip']}", public_date=f["filed_date"], ticker=ticker,
                                issuer_cik=cik, company_name=ch["issuer_name"],
                                title=f"{f['manager_name']} opened {ch['weight']:.1%} position in {ch['issuer_name']} (Q {f['period']})",
-                               payload={"manager_cik": f["manager_cik"], "manager": f["manager_name"], "period": str(f["period"]),
-                                        "weight": ch["weight"], "shares": ch["shares"], "cusip": ch["cusip"], "entries": f["entries"]},
+                               payload=payload,
                                source_url=f"https://www.sec.gov/Archives/edgar/data/{int(f['manager_cik'])}/{accession.replace('-', '')}/",
                                is_backfill=is_backfill, event_family="US_13F_NEW_POSITION", identity_confidence=conf,
-                               source_accession=accession, available_at_override=f["available_at"], date_quality="date")
+                               source_accession=accession, available_at_override=f["available_at"], date_quality="date",
+                               needs_review=review)
             if eid:
                 out.append(eid)
     return out
@@ -177,16 +195,18 @@ def accumulation_events(conn: Connection, period, *, is_backfill: bool, loaded: 
                         {"p": period, "all_ok": loaded is None, "loaded": sorted(loaded or [])}).mappings().all()
     out = []
     for r in rows:
-        cik, conf, _why = cusip_to_cik(conn, r["cusip"])
+        cik, conf, why = cusip_to_cik(conn, r["cusip"], r["issuer_name"])
         if not cik:
             continue
+        payload = {"period": str(period), "new_focused_holders": 3, "cusip": r["cusip"], "trigger_manager": r["manager_name"]}
+        review = _review(conf, why, payload)
         eid = create_event(conn, event_type="INST_13F_ACCUMULATION", dedupe_key=f"13FA:{r['cusip']}:{period}",
                            public_date=r["filed_date"], ticker=_ticker(conn, cik), issuer_cik=cik, company_name=r["issuer_name"],
                            title=f"{r['issuer_name']}: 3 focused funds opened new positions (Q {period})",
-                           payload={"period": str(period), "new_focused_holders": 3, "cusip": r["cusip"], "trigger_manager": r["manager_name"]},
+                           payload=payload,
                            source_url="https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets", is_backfill=is_backfill,
                            event_family="US_13F_ACCUMULATION", identity_confidence=conf, source_accession=r["accession"],
-                           available_at_override=r["available_at"], date_quality="date")
+                           available_at_override=r["available_at"], date_quality="date", needs_review=review)
         if eid:
             out.append(eid)
     return out
@@ -254,8 +274,8 @@ def thirteen_f_period(conn: Connection, period, originals: list[str], *, is_back
             if kind not in ("NEW", "EXIT", "DECREASE") or (kind == "NEW" and weight < NEWPOS_WEIGHT) or (kind != "NEW" and not prev_shares):
                 continue
             if cu not in cik_cache:
-                cik_cache[cu] = cusip_to_cik(conn, cu)
-            cik, conf, _why = cik_cache[cu]
+                cik_cache[cu] = cusip_to_cik(conn, cu, name)
+            cik, conf, why = cik_cache[cu]
             if not cik:
                 continue
             if cik not in tick_cache:
@@ -275,12 +295,14 @@ def thirteen_f_period(conn: Connection, period, originals: list[str], *, is_back
                            "shares": shares, "prev_shares": prev_shares, "cusip": cu}
                 url = "https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets"
                 fam = "US_13F_CONTEXT"
+            review = _review(conf, why, payload)
             spec = {"event_type": et, "dedupe_key": key, "public_date": f["filed_date"], "issuer_cik": cik, "ticker": tick_cache[cik],
                     "company_name": name, "title": title, "payload": payload, "source_url": url, "event_family": fam,
-                    "identity_confidence": conf, "source_accession": acc, "available_at": f["available_at"]}
+                    "identity_confidence": conf, "source_accession": acc, "available_at": f["available_at"], "needs_review": review}
             specs.append(spec)
             if not dry_run:
                 spec["event_id"] = create_event(conn, event_type=et, dedupe_key=key, public_date=f["filed_date"], ticker=spec["ticker"], issuer_cik=cik,
                              company_name=name, title=title, payload=payload, source_url=url, is_backfill=is_backfill, event_family=fam,
-                             identity_confidence=conf, source_accession=acc, available_at_override=f["available_at"], date_quality="date")
+                             identity_confidence=conf, source_accession=acc, available_at_override=f["available_at"], date_quality="date",
+                             needs_review=review)
     return specs

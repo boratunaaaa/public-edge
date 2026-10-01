@@ -1,0 +1,178 @@
+{
+ "job": "families",
+ "wall_seconds": 216,
+ "result": {
+  "INST_13F_NEW_POSITION": {
+   "status": "TESTED",
+   "companies_90d": 930,
+   "raw_spy_beat_company_equal": 0.39537822890811863,
+   "companies": 785,
+   "effect": -0.013818622990597513,
+   "sd": 0.5981310395915476,
+   "se": 0.02134821225000272,
+   "ci95": [
+    -0.055660350464961844,
+    0.028023104483766815
+   ],
+   "boot_ci95": [
+    -0.052077646345162265,
+    0.028659387321807703
+   ],
+   "t_p": 0.5174400687318298,
+   "sign_p": 0.9633261516904313,
+   "bh_p": 0.6209280824781958
+  },
+  "INST_13F_ACCUMULATION": {
+   "status": "TESTED",
+   "companies_90d": 1420,
+   "raw_spy_beat_company_equal": 0.4192421193829644,
+   "companies": 1222,
+   "effect": 0.02696399345335515,
+   "sd": 0.5048778246951862,
+   "se": 0.014442776578971953,
+   "ci95": [
+    -0.0013433287014730337,
+    0.05527131560818334
+   ],
+   "boot_ci95": [
+    -0.0017516171771490927,
+    0.055009352349777885
+   ],
+   "t_p": 0.061908070420324375,
+   "sign_p": 0.11317664737301827,
+   "bh_p": 0.12381614084064875
+  },
+  "INST_13F_EXIT": {
+   "status": "TESTED",
+   "companies_90d": 2223,
+   "raw_spy_beat_company_equal": 0.40515566843776346,
+   "companies": 1895,
+   "effect": 0.026366377685638896,
+   "sd": 0.43708088572811626,
+   "se": 0.010040543160072277,
+   "ci95": [
+    0.006687274551450996,
+    0.046045480819826796
+   ],
+   "boot_ci95": [
+    0.006925493152406079,
+    0.045341123256690534
+   ],
+   "t_p": 0.008639705847919297,
+   "sign_p": 0.0005337898907677697,
+   "bh_p": 0.05183823508751578
+  },
+  "INST_13F_DECREASE": {
+   "status": "TESTED",
+   "companies_90d": 1902,
+   "raw_spy_beat_company_equal": 0.4050866860108351,
+   "companies": 1671,
+   "effect": 0.020902795588612466,
+   "sd": 0.4349343167770468,
+   "se": 0.010639848653052087,
+   "ci95": [
+    4.9075263181885126e-05,
+    0.041756515914043044
+   ],
+   "boot_ci95": [
+    -8.976660682226334e-05,
+    0.04167307856715397
+   ],
+   "t_p": 0.04946328539447359,
+   "sign_p": 0.0004460308953872011,
+   "bh_p": 0.12381614084064875
+  },
+  "FDA_APPROVAL": {
+   "status": "INSUFFICIENT_COVERAGE",
+   "companies_90d": 43,
+   "statuses": {
+    "complete": 152,
+    "no_data": 54,
+    "partial": 34,
+    "vendor_wait": 15
+   }
+  },
+  "FDA_EFFICACY_SUPPLEMENT": {
+   "status": "INSUFFICIENT_COVERAGE",
+   "companies_90d": 29,
+   "statuses": {
+    "complete": 529,
+    "no_data": 25,
+    "partial": 81,
+    "pending": 1,
+    "vendor_wait": 15
+   }
+  },
+  "RESULTS_POSTED": {
+   "status": "TESTED",
+   "companies_90d": 436,
+   "raw_spy_beat_company_equal": 0.3591142779550621,
+   "companies": 384,
+   "effect": -0.0077705608181211265,
+   "sd": 0.502051846542206,
+   "se": 0.025620226009385166,
+   "ci95": [
+    -0.05798528146837972,
+    0.04244415983213746
+   ],
+   "boot_ci95": [
+    -0.05802264933861014,
+    0.043900786244193586
+   ],
+   "t_p": 0.7616628442838427,
+   "sign_p": 0.9498704530360561,
+   "bh_p": 0.7616628442838427
+  },
+  "TRIAL_REGISTERED": {
+   "status": "TESTED",
+   "companies_90d": 755,
+   "raw_spy_beat_company_equal": 0.3588045026883667,
+   "companies": 611,
+   "effect": -0.029979396973021995,
+   "sd": 0.44577592931559107,
+   "se": 0.018034163758000384,
+   "ci95": [
+    -0.06532570870880747,
+    0.005366914762763471
+   ],
+   "boot_ci95": [
+    -0.06766004876311084,
+    0.005697192694496881
+   ],
+   "t_p": 0.09643923061674374,
+   "sign_p": 0.14228142215219053,
+   "bh_p": 0.1446588459251156
+  },
+  "FTD_SPIKE": {
+   "status": "INSUFFICIENT_COVERAGE",
+   "companies_90d": 0,
+   "statuses": {
+    "pending": 267
+   }
+  },
+  "SHORT_PRESSURE": {
+   "status": "INSUFFICIENT_COVERAGE",
+   "companies_90d": 0,
+   "statuses": {}
+  },
+  "GOV_CONTRACT": {
+   "status": "INSUFFICIENT_COVERAGE",
+   "companies_90d": 81,
+   "statuses": {
+    "complete": 415,
+    "no_data": 6,
+    "partial": 191,
+    "pending": 6
+   }
+  },
+  "CA_GOV_CONTRACT_WIN": {
+   "status": "INSUFFICIENT_COVERAGE",
+   "companies_90d": 3,
+   "statuses": {
+    "no_data": 14,
+    "partial": 15,
+    "pending": 3
+   }
+  }
+ }
+}

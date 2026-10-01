@@ -1,0 +1,394 @@
+{
+ "job": "coverage",
+ "wall_seconds": 1,
+ "result": {
+  "as_of": "2026-09-30",
+  "totals": {
+   "complete": 179291,
+   "no_data": 34163,
+   "partial": 77961,
+   "pending": 1300,
+   "vendor_wait": 8070
+  },
+  "by_type": {
+   "ACTIVIST_13D": {
+    "statuses": {
+     "complete": 13887,
+     "no_data": 5300,
+     "partial": 3958,
+     "pending": 52,
+     "vendor_wait": 434
+    },
+    "companies_90d": 3387,
+    "ready_for_validation": true
+   },
+   "BACKLOG_BREAKOUT": {
+    "statuses": {
+     "partial": 15,
+     "pending": 15
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "CAPACITY_EXPANSION": {
+    "statuses": {
+     "partial": 1,
+     "pending": 4
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "CASH_RUNWAY_RISK": {
+    "statuses": {
+     "partial": 225,
+     "pending": 136
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "CA_GOV_CONTRACT_AMENDMENT": {
+    "statuses": {
+     "partial": 3
+    },
+    "companies_90d": 1,
+    "ready_for_validation": false
+   },
+   "CA_GOV_CONTRACT_WIN": {
+    "statuses": {
+     "no_data": 14,
+     "partial": 15,
+     "pending": 3
+    },
+    "companies_90d": 3,
+    "ready_for_validation": false
+   },
+   "CLUSTER_INSIDER_BUY": {
+    "statuses": {
+     "complete": 18896,
+     "no_data": 3384,
+     "partial": 3870,
+     "pending": 25,
+     "vendor_wait": 19
+    },
+    "companies_90d": 2805,
+    "ready_for_validation": true
+   },
+   "CONGRESS_BUY": {
+    "statuses": {
+     "complete": 6004,
+     "no_data": 317,
+     "partial": 2007,
+     "pending": 2
+    },
+    "companies_90d": 1082,
+    "ready_for_validation": true
+   },
+   "CONGRESS_CLUSTER_BUY": {
+    "statuses": {
+     "complete": 533,
+     "no_data": 11,
+     "partial": 144
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "EARLY_DISCOVERY": {
+    "statuses": {
+     "partial": 39,
+     "pending": 22
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "FDA_APPROVAL": {
+    "statuses": {
+     "complete": 152,
+     "no_data": 54,
+     "partial": 34,
+     "vendor_wait": 15
+    },
+    "companies_90d": 43,
+    "ready_for_validation": false
+   },
+   "FDA_EFFICACY_SUPPLEMENT": {
+    "statuses": {
+     "complete": 529,
+     "no_data": 25,
+     "partial": 81,
+     "pending": 1,
+     "vendor_wait": 15
+    },
+    "companies_90d": 29,
+    "ready_for_validation": false
+   },
+   "FIRST_AUTOMOTIVE_OEM": {
+    "statuses": {
+     "partial": 6,
+     "pending": 6
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "FIRST_DOD_CONTRACT": {
+    "statuses": {
+     "partial": 7,
+     "pending": 9
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "FIRST_FORTUNE500_CUSTOMER": {
+    "statuses": {
+     "partial": 20,
+     "pending": 22
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "FIRST_HYPERSCALER": {
+    "statuses": {
+     "partial": 2,
+     "pending": 2
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "FIRST_MAJOR_CUSTOMER": {
+    "statuses": {
+     "partial": 32,
+     "pending": 29
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "FORM144_MAJOR_SALE": {
+    "statuses": {
+     "partial": 54,
+     "pending": 29
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "FTD_SPIKE": {
+    "statuses": {
+     "pending": 267
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "GOV_CONTRACT": {
+    "statuses": {
+     "complete": 415,
+     "no_data": 6,
+     "partial": 192,
+     "pending": 5
+    },
+    "companies_90d": 81,
+    "ready_for_validation": false
+   },
+   "INSIDER_OPEN_MARKET_BUY": {
+    "statuses": {
+     "complete": 56675,
+     "no_data": 10254,
+     "partial": 11427,
+     "pending": 84,
+     "vendor_wait": 106
+    },
+    "companies_90d": 4445,
+    "ready_for_validation": true
+   },
+   "INST_13F_ACCUMULATION": {
+    "statuses": {
+     "complete": 2423,
+     "no_data": 174,
+     "partial": 3022,
+     "vendor_wait": 186
+    },
+    "companies_90d": 1420,
+    "ready_for_validation": true
+   },
+   "INST_13F_DECREASE": {
+    "statuses": {
+     "complete": 16720,
+     "no_data": 884,
+     "partial": 20209,
+     "vendor_wait": 765
+    },
+    "companies_90d": 1902,
+    "ready_for_validation": true
+   },
+   "INST_13F_EXIT": {
+    "statuses": {
+     "complete": 17779,
+     "no_data": 2409,
+     "partial": 22050,
+     "vendor_wait": 3545
+    },
+    "companies_90d": 2223,
+    "ready_for_validation": true
+   },
+   "INST_13F_NEW_POSITION": {
+    "statuses": {
+     "complete": 1672,
+     "no_data": 166,
+     "partial": 2154,
+     "vendor_wait": 224
+    },
+    "companies_90d": 930,
+    "ready_for_validation": true
+   },
+   "MARGIN_INFLECTION": {
+    "statuses": {
+     "partial": 40,
+     "pending": 45
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "MATERIAL_NEWS": {
+    "statuses": {
+     "no_data": 120,
+     "partial": 2100,
+     "pending": 29,
+     "vendor_wait": 183
+    },
+    "companies_90d": 921,
+    "ready_for_validation": true
+   },
+   "MULTI_SIGNAL_EVENT": {
+    "statuses": {
+     "complete": 955,
+     "no_data": 13,
+     "partial": 376,
+     "pending": 9
+    },
+    "companies_90d": 823,
+    "ready_for_validation": true
+   },
+   "RESULTS_POSTED": {
+    "statuses": {
+     "complete": 10770,
+     "no_data": 1582,
+     "partial": 921,
+     "pending": 10,
+     "vendor_wait": 564
+    },
+    "companies_90d": 436,
+    "ready_for_validation": true
+   },
+   "REVENUE_ACCELERATION": {
+    "statuses": {
+     "partial": 66,
+     "pending": 70
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "STAGE_TRANSITION": {
+    "statuses": {
+     "partial": 8,
+     "pending": 9
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "TENK_CHANGE": {
+    "statuses": {
+     "complete": 6614,
+     "no_data": 798,
+     "partial": 1816,
+     "pending": 23,
+     "vendor_wait": 1374
+    },
+    "companies_90d": 3841,
+    "ready_for_validation": true
+   },
+   "THESIS_INVALIDATION": {
+    "statuses": {
+     "partial": 90,
+     "pending": 139
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "THESIS_STRENGTHENING": {
+    "statuses": {
+     "partial": 89,
+     "pending": 144
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "THESIS_WEAKENING": {
+    "statuses": {
+     "partial": 16,
+     "pending": 35
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "TRIAL_COMPLETION": {
+    "statuses": {
+     "pending": 21
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "TRIAL_PHASE_CHANGE": {
+    "statuses": {
+     "pending": 1
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "TRIAL_REGISTERED": {
+    "statuses": {
+     "complete": 25248,
+     "no_data": 8620,
+     "partial": 2859,
+     "pending": 15,
+     "vendor_wait": 640
+    },
+    "companies_90d": 755,
+    "ready_for_validation": true
+   },
+   "TRIAL_START": {
+    "statuses": {
+     "pending": 11
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "TRIAL_TERMINATED": {
+    "statuses": {
+     "pending": 2
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "TRUMP_FAMILY_SEC_EVENT": {
+    "statuses": {
+     "complete": 19,
+     "no_data": 32,
+     "partial": 13
+    },
+    "companies_90d": 6,
+    "ready_for_validation": false
+   },
+   "TRUMP_OGE_DISCLOSURE": {
+    "statuses": {
+     "pending": 23
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   },
+   "TR_SPK_ENFORCEMENT": {
+    "statuses": {
+     "pending": 1
+    },
+    "companies_90d": 0,
+    "ready_for_validation": false
+   }
+  }
+ }
+}
