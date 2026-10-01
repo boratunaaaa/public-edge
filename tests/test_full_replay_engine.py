@@ -499,3 +499,58 @@ def test_store_export_attaches_hits_acceptance_and_scan_status(engine, tmp_path)
     meta2 = {}
     rse._store_meta(meta2, tmp_path, [CIK], D(2021, 3, 1), D(2021, 6, 30), D(2020, 3, 1))
     assert meta2["efts_scan"]["done"] is False and meta2["efts_scan"]["keys"]["WARRANTS"].startswith("gap")
+
+
+# ------------------------------------------------------------------ LATE_FILING from the NT filing history
+
+def test_late_filing_is_every_nt_10k_10q_filing_with_its_acceptance_time():
+    from app.replay.risk_history import detect_text_hits, late_filing_hits
+    t = datetime(2019, 4, 1, 20, 59, tzinfo=UTC)
+    rows = [{"accession": f"n{i}", "form": f, "filing_date": D(2019, 4, 1), "acceptance_at": t if i == 0 else None,
+             "primary_document": "nt.htm"} for i, f in enumerate(("NT 10-K", "NT 10-Q/A", "NT 20-F", "NT 11-K", "10-K"))]
+    hits = late_filing_hits(CIK, rows)
+    assert [(h["adsh"], h["form"]) for h in hits] == [("n0", "NT 10-K"), ("n1", "NT 10-Q/A")]  # production's forms only
+    labels = detect_text_hits(hits, {"n0": t})
+    assert [(x.risk_type, x.available_at) for x in labels][0] == ("LATE_FILING", t)
+
+
+def test_financing_text_needs_every_issuers_nt_history_when_late_filing_comes_from_sec_filings():
+    from app.replay.risk_history import compute_coverage
+    meta = {"end": "2023-06-30", "efts_scan": {"done": True, "truncated": False, "from": "2022-03-01", "to": "2023-06-30"},
+            "late_filing": {"source": "sec_filings"}}
+    done = {"pit": {"submissions": {"status": "done"}}}
+    assert compute_coverage(meta, {"A": done, "B": done}, ["A", "B"]).status("FINANCING_TEXT") == "COMPLETE"
+    cov = compute_coverage(meta, {"A": done, "B": {"pit": {"submissions": {"status": "failed"}}}}, ["A", "B"])
+    assert cov.status("FINANCING_TEXT") == "PARTIAL" and "B" in cov.families["FINANCING_TEXT"]["why"]
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_store_export_takes_late_filing_from_sec_filings_not_from_the_store(engine, tmp_path):
+    import importlib.util
+
+    from app.db.models import sec_filings
+    from app.jobs import fulltext_backfill as fb
+    _seed_pit(engine)
+    t = datetime(2021, 5, 17, 20, 30, tzinfo=UTC)
+    with engine.begin() as c:
+        c.execute(sec_filings.insert().values(cik=CIK, accession="nt21", form="NT 10-Q", filing_date=D(2021, 5, 17),
+                                              acceptance_at=t, source_block="recent", run_id="t"))
+    spec = importlib.util.spec_from_file_location("rse", "scripts/risk_source_export.py")
+    rse = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rse)
+    q = fb.queries()
+    for key in q:
+        if key == "LATE_FILING":
+            continue  # the store has no LATE_FILING at all (EDGAR full-text search falls short on deadline days)
+        for y in (2020, 2021):
+            fb.write_shard(tmp_path, key, q[key][0], q[key][1], D(y, 1, 1), D(y, 12, 31),
+                           {"status": "done", "total": 0, "relation": "eq", "docs": []}, "t", 1)
+    meta = {"pit": True}
+    hits = rse._store_meta(meta, tmp_path, [CIK], D(2021, 3, 1), D(2021, 6, 30), D(2020, 3, 1))
+    assert meta["efts_scan"]["done"] is True and meta["late_filing"]["source"] == "sec_filings"
+    with engine.connect() as c:
+        recs = rse._batch_rows(c, [CIK], pit=True)
+        rse.attach_store_hits(c, recs, [CIK], hits, D(2020, 3, 1), True)
+    assert [(h["risk_key"], h["adsh"]) for h in recs[CIK]["efts_hits"]] == [("LATE_FILING", "nt21")]
+    assert recs[CIK]["acceptance"]["nt21"] == t

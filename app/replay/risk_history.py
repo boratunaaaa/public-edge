@@ -56,6 +56,13 @@ GC_PROXY = "GOING_CONCERN_PROXY"  # label type: an annual report no current-clas
 GC_PROXY_DETECTOR = "efts_annual_report_gc"
 GC_PROXY_DETECTOR_VERSION = "1"
 GC_TEXT_KEYS = ("GOING_CONCERN", "GOING_CONCERN_ALT")  # production phrases (10-K / 10-Q)
+# LATE_FILING is the Rule 12b-25 wording every NT 10-K / NT 10-Q carries. EDGAR full-text search does not deliver every
+# document of the busiest deadline days (1-4 short of its own total on 22 years), so it is rebuilt from the complete
+# filing history instead: every NT filing of these forms (production's EFTS query returns the /A variants too).
+# Measured on the 4 years the full-text store holds completely: all 4,872 full-text hits are such filings; 23 of
+# 4,895 NT filings (0.47 %) lack the exact wording and are counted too (the filing itself is the late-filing notice).
+LATE_FILING_KEY = "LATE_FILING"
+LATE_FILING_FORMS = ("NT 10-K", "NT 10-Q", "NT 10-K/A", "NT 10-Q/A")
 GC_FOREIGN_KEYS = ("FOREIGN_GC_0", "FOREIGN_GC_1", "FOREIGN_GC_2")  # the same wording on 20-F / 40-F
 # measured against production's current-classifier 10-K profiles (read-only, 2026-10-01; docs/FULL_REPLAY_ENGINE.md):
 # every ok profile 2020-03..2026-09 (classifier going concern = >= MIN_TOPIC_SENTENCES tagged sentences) vs a full-text
@@ -197,6 +204,15 @@ def detect_text_hits(hits: list[dict], acceptance: dict | None = None) -> list[R
                              TEXT_DETECTOR_VERSION if acceptance is None else TEXT_DETECTOR_VERSION_ACCEPTED,
                              _rule_version_text(), "HIGH" if acc else "MEDIUM", f"{h.get('form')} {fd}"))
     return out
+
+
+def late_filing_hits(cik: str, filings: list[dict]) -> list[dict]:
+    """sec_filings rows (accession, form, filing_date, acceptance_at, primary_document) -> LATE_FILING hits in the
+    full-text hit shape detect_text_hits reads."""
+    return [{"risk_key": LATE_FILING_KEY, "adsh": f["accession"], "cik": cik, "form": f["form"],
+             "file_date": f["filing_date"].isoformat() if hasattr(f["filing_date"], "isoformat") else str(f["filing_date"]),
+             "filename": f.get("primary_document") or ""}
+            for f in filings if f["form"] in LATE_FILING_FORMS]
 
 
 def unprofiled_annual(annual: list[dict], tenk: list[dict]) -> list[dict]:
@@ -583,8 +599,18 @@ def compute_coverage(meta: dict, inv: dict[str, dict], ciks: list[str]) -> Cover
                   ([] if scanned else ["no full-text scan: 10-K profiles only"])
         fam["GOING_CONCERN"] = {"status": PARTIAL, "from": e_lo or gc_from, "to": min(e_hi, horizon) if e_hi else horizon,
                                 "why": " | ".join(reasons), "missing_issuers": sorted(missing)}
-    fam["FINANCING_TEXT"] = ({"status": COMPLETE, "from": e_lo, "to": min(e_hi, horizon), "why": "full-text scan"}
-                             if scanned else {"status": UNAVAILABLE, "why": "no untruncated full-text scan for this scope"})
+    late = meta.get("late_filing") or {}
+    late_bad = sorted(c for c in ciks if late.get("source") == "sec_filings"
+                      and ((((inv.get(c) or {}).get("pit") or {}).get("submissions") or {}).get("status") != "done"))
+    if scanned and not late_bad:
+        fam["FINANCING_TEXT"] = {"status": COMPLETE, "from": e_lo, "to": min(e_hi, horizon),
+                                 "why": "full-text scan" + ("; LATE_FILING from the complete NT filing history"
+                                                            if late.get("source") == "sec_filings" else "")}
+    elif scanned:
+        fam["FINANCING_TEXT"] = {"status": PARTIAL, "from": e_lo, "to": min(e_hi, horizon),
+                                 "why": f"LATE_FILING: submissions history missing for {late_bad[:10]} ({len(late_bad)})"}
+    else:
+        fam["FINANCING_TEXT"] = {"status": UNAVAILABLE, "why": "no untruncated full-text scan for this scope"}
     pit = meta.get("pit")  # the export read the point-in-time tables (sec_filings / pit_facts) for these issuers
     if pit:
         _pit_coverage(fam, meta, inv, ciks, horizon)

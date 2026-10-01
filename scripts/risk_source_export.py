@@ -96,12 +96,16 @@ def attach_store_hits(c, recs: dict, part: list[str], store_hits: dict, lo: date
     wording on any annual report as gc_hits, and - with the point-in-time tables - their exact acceptance times."""
     from app.discovery.risks import TEXT_RISKS
     from app.replay.risk_history import GC_FOREIGN_KEYS, GC_TEXT_KEYS
-    acc = {}
+    from app.replay.risk_history import LATE_FILING_FORMS, LATE_FILING_KEY, late_filing_hits
+    acc, nt = {}, {}
     if pit:
         from app.pit import readers
         acc = readers.acceptance(c, part)
+        nt = readers.filings(c, part, list(LATE_FILING_FORMS))
     for cik in part:
-        hs = store_hits.get(cik, [])
+        hs = [h for h in store_hits.get(cik, []) if not (pit and h["risk_key"] == LATE_FILING_KEY)]
+        if pit:
+            hs += late_filing_hits(cik, nt.get(cik, []))
         recs[cik]["efts_hits"] = [h for h in hs if h["risk_key"] in TEXT_RISKS and lo.isoformat() <= (h["file_date"] or "")]
         recs[cik]["gc_hits"] = [h for h in hs if h["risk_key"] in GC_TEXT_KEYS + GC_FOREIGN_KEYS]
         if pit:
@@ -117,9 +121,14 @@ def _store_meta(meta: dict, store, ciks: list[str], start: date, end: date, lo: 
     from app.discovery.risks import TEXT_RISKS
     from app.pit.fulltext import load_hits, scan_status
     from app.replay.risk_history import GC_FOREIGN_KEYS, GC_TEXT_KEYS
-    st = scan_status(store, sorted(TEXT_RISKS), lo, end)
+    from app.replay.risk_history import LATE_FILING_FORMS, LATE_FILING_KEY
+    # LATE_FILING comes from the complete NT filing history (sec_filings), not from the store (risk_history)
+    keys = sorted(k for k in TEXT_RISKS if not (meta.get("pit") and k == LATE_FILING_KEY))
+    st = scan_status(store, keys, lo, end)
     meta["efts_scan"] = {"done": st["done"], "from": lo.isoformat(), "to": end.isoformat(), "truncated": st["truncated"],
                          "phrases": sorted(TEXT_RISKS), "batch": BATCH, "source": "store", "keys": st["keys"]}
+    if meta.get("pit"):
+        meta["late_filing"] = {"source": "sec_filings", "forms": list(LATE_FILING_FORMS)}
     glo = start - timedelta(days=ANNUAL_LOOKBACK_DAYS)
     gs = scan_status(store, sorted(GC_TEXT_KEYS + GC_FOREIGN_KEYS), glo, end)
     meta["gc_annual_scan"] = {"done": gs["done"], "from": glo.isoformat(), "to": end.isoformat(), "keys": gs["keys"]}

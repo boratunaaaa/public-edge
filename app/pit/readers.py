@@ -24,7 +24,8 @@ def _p(**kw) -> dict:
 def filings(conn: Connection, ciks: list[str], forms: list[str] | None = None) -> dict[str, list[dict]]:
     """cik -> filings (accession, form, filing_date, acceptance_at, items), oldest first; never an insider form."""
     out: dict[str, list[dict]] = {c: [] for c in ciks}
-    rows = conn.execute(text(f"""SELECT cik, accession, form, filing_date, acceptance_at, items FROM sec_filings
+    rows = conn.execute(text(f"""SELECT cik, accession, form, filing_date, acceptance_at, items, primary_document
+                                 FROM sec_filings
                                  WHERE cik = ANY(:c) AND {_NOT_INSIDER}
                                    AND (CAST(:f AS text[]) IS NULL OR form = ANY(CAST(:f AS text[])))
                                  ORDER BY cik, filing_date, acceptance_at NULLS LAST, accession"""),

@@ -88,6 +88,62 @@ dilution / 50 proxy labels. Coverage: FINANCING_ACTIONS, DILUTION, CASH_RUNWAY C
 PROXY_VALIDATED; GOING_CONCERN PARTIAL (foreign 20-F filers have no 10-K profile); FINANCING_TEXT
 UNAVAILABLE (no EDGAR full-text scan in this export).
 
+## Sprint 2 (from 1f34726): FINANCING_TEXT, GOING_CONCERN, ADR ratio
+
+### EDGAR full-text store (app.jobs.fulltext_backfill, app.pit.fulltext)
+
+- Queries: the 11 production TEXT_RISKS phrases on their production forms (one query per phrase and year covers
+  every company, like `scan_text_risks`) + FOREIGN_GC_0..2: the going-concern wording ("our" / "the Company's" /
+  "the Group's") on 20-F / 40-F. 2001-01-01..2026-09-30.
+- Stored as FILES on the server (`/opt/pe-crosscheck/fulltext`: gz JSONL per key and year + a manifest): no
+  production database change, no deploy. Read by `risk_source_export --efts-store`, whose scan status for
+  [start - 365 days, end] becomes the FINANCING_TEXT / GOING_CONCERN text coverage.
+- Exactness: EFTS page order is NOT stable (pilot: 21 of 5,886 documents shifted across pages of one query).
+  Periods are split until one page (100) holds them; a single busy day is split by form, then paged until the
+  union equals EFTS's total (DAY_PASSES). A year is stored only when its documents equal the total; otherwise
+  `failed` (retried next run, MAX_ATTEMPTS 3), a day beyond EFTS's 10,000 window `truncated` - both make the
+  coverage incomplete. Writes are atomic; re-runs skip done years; shared SEC budget mandatory; disk guard 8 GB.
+- Text labels are public from the filing's exact acceptance time (sec_filings) when known (detector v2).
+
+### GOING_CONCERN coverage (risk_history._gc_from_annual)
+
+Production has two going-concern inputs: the full-text phrases (discovery risk, `scan_text_risks`) and the 10-K
+classifier (`app.tenk`, forms 10-K / 10-K405 / 10-KT only; profiles exist since 2020-03, 31,302 ok, all current
+classifier v3). The export now lists every annual report from sec_filings (the ground truth of what was filed):
+
+- COMPLETE: the text scan covers the window AND every 10-K-family report of [start - 400 days, end] has a
+  current-classifier profile. 20-F / 40-F reports are not a gap: production never classifies them.
+- PROXY_VALIDATED: some 10-K-family report has no current profile (before 2020-03, `no_sections`, failed) - only
+  the full-text proxy can decide it. Never COMPLETE.
+- PARTIAL: the text scan or the annual-report scan is incomplete.
+
+Equivalent path for 20-F / 40-F and unprofiled 10-Ks (`detect_annual_gc_proxy`): a report whose full text holds the
+going-concern wording warns from its acceptance time until the next annual report. Staged only with
+`ReplayConfig.gc_proxy` (as GOING_CONCERN risks); such a run is FULL_WITH_PROXY at best.
+
+Validation (read-only, every current-classifier 10-K profile 2020-03..2026-09, 31,302 reports): precision 0.6125,
+recall 0.8488, F1 0.7115, agreement 0.9219 (TP 3,014 / FP 1,907 / FN 537 / TN 25,844), stable by year (F1
+0.65-0.74). Conservative bias: the wording also appears in auditor reports / notes the classifier does not read,
+and hedged mentions are not removed. Much weaker than the THESIS proxy; 20-F / 40-F cannot be validated at all
+(no production classifier) - the 10-K measurement is assumed to transfer.
+
+Rule change: a run that STAGES a family's proxy reports that family under proxy even when it is COMPLETE (its
+labels change decisions production could not have made). `ReplayConfig.proxies`, `comparison_key()` ignores both
+proxy options; `campaign.proxy_pairs` groups the without / with-proxy variants of one input.
+
+### ADR ratio (research only; production unchanged: NULL market cap stays)
+
+Pilot (read-only, 12 ADR issuers, every F-6-family document, regex "each ADS represents N shares"):
+TSM 5 (implied 2.3 T$), BSAC 400, BCH 200, AMX 20, SAP 1, EC 20 parse and look plausible. Not reliable:
+- TM, HSBC, NVO: no ratio in any F-6 document text (0 of 4-5 parsed);
+- LTM: the 2024 ratio change (F-6EF) does not parse - the last parsed ratio (1) gives 30 T$ again;
+- BABA: ratio 8 parses (2022), but its dei share count already looks ADS-denominated -> 25.7 B$ (clearly wrong);
+- AKTX: 2 -> 100 -> 2,000 -> 80,000 over time (ratio changes are real and frequent).
+Design if pursued: ratio(issuer, t) = the ratio of the latest F-6-family filing public at t that states one,
+used ONLY when (a) every F-6-family filing since the programme start parsed, (b) the dei count's unit is
+confirmed ordinary shares (e.g. cross-checked against XBRL `dei:EntityCommonStockSharesOutstanding` vs the ADS
+count in the 20-F cover), else NULL. Neither (a) nor (b) holds reliably in the pilot: not implemented.
+
 ## Remaining blockers for FULL
 
 1. FINANCING_TEXT needs the untruncated EDGAR full-text scan (`--efts`, network) for the scope.
