@@ -28,7 +28,13 @@ def main() -> int:
     with eng.connect() as c:
         c.execute(text("SET TRANSACTION READ ONLY"))
         v = c.execute(text("SELECT version_num FROM alembic_version")).scalar()
-        check("migration_0015", v == "0015", v)
+        # the head of the migrations shipped in this image (not a hard-coded revision that every deploy must edit)
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+        cfg = Config()
+        cfg.set_main_option("script_location", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "migrations"))
+        head = ScriptDirectory.from_config(cfg).get_current_head()
+        check("migration_head", v == head, f"{v} (head {head})")
         n, nulls = c.execute(text("SELECT count(*), count(*) FILTER (WHERE available_at IS NULL) FROM events")).one()
         check("available_at_populated", nulls == 0, f"{n} events, {nulls} null")
         bad = c.execute(text("""SELECT count(*) FROM events WHERE date_quality = 'exact' AND public_at IS NOT NULL
