@@ -439,6 +439,7 @@ def test_incomplete_risk_replay_is_never_a_fully_comparable_holdout():
     from app.replay.campaign import holdout_verdict_inputs
     full, partial = source(), source()
     full.risk_cov = _cov({})
+    full.actions_source = "sec_filings"  # FULL also needs the snapshot's actions from the complete SEC history
     partial.risk_cov = _cov({"CASH_RUNWAY": "PARTIAL"})
     _, a = run(cfg("t_hold_full", end=date(2021, 2, 12), period_role="holdout"), full)
     _, b = run(cfg("t_hold_part", end=date(2021, 2, 12), period_role="holdout"), partial)
