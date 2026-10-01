@@ -44,8 +44,9 @@ def sec(monkeypatch):
                                                  "acceptanceDateTime": [""], "items": ["3.02"]},
                                       "files": [{"name": "CIK" + B + "-submissions-001.json", "filingCount": 2}]}})
         if "submissions-001.json" in url:
-            return _Resp({"accessionNumber": ["b-2", "b-1"], "filingDate": ["2024-05-01", "2015-06-01"],
-                          "form": ["8-K", "S-3"], "acceptanceDateTime": ["2024-05-01T20:00:00.000Z", ""], "items": ["", ""]})
+            return _Resp({"accessionNumber": ["b-2", "b-1", "b-0"], "filingDate": ["2024-05-01", "2015-06-01", "2015-05-01"],
+                          "form": ["8-K", "S-3", "4"], "acceptanceDateTime": ["2024-05-01T20:00:00.000Z", "", ""],
+                          "items": ["", "", ""]})
         raise http.HttpError(url, 404, "nf")
     monkeypatch.setattr(http, "get", get)
     return calls
@@ -93,7 +94,7 @@ def test_submissions_merge_the_older_page_and_fill_missing_acceptance(engine, se
     with engine.connect() as c:
         rows = {r[0]: r[1:] for r in c.execute(text(
             "SELECT accession, form, acceptance_at IS NOT NULL, source_block FROM sec_filings ORDER BY 1"))}
-    assert set(rows) == {"b-1", "b-2"}
+    assert set(rows) == {"b-1", "b-2"}  # the insider Form 4 (b-0) is not stored
     assert rows["b-2"][1] is True  # the recent block had no time; the older page's time filled it
     assert rows["b-1"][0] == "S-3" and rows["b-1"][2].endswith("-001.json")
     with engine.connect() as c:

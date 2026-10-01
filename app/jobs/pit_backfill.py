@@ -6,6 +6,7 @@
 xbrl         SEC companyfacts -> pit_facts: cash, operating cash flow, debt, shares with the disclosing filing
              (accession, filed date, form); acceptance times come from sec_filings (visibility: app.pit.sources).
 submissions  SEC submissions -> sec_filings: the "recent" block AND every older page (filings.files), with form,
+             (insider ownership forms 3 / 4 / 5 excepted: INSIDER_FORMS)
              filing / report date, acceptance time, 8-K items, primary document; issuer identity = the requested CIK.
              production corporate_actions is NOT written (older actions would change live financing flags).
 
@@ -37,6 +38,9 @@ PAGE_URL = "https://data.sec.gov/submissions/{name}"
 MIN_FREE_GB = 8.0
 MAX_ATTEMPTS = 3
 BATCH = 1000
+# insider ownership reports (~46% of all filings): production ingests Form 4 through its own pipeline and they carry no
+# financing / dilution information - not stored, so the complete history fits the disk budget
+INSIDER_FORMS = frozenset({"3", "4", "5", "3/A", "4/A", "5/A"})
 
 
 def free_gb(path: str = "/") -> float:
@@ -81,7 +85,7 @@ def _rows_from_block(cik: str, block: dict, source: str) -> list[dict]:
     for i in range(n):
         acc = col("accessionNumber", i)
         fd = col("filingDate", i)
-        if not acc or not fd:
+        if not acc or not fd or (col("form", i) or "") in INSIDER_FORMS:
             continue
         try:
             fdate = date.fromisoformat(fd)
