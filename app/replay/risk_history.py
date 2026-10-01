@@ -40,7 +40,7 @@ SCHEMA = "risk_hist_v3"  # v3: run-scoped labels keyed per assessment interval, 
 COMPLETE, PARTIAL, UNAVAILABLE = "COMPLETE", "PARTIAL", "UNAVAILABLE"
 # a family reconstructed from a VALIDATED proxy of its production source: never COMPLETE, never FULL
 PROXY_VALIDATED = "PROXY_VALIDATED"
-PROXY_FAMILIES = ("THESIS_INVALIDATION",)
+PROXY_FAMILIES = ("THESIS_INVALIDATION", "GOING_CONCERN")
 FAMILIES = ("GOING_CONCERN", "FINANCING_TEXT", "FINANCING_ACTIONS", "DILUTION", "CASH_RUNWAY", "THESIS_INVALIDATION")
 # every production decision that reads risk history needs these to be complete for a FULL replay
 REQUIRED_FOR_FULL = FAMILIES
@@ -49,6 +49,24 @@ GC_DETECTOR = "tenk_gc_present"
 GC_DETECTOR_VERSION = "1"
 TEXT_DETECTOR = "efts_text_phrase"
 TEXT_DETECTOR_VERSION = "1"
+TEXT_DETECTOR_VERSION_ACCEPTED = "2"  # v2: public from the filing's exact acceptance time (when known)
+TENK_ANNUAL_FORMS = ("10-K", "10-K405", "10-KT")  # what production's 10-K classifier reads (app.tenk.engine.ANNUAL_FORMS)
+FOREIGN_ANNUAL_FORMS = ("20-F", "40-F")  # production never classifies these
+GC_PROXY = "GOING_CONCERN_PROXY"  # label type: an annual report no current-classifier profile decides
+GC_PROXY_DETECTOR = "efts_annual_report_gc"
+GC_PROXY_DETECTOR_VERSION = "1"
+GC_TEXT_KEYS = ("GOING_CONCERN", "GOING_CONCERN_ALT")  # production phrases (10-K / 10-Q)
+GC_FOREIGN_KEYS = ("FOREIGN_GC_0", "FOREIGN_GC_1", "FOREIGN_GC_2")  # the same wording on 20-F / 40-F
+# measured against production's current-classifier 10-K profiles (read-only, 2026-10-01; docs/FULL_REPLAY_ENGINE.md):
+# every ok profile 2020-03..2026-09 (classifier going concern = >= MIN_TOPIC_SENTENCES tagged sentences) vs a full-text
+# hit of the production going-concern phrases on the same accession. Errs on the conservative side (more false alarms
+# than misses); 20-F / 40-F have no production classifier to compare with - the same wording is assumed to transfer.
+GC_PROXY_VALIDATION: dict | None = {
+    "measured": "2026-10-01", "unit": "10-K with a current-classifier profile", "reports": 31302,
+    "TP": 3014, "FP": 1907, "FN": 537, "TN": 25844, "precision": 0.6125, "recall": 0.8488, "f1": 0.7115,
+    "agreement": 0.9219, "bias": "conservative (FP 1,907 > FN 537): the wording also appears in auditor reports / notes "
+                                 "the classifier does not read, and hedged mentions are not removed",
+    "foreign": "no production classifier for 20-F / 40-F: validated only through the 10-K measurement"}
 DILUTION_DETECTOR = "cover_page_share_growth"
 DILUTION_DETECTOR_VERSION = "2"  # v2: one label per assessment (triggering filing)
 DILUTION_DETECTOR_VERSION_ACCEPTED = "3"  # v3: public from the triggering filings' acceptance time (when known)
@@ -154,25 +172,64 @@ def detect_going_concern_10k(filings: list[dict]) -> list[RiskLabel]:
     return out
 
 
-def detect_text_hits(hits: list[dict]) -> list[RiskLabel]:
+def detect_text_hits(hits: list[dict], acceptance: dict | None = None) -> list[RiskLabel]:
     """EDGAR full-text hits {risk_key, adsh, cik, form, file_date, filename} for the production TEXT_RISKS phrases:
-    one label per (risk, filing), public at the end of its filing day, counted for TEXT_LOOKBACK_DAYS like
-    scan_text_risks. Severity escalation / FREQUENT_CAPITAL_RAISES are applied point in time in active_risks()."""
+    one label per (risk, filing), public at the filing's exact acceptance time when `acceptance` knows it (v2), else
+    at the end of its filing day, counted for TEXT_LOOKBACK_DAYS like scan_text_risks. Severity escalation /
+    FREQUENT_CAPITAL_RAISES are applied point in time in active_risks(). Keys outside TEXT_RISKS are ignored."""
     from app.discovery.risks import CANON, TEXT_RISKS
     from app.discovery.sec_data import doc_url
     out, seen = [], set()
     for h in hits:
+        if h["risk_key"] not in TEXT_RISKS:
+            continue
         risk = CANON.get(h["risk_key"], h["risk_key"])
         k = (risk, h["cik"], h["adsh"])
         if k in seen or not h.get("file_date"):
             continue
         seen.add(k)
         fd = date.fromisoformat(str(h["file_date"])[:10])
-        avail = end_of_public_day(fd)
+        acc = (acceptance or {}).get(h["adsh"])
+        avail = acc or end_of_public_day(fd)
         out.append(RiskLabel(risk, h["cik"], TEXT_RISKS[h["risk_key"]][2], h["adsh"],
-                             doc_url(h["cik"], h["adsh"], h.get("filename") or ""), "EDGAR full-text hit", None, avail, avail,
-                             avail + timedelta(days=TEXT_LOOKBACK_DAYS), TEXT_DETECTOR, TEXT_DETECTOR_VERSION,
-                             _rule_version_text(), "MEDIUM", f"{h.get('form')} {fd}"))
+                             doc_url(h["cik"], h["adsh"], h.get("filename") or ""), "EDGAR full-text hit", acc, avail, avail,
+                             avail + timedelta(days=TEXT_LOOKBACK_DAYS), TEXT_DETECTOR,
+                             TEXT_DETECTOR_VERSION if acceptance is None else TEXT_DETECTOR_VERSION_ACCEPTED,
+                             _rule_version_text(), "HIGH" if acc else "MEDIUM", f"{h.get('form')} {fd}"))
+    return out
+
+
+def unprofiled_annual(annual: list[dict], tenk: list[dict]) -> list[dict]:
+    """The annual reports of ONE issuer no current-classifier 10-K profile decides: every 20-F / 40-F (production
+    never classifies them) and every 10-K-family report without an ok profile of the current classifier version
+    (no sections, failed, not yet ingested, before the profiles' history)."""
+    from app.tenk.diff import CLASSIFIER_VERSION
+    ok = {f["accession"][:20] for f in tenk
+          if ((f.get("profile") or {}).get("_meta") or {}).get("v", 1) == CLASSIFIER_VERSION}
+    return [a for a in annual if a["form"] in FOREIGN_ANNUAL_FORMS or a["accession"][:20] not in ok]
+
+
+def detect_annual_gc_proxy(cik: str, annual: list[dict], hits: list[dict], tenk: list[dict]) -> list[RiskLabel]:
+    """SEC-only proxy of the 10-K classifier's going-concern state, for annual reports it does not decide
+    (unprofiled_annual): a report whose full text holds the production going-concern wording (EDGAR full-text hit on
+    that accession) warns, from its acceptance time until the issuer's next annual report is public (which decides
+    again, like detect_going_concern_10k). Staged only by a run that asks for it (ReplayConfig.gc_proxy)."""
+    keys = set(GC_TEXT_KEYS) | set(GC_FOREIGN_KEYS)
+    hit = {h["adsh"] for h in hits if h["risk_key"] in keys}
+    ordered = sorted(annual, key=lambda a: (a.get("acceptance_at") or end_of_public_day(a["filing_date"]), a["accession"]))
+    todo = {a["accession"] for a in unprofiled_annual(annual, tenk)}
+    out = []
+    for i, a in enumerate(ordered):
+        if a["accession"] not in todo or a["accession"] not in hit:
+            continue
+        avail = a.get("acceptance_at") or end_of_public_day(a["filing_date"])
+        nxt = ordered[i + 1] if i + 1 < len(ordered) else None
+        until = (nxt.get("acceptance_at") or end_of_public_day(nxt["filing_date"])) if nxt else None
+        out.append(RiskLabel(GC_PROXY, cik, "HIGH", a["accession"],
+                             f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{a['accession'].replace('-', '')}/",
+                             "EDGAR full-text hit on an annual report", a.get("acceptance_at"), avail, avail, until,
+                             GC_PROXY_DETECTOR, GC_PROXY_DETECTOR_VERSION, "going-concern wording (" + "/".join(
+                                 sorted(keys)) + ")", "MEDIUM", f"{a['form']} {a['filing_date']}: going-concern wording"))
     return out
 
 
@@ -275,7 +332,7 @@ def active_risks(labels: list[RiskLabel], cik: str, at: datetime) -> dict[str, d
     """Production-shaped discovery_risks rows of one issuer at `at` from the labels public by then (severity
     escalation and FREQUENT_CAPITAL_RAISES exactly as scan_text_risks). Each row keeps its evidence."""
     # the THESIS proxy is not a production discovery risk (it is staged as thesis_changes, only when a run asks for it)
-    live = [x for x in labels if x.cik == cik and x.risk_type != THESIS_PROXY and x.available_at <= at
+    live = [x for x in labels if x.cik == cik and x.risk_type not in (THESIS_PROXY, GC_PROXY) and x.available_at <= at
             and (x.valid_to is None or at < x.valid_to)]
     out: dict[str, dict] = {}
     by: dict[str, list[RiskLabel]] = {}
@@ -309,19 +366,22 @@ class Coverage:
         return (self.families.get(family) or {}).get("status", UNAVAILABLE)
 
 
-def coverage_policy(cov: Coverage, start: date, end: date, allow_proxy: bool = False) -> dict:
+def coverage_policy(cov: Coverage, start: date, end: date, allow_proxy: bool | set | frozenset = False) -> dict:
     """FULL iff every REQUIRED_FOR_FULL family is COMPLETE and its covered range contains [start, end].
 
-    A PROXY_VALIDATED family (PROXY_FAMILIES) never makes a run FULL: without allow_proxy it is simply not complete
-    (LIMITED); with it - the run stages the proxy - the best a run can reach is FULL_WITH_PROXY, a comparability class
-    of its own that a final (holdout) verdict never pools with FULL (app.replay.campaign)."""
+    A PROXY_VALIDATED family (PROXY_FAMILIES) never makes a run FULL: without its proxy allowed it is simply not
+    complete (LIMITED); with it the best a run can reach is FULL_WITH_PROXY, a comparability class of its own that a
+    final (holdout) verdict never pools with FULL (app.replay.campaign). allow_proxy: True = every proxy family, or the
+    set of families whose proxy the run STAGES - such a family is reported under proxy even when it is COMPLETE (the
+    staged proxy labels change decisions production could not have made)."""
+    allowed = set(PROXY_FAMILIES) if allow_proxy is True else set(allow_proxy or ())
     missing, proxied = {}, {}
     for fam in REQUIRED_FOR_FULL:
         f = cov.families.get(fam) or {}
         st = f.get("status", UNAVAILABLE)
         lo, hi = f.get("from"), f.get("to")
         spans = lo is not None and lo <= start and (hi is None or hi >= end)
-        if st == PROXY_VALIDATED and fam in PROXY_FAMILIES and allow_proxy and spans:
+        if st in (PROXY_VALIDATED, COMPLETE) and fam in PROXY_FAMILIES and fam in allowed and spans:
             proxied[fam] = {"from": lo, "to": hi, "validation": f.get("validation")}
         elif st != COMPLETE or not spans:
             missing[fam] = st if st != COMPLETE else PARTIAL
@@ -333,7 +393,7 @@ def coverage_policy(cov: Coverage, start: date, end: date, allow_proxy: bool = F
         flag = "RISK_HISTORY_COMPLETE_WITH_PROXY" if proxied else "RISK_HISTORY_COMPLETE"
         comparability = "FULL_WITH_PROXY" if proxied else "FULL"
     return {"flag": flag, "comparability": comparability, "families": cov.families, "not_complete": missing,
-            "proxy": proxied, "proxy_allowed": allow_proxy}
+            "proxy": proxied, "proxy_allowed": sorted(allowed)}
 
 
 # ------------------------------------------------------------------ store (replay database only)
@@ -510,7 +570,9 @@ def compute_coverage(meta: dict, inv: dict[str, dict], ciks: list[str]) -> Cover
     missing = {c: (inv.get(c) or {}).get("gc_missing", ["no inventory for this issuer"]) for c in ciks}
     missing = {c: w for c, w in missing.items() if w}
     gc_from = tenk_full_from({int(k): v for k, v in (meta.get("tenk_by_year") or {}).items()})
-    if scanned and not outdated and not missing:
+    if meta.get("annual_reports"):  # the export lists every annual report from the SEC history: decide exactly
+        _gc_from_annual(fam, meta, inv, ciks, horizon, scanned, e_lo, e_hi)
+    elif scanned and not outdated and not missing:
         lo, hi = _bounded(e_lo, e_hi, horizon)
         fam["GOING_CONCERN"] = {"status": COMPLETE, "from": lo, "to": hi,
                                 "why": "full-text scan of the production phrases + current-classifier 10-K profiles"}
@@ -553,6 +615,44 @@ def compute_coverage(meta: dict, inv: dict[str, dict], ciks: list[str]) -> Cover
                                    "why": f"news thesis_changes only since {thesis}; 10-K going concern before"}
                                   if gc_from else {"status": UNAVAILABLE, "why": "no thesis inputs"})
     return Coverage(fam)
+
+
+def _gc_from_annual(fam: dict, meta: dict, inv: dict[str, dict], ciks: list[str], horizon: date, scanned: bool,
+                    e_lo: date | None, e_hi: date | None) -> None:
+    """GOING_CONCERN when the export carries each issuer's annual reports (sec_filings, the ground truth of what was
+    filed). Production's inputs: the going-concern phrases of the full-text scan (discovery risk) and the 10-K
+    classifier on 10-K-family reports. COMPLETE = the scan covers the window AND every 10-K-family report of the window
+    (and the one before it) has a current-classifier profile; 20-F / 40-F reports have no production classifier input
+    at all, so they are not a gap (their equivalent path is the proxy). Any unprofiled 10-K-family report -> only the
+    validated full-text proxy can decide it: PROXY_VALIDATED (never COMPLETE), or PARTIAL without a validated proxy
+    / a complete annual-report scan."""
+    unprof = {c: (inv.get(c) or {}).get("gc_unprofiled") or [] for c in ciks}
+    tenk_gaps = {c: [a for a in u if a["form"] in TENK_ANNUAL_FORMS] for c, u in unprof.items()}
+    tenk_gaps = {c: u for c, u in tenk_gaps.items() if u}
+    foreign = sorted(c for c, u in unprof.items() if any(a["form"] in FOREIGN_ANNUAL_FORMS for a in u))
+    annual_scan = bool((meta.get("gc_annual_scan") or {}).get("done"))
+    if not scanned:
+        fam["GOING_CONCERN"] = {"status": PARTIAL, "why": "no complete full-text scan of the going-concern phrases "
+                                                          "(production's discovery-risk input)"}
+        return
+    lo, hi = _bounded(e_lo, e_hi, horizon)
+    note = (f"; {len(foreign)} issuer(s) file 20-F / 40-F (no production classifier input; equivalent path = proxy)"
+            if foreign else "")
+    if not tenk_gaps:
+        fam["GOING_CONCERN"] = {"status": COMPLETE, "from": lo, "to": hi, "foreign_issuers": foreign,
+                                "why": "full-text scan + a current-classifier profile for every 10-K-family report" + note}
+    elif annual_scan and GC_PROXY_VALIDATION:
+        n = sum(len(u) for u in tenk_gaps.values())
+        fam["GOING_CONCERN"] = {"status": PROXY_VALIDATED, "from": lo, "to": hi, "validation": GC_PROXY_VALIDATION,
+                                "proxy_issuers": sorted(tenk_gaps), "foreign_issuers": foreign,
+                                "why": f"{n} 10-K-family report(s) of {len(tenk_gaps)} issuer(s) without a current-classifier "
+                                       "profile: decided only by the validated full-text proxy" + note}
+    else:
+        fam["GOING_CONCERN"] = {"status": PARTIAL, "from": lo, "to": hi, "missing_issuers": sorted(tenk_gaps),
+                                "why": "unprofiled 10-K-family reports for " + ", ".join(
+                                    f"{c}: {[a['accession'] for a in u][:3]}" for c, u in sorted(tenk_gaps.items())[:5])
+                                       + ("" if annual_scan else "; annual-report full-text scan incomplete")
+                                       + ("" if GC_PROXY_VALIDATION else "; proxy not validated")}
 
 
 def _pit_coverage(fam: dict, meta: dict, inv: dict[str, dict], ciks: list[str], horizon: date) -> None:
@@ -643,6 +743,9 @@ def _issuer(rec: dict) -> dict:
     from app.pit.sources import PitFact
     rec["runway"] = [PitFact(rec["cik"], f[0], f[1], _d(f[2]) if f[2] else None, _d(f[3]), float(f[4]), _d(f[5]), f[6], f[7])
                      for f in rec.get("runway", [])]
+    for a in rec.get("annual", []):
+        a["filing_date"] = _d(a["filing_date"])
+        a["acceptance_at"] = _dt(a["acceptance_at"]) if a.get("acceptance_at") else None
     for f in rec.get("proxy_8k", []):
         f["filing_date"] = _d(f["filing_date"])
         f["acceptance_at"] = _dt(f["acceptance_at"]) if f.get("acceptance_at") else None
@@ -713,7 +816,11 @@ def issuer_inventory(rec: dict, start: date, end: date, jobs: dict | None = None
                 and ((f.get("profile") or {}).get("_meta") or {}).get("v", 1) != CLASSIFIER_VERSION]
     d = dilution_inventory(rec.get("shares", []))
     return {"outdated_profiles": outdated, "gc_missing": gc_missing(rec, start, end, jobs), "actions": rec.get("actions") or {},
-            "dilution": {k: (str(v) if isinstance(v, date) else v) for k, v in d.items()}, "pit": rec.get("pit") or {}}
+            "dilution": {k: (str(v) if isinstance(v, date) else v) for k, v in d.items()}, "pit": rec.get("pit") or {},
+            # annual reports of the window (+ the one before it) no current-classifier profile decides
+            "gc_unprofiled": [{"accession": a["accession"], "form": a["form"]}
+                              for a in unprofiled_annual([a for a in rec.get("annual") or [] if lo <= a["filing_date"] <= end],
+                                                         rec.get("tenk", []))]}
 
 
 def source_digest(path) -> str:
@@ -731,7 +838,9 @@ def run_config() -> dict:
             "dilution": [DILUTION_DETECTOR, DILUTION_DETECTOR_VERSION, DILUTION_DETECTOR_VERSION_ACCEPTED,
                          "metrics.share_growth_yoy>=0.2"],
             "runway": [RUNWAY_DETECTOR, RUNWAY_DETECTOR_VERSION, RUNWAY_RULE, _annual_days()],
-            "thesis_proxy": [THESIS_PROXY_DETECTOR, THESIS_PROXY_DETECTOR_VERSION, list(THESIS_PROXY_ITEMS)]}
+            "thesis_proxy": [THESIS_PROXY_DETECTOR, THESIS_PROXY_DETECTOR_VERSION, list(THESIS_PROXY_ITEMS)],
+            "gc_proxy": [GC_PROXY_DETECTOR, GC_PROXY_DETECTOR_VERSION, list(GC_TEXT_KEYS), list(GC_FOREIGN_KEYS)],
+            "text_accepted": TEXT_DETECTOR_VERSION_ACCEPTED}
 
 
 def _annual_days() -> list[int]:
@@ -783,7 +892,8 @@ def reconstruct(store: RiskHistoryStore, run_id: str, path) -> dict:
     inv: dict[str, dict] = {}
     seen: list[str] = []
     trailer = None
-    done = {f: store.done(run_id, f) for f in ("GOING_CONCERN_10K", "TEXT", "DILUTION", "CASH_RUNWAY", "THESIS_PROXY")}
+    done = {f: store.done(run_id, f) for f in ("GOING_CONCERN_10K", "TEXT", "DILUTION", "CASH_RUNWAY", "THESIS_PROXY",
+                                                 "GC_PROXY")}
     for kind, rec in it:
         if kind == "trailer":
             trailer = rec
@@ -798,7 +908,9 @@ def reconstruct(store: RiskHistoryStore, run_id: str, path) -> dict:
         inv[cik] = issuer_inventory(rec, start, end, meta.get("tenk_jobs"))
         acc = rec.get("acceptance")  # None = an export without the point-in-time tables (filing dates only)
         for fam, detect in (("GOING_CONCERN_10K", lambda r: detect_going_concern_10k(r.get("tenk", []))),
-                            ("TEXT", lambda r: detect_text_hits(r.get("efts_hits", []))),
+                            ("TEXT", lambda r: detect_text_hits(r.get("efts_hits", []), acc)),
+                            ("GC_PROXY", lambda r: detect_annual_gc_proxy(r["cik"], r.get("annual", []),
+                                                                          r.get("gc_hits", []), r.get("tenk", []))),
                             ("DILUTION", lambda r: detect_dilution(r["cik"], r.get("shares", []), acc)),
                             ("CASH_RUNWAY", lambda r: detect_cash_runway(r["cik"], r["runway"], acc or {})),
                             ("THESIS_PROXY", lambda r: detect_thesis_proxy(r["cik"], r.get("proxy_8k", [])))):

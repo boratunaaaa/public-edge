@@ -279,7 +279,9 @@ def test_proxy_validated_is_never_full_and_only_full_with_proxy_when_the_run_use
     assert on["comparability"] == "FULL_WITH_PROXY" and on["flag"] == "RISK_HISTORY_COMPLETE_WITH_PROXY"
     assert on["proxy"]["THESIS_INVALIDATION"]["validation"] == {"recall": 0.888}
     cov.families["THESIS_INVALIDATION"]["status"] = "COMPLETE"
-    assert coverage_policy(cov, s, e, allow_proxy=True)["comparability"] == "FULL"  # a real history stays FULL
+    assert coverage_policy(cov, s, e)["comparability"] == "FULL"  # a real history is FULL ...
+    # ... unless the run ALSO stages the proxy: its labels change decisions production could not have made
+    assert coverage_policy(cov, s, e, allow_proxy={"THESIS_INVALIDATION"})["comparability"] == "FULL_WITH_PROXY"
 
 
 def test_runs_with_and_without_the_proxy_are_a_comparable_pair():
@@ -288,7 +290,7 @@ def test_runs_with_and_without_the_proxy_are_a_comparable_pair():
     assert a.comparison_key() == b.comparison_key() and a.config_hash() != b.config_hash()
     # a run configured before the option (no thesis_proxy) keeps its hash
     import hashlib
-    legacy = {k: v for k, v in a.as_dict().items() if k not in ("replay_id", "notes", "thesis_proxy")}
+    legacy = {k: v for k, v in a.as_dict().items() if k not in ("replay_id", "notes", "thesis_proxy", "gc_proxy")}
     assert a.config_hash() == hashlib.sha256(json.dumps(legacy, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -367,3 +369,133 @@ def test_the_thesis_proxy_is_staged_only_when_the_run_asks_and_is_reported_separ
     off = risk_history(cfg("x"), src)
     assert on["comparability"] == "FULL_WITH_PROXY" and on["gates_on_proxy"] == ["exit:D_THESIS thesis invalidation"]
     assert off["comparability"] == "LIMITED" and "exit:D_THESIS thesis invalidation" in off["gates_not_applied"]
+
+
+# ------------------------------------------------------------------ FINANCING_TEXT / GOING_CONCERN from the full-text store
+
+def _annual(acc, form, d, h=21):
+    return {"accession": acc, "form": form, "filing_date": d, "acceptance_at": datetime.combine(d, time(h), UTC)}
+
+
+def _hit(key, adsh, d, form="10-K"):
+    return {"risk_key": key, "adsh": adsh, "cik": CIK, "form": form, "file_date": d.isoformat(), "filename": "d.htm"}
+
+
+def test_text_hits_are_public_from_the_acceptance_time_and_only_production_phrases_count():
+    from app.replay.risk_history import TEXT_DETECTOR_VERSION_ACCEPTED, detect_text_hits, end_of_public_day
+    t = datetime(2022, 5, 3, 14, 1, tzinfo=UTC)
+    hits = [_hit("ATM_OFFERING", "a1", D(2022, 5, 3), "8-K"), _hit("FOREIGN_GC_0", "f1", D(2022, 5, 4), "20-F")]
+    v2 = detect_text_hits(hits, {"a1": t})
+    assert [(x.risk_type, x.available_at, x.detector_version) for x in v2] == [("ATM_OFFERING", t, TEXT_DETECTOR_VERSION_ACCEPTED)]
+    assert detect_text_hits(hits)[0].available_at == end_of_public_day(D(2022, 5, 3))  # v1 without acceptance
+
+
+def _tenk_profile(acc, d, gc):
+    from tests.test_risk_history import _tenk
+    return _tenk(acc, datetime.combine(d, time(21), UTC), gc)
+
+
+def test_unprofiled_annual_reports_are_foreign_ones_and_10ks_without_a_current_profile():
+    from app.replay.risk_history import unprofiled_annual
+    annual = [_annual("k1-0000000000000001", "10-K", D(2021, 3, 1)), _annual("k2-0000000000000002", "10-K", D(2022, 3, 1)),
+              _annual("f1-0000000000000003", "20-F", D(2022, 4, 1))]
+    tenk = [_tenk_profile("k1-0000000000000001", D(2021, 3, 1), 0), {**_tenk_profile("k2-0000000000000002", D(2022, 3, 1), 0),
+                                                                        "profile": {"_meta": {"v": 1}}}]  # older classifier
+    assert [a["accession"][:2] for a in unprofiled_annual(annual, tenk)] == ["k2", "f1"]
+
+
+def test_the_annual_gc_proxy_decides_only_unprofiled_reports_until_the_next_report():
+    from app.replay.risk_history import GC_PROXY, detect_annual_gc_proxy
+    annual = [_annual("k1-0000000000000001", "10-K", D(2021, 3, 1)), _annual("f1-0000000000000002", "20-F", D(2022, 4, 1)),
+              _annual("f2-0000000000000003", "20-F", D(2023, 4, 3))]
+    hits = [_hit("GOING_CONCERN", "k1-0000000000000001", D(2021, 3, 1)),  # profiled: the classifier decides, not the proxy
+            _hit("FOREIGN_GC_1", "f1-0000000000000002", D(2022, 4, 1), "20-F")]
+    out = detect_annual_gc_proxy(CIK, annual, hits, [_tenk_profile("k1-0000000000000001", D(2021, 3, 1), 0)])
+    assert [(x.risk_type, x.source_document_id, x.available_at, x.valid_to) for x in out] == [
+        (GC_PROXY, "f1-0000000000000002", annual[1]["acceptance_at"], annual[2]["acceptance_at"])]
+
+
+def _gc_inv(unprof):
+    return {"pit": {}, "gc_unprofiled": unprof}
+
+
+def test_going_concern_coverage_from_the_annual_report_ground_truth():
+    from app.replay.risk_history import PROXY_VALIDATED, _gc_from_annual
+    lo, hi, hz = D(2022, 3, 1), D(2023, 6, 30), D(2023, 6, 30)
+    f = {}
+    _gc_from_annual(f, {"gc_annual_scan": {"done": True}}, {"A": _gc_inv([]), "B": _gc_inv([{"accession": "x", "form": "20-F"}])},
+                    ["A", "B"], hz, True, lo, hi)
+    assert f["GOING_CONCERN"]["status"] == "COMPLETE" and f["GOING_CONCERN"]["foreign_issuers"] == ["B"]
+    gap = {"A": _gc_inv([{"accession": "k", "form": "10-K"}])}
+    f = {}
+    _gc_from_annual(f, {"gc_annual_scan": {"done": True}}, gap, ["A"], hz, True, lo, hi)
+    assert f["GOING_CONCERN"]["status"] == PROXY_VALIDATED and f["GOING_CONCERN"]["validation"]["recall"] == 0.8488
+    f = {}
+    _gc_from_annual(f, {"gc_annual_scan": {"done": False}}, gap, ["A"], hz, True, lo, hi)
+    assert f["GOING_CONCERN"]["status"] == "PARTIAL"  # an unprofiled 10-K and no complete annual-report scan
+    f = {}
+    _gc_from_annual(f, {"gc_annual_scan": {"done": True}}, {"A": _gc_inv([])}, ["A"], hz, False, None, None)
+    assert f["GOING_CONCERN"]["status"] == "PARTIAL"  # production's discovery-risk scan is not complete
+
+
+def test_a_run_that_stages_the_gc_proxy_is_never_full():
+    from app.replay.risk_history import FAMILIES, Coverage, coverage_policy
+    from tests.test_replay import cfg
+    rng = {"from": D(2015, 1, 1), "to": D(2026, 9, 30)}
+    cov = Coverage({f: {"status": "COMPLETE", **rng} for f in FAMILIES})
+    c = cfg("x", gc_proxy=True)
+    assert c.proxies == frozenset({"GOING_CONCERN"}) and cfg("y").proxies == frozenset()
+    pol = coverage_policy(cov, D(2021, 3, 1), D(2021, 6, 30), allow_proxy=c.proxies)
+    assert pol["comparability"] == "FULL_WITH_PROXY" and list(pol["proxy"]) == ["GOING_CONCERN"]
+    assert cfg("a").comparison_key() == c.comparison_key() == cfg("b", thesis_proxy=True).comparison_key()
+
+
+@db
+def test_the_gc_proxy_reaches_the_gate_only_when_the_run_asks_for_it():
+    from app.replay.risk_history import detect_annual_gc_proxy
+    from tests.test_replay import _event, cfg, q, run, source
+    a = _annual("f1-0000000000000001", "20-F", D(2021, 3, 1))
+    labels = detect_annual_gc_proxy(CIK, [a], [_hit("FOREIGN_GC_0", a["accession"], D(2021, 3, 1), "20-F")], [])
+    for rid, on in (("t_gcp_on", True), ("t_gcp_off", False)):
+        src = source(events=[_event(1, datetime(2021, 3, 19, 21, 30, tzinfo=UTC))])
+        src.risk_labels = list(labels)
+        _, res = run(cfg(rid, end=D(2021, 3, 26), gc_proxy=on), src)
+        assert res.status == "COMPLETED", res.leakage
+    assert q("replay_t_gcp_on", "SELECT risk, detected_at FROM discovery_risks WHERE risk = 'GOING_CONCERN'") == \
+        [("GOING_CONCERN", a["acceptance_at"])]
+    assert q("replay_t_gcp_off", "SELECT count(*) FROM discovery_risks WHERE risk = 'GOING_CONCERN'") == [(0,)]
+    assert q("replay_t_gcp_on", "SELECT count(*) FROM proposed_trades") == [(0,)]  # SEVERE_FINANCING_RISK
+    assert q("replay_t_gcp_off", "SELECT count(*) FROM proposed_trades") == [(1,)]
+
+
+@db
+@pytest.mark.usefixtures("clean")
+def test_store_export_attaches_hits_acceptance_and_scan_status(engine, tmp_path):
+    import importlib.util
+
+    from app.jobs import fulltext_backfill as fb
+    _seed_pit(engine)
+    spec = importlib.util.spec_from_file_location("rse", "scripts/risk_source_export.py")
+    rse = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rse)
+    doc = {"adsh": "e301", "filename": "d.htm", "form": "8-K", "file_date": "2021-06-02", "ciks": [CIK]}
+    q = fb.queries()
+    for key in q:
+        for y in (2019, 2020, 2021):
+            docs = [doc] if (key == "MIN_BID_DEFICIENCY" and y == 2021) else []
+            fb.write_shard(tmp_path, key, q[key][0], q[key][1], D(y, 1, 1), D(y, 12, 31),
+                           {"status": "done", "total": len(docs), "relation": "eq", "docs": docs}, "t", 1)
+    meta = {}
+    hits = rse._store_meta(meta, tmp_path, [CIK], D(2021, 3, 1), D(2021, 6, 30), D(2020, 3, 1))
+    assert meta["efts_scan"]["done"] is True and meta["gc_annual_scan"]["done"] is True
+    with engine.connect() as c:
+        recs = rse._batch_rows(c, [CIK], pit=True)
+        rse.attach_store_hits(c, recs, [CIK], hits, D(2020, 3, 1), True)
+    r = recs[CIK]
+    assert [(h["risk_key"], h["adsh"]) for h in r["efts_hits"]] == [("MIN_BID_DEFICIENCY", "e301")]
+    assert r["acceptance"]["e301"] == datetime(2021, 6, 2, 14, tzinfo=UTC)  # its exact public time travels with it
+    assert [a["accession"] for a in r["annual"]] == ["k21"]
+    (tmp_path / "manifest/WARRANTS/2020-01-01_2020-12-31.json").unlink()  # a hole in one production phrase
+    meta2 = {}
+    rse._store_meta(meta2, tmp_path, [CIK], D(2021, 3, 1), D(2021, 6, 30), D(2020, 3, 1))
+    assert meta2["efts_scan"]["done"] is False and meta2["efts_scan"]["keys"]["WARRANTS"].startswith("gap")

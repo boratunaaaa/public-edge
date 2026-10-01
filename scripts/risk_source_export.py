@@ -16,6 +16,7 @@ import os
 os.environ["PE_SHARED_RATELIMIT"] = "0"  # before app.http is imported anywhere: the limiter must not touch a database
 
 import argparse  # noqa: E402
+from pathlib import Path  # noqa: E402
 import json  # noqa: E402
 import sys  # noqa: E402
 from datetime import date, timedelta  # noqa: E402
@@ -73,6 +74,8 @@ def _pit_rows(c, ciks: list[str], recs: dict[str, dict]) -> None:
     runway = readers.facts(c, ciks, [RUNWAY_CASH, RUNWAY_OCF])
     acc = readers.acceptance(c, ciks)
     k8 = readers.filings(c, ciks, ["8-K", "8-K/A"])
+    from app.replay.risk_history import FOREIGN_ANNUAL_FORMS, TENK_ANNUAL_FORMS
+    annual = readers.filings(c, ciks, list(TENK_ANNUAL_FORMS + FOREIGN_ANNUAL_FORMS))
     prog = readers.progress(c, ciks)
     for cik in ciks:
         r = recs[cik]
@@ -83,6 +86,44 @@ def _pit_rows(c, ciks: list[str], recs: dict[str, dict]) -> None:
         used |= {f["accession"] for f in r["proxy_8k"]}
         r["acceptance"] = {a: t for a, t in acc.get(cik, {}).items() if a in used}
         r["pit"] = prog.get(cik, {})
+        # every annual report the issuer filed (sec_filings: the ground truth for the going-concern coverage)
+        r["annual"] = [{k: f[k] for k in ("accession", "form", "filing_date", "acceptance_at")} for f in annual.get(cik, [])]
+        r["acceptance"].update({f["accession"]: f["acceptance_at"] for f in annual.get(cik, []) if f["acceptance_at"]})
+
+
+def attach_store_hits(c, recs: dict, part: list[str], store_hits: dict, lo: date, pit: bool) -> None:
+    """The store's documents of this batch: production phrases from `lo` (the scan window) as efts_hits, going-concern
+    wording on any annual report as gc_hits, and - with the point-in-time tables - their exact acceptance times."""
+    from app.discovery.risks import TEXT_RISKS
+    from app.replay.risk_history import GC_FOREIGN_KEYS, GC_TEXT_KEYS
+    acc = {}
+    if pit:
+        from app.pit import readers
+        acc = readers.acceptance(c, part)
+    for cik in part:
+        hs = store_hits.get(cik, [])
+        recs[cik]["efts_hits"] = [h for h in hs if h["risk_key"] in TEXT_RISKS and lo.isoformat() <= (h["file_date"] or "")]
+        recs[cik]["gc_hits"] = [h for h in hs if h["risk_key"] in GC_TEXT_KEYS + GC_FOREIGN_KEYS]
+        if pit:
+            used = {h["adsh"] for h in recs[cik]["efts_hits"] + recs[cik]["gc_hits"]}
+            recs[cik].setdefault("acceptance", {}).update({k: v for k, v in acc.get(cik, {}).items() if k in used})
+
+
+ANNUAL_LOOKBACK_DAYS = 500  # the annual report public at the window start (one fiscal year + the filing deadline)
+
+
+def _store_meta(meta: dict, store, ciks: list[str], start: date, end: date, lo: date) -> dict[str, list[dict]]:
+    """Scan status from the full-text store (app.pit.fulltext.scan_status) and the hits of these issuers."""
+    from app.discovery.risks import TEXT_RISKS
+    from app.pit.fulltext import load_hits, scan_status
+    from app.replay.risk_history import GC_FOREIGN_KEYS, GC_TEXT_KEYS
+    st = scan_status(store, sorted(TEXT_RISKS), lo, end)
+    meta["efts_scan"] = {"done": st["done"], "from": lo.isoformat(), "to": end.isoformat(), "truncated": st["truncated"],
+                         "phrases": sorted(TEXT_RISKS), "batch": BATCH, "source": "store", "keys": st["keys"]}
+    glo = start - timedelta(days=ANNUAL_LOOKBACK_DAYS)
+    gs = scan_status(store, sorted(GC_TEXT_KEYS + GC_FOREIGN_KEYS), glo, end)
+    meta["gc_annual_scan"] = {"done": gs["done"], "from": glo.isoformat(), "to": end.isoformat(), "keys": gs["keys"]}
+    return load_hits(store, sorted(set(TEXT_RISKS) | set(GC_FOREIGN_KEYS)), ciks, min(lo, glo), end)
 
 
 def main() -> int:
@@ -91,6 +132,9 @@ def main() -> int:
     ap.add_argument("--start", required=True)
     ap.add_argument("--end", required=True)
     ap.add_argument("--efts", action="store_true", help="also scan the production TEXT_RISKS phrases (network)")
+    ap.add_argument("--efts-store", help="read the production phrases from the full-text store of "
+                                         "app.jobs.fulltext_backfill instead (no network; the store's completeness "
+                                         "for [start - 365 days, end] becomes the scan status)")
     ap.add_argument("--source", choices=("pit", "production"), default="pit",
                     help="pit: shares / runway / actions / thesis proxy from the point-in-time tables (sec_filings, "
                          "pit_facts); production: the pre-2026-10 inputs (shares_outstanding_facts, no runway)")
@@ -104,7 +148,7 @@ def main() -> int:
     pit = a.source == "pit"
     if pit:
         # the snapshot export (replay_export_snapshot --source pit) derives the corporate actions from sec_filings
-        meta.update(pit=True, actions_source="sec_filings")
+        meta.update(pit=True, actions_source="sec_filings", annual_reports=True)
     with eng.connect() as c:
         c.execute(text("SET TRANSACTION READ ONLY"))
         meta["tenk_by_year"] = {str(int(y)): n for y, n in c.execute(text(
@@ -127,6 +171,11 @@ def main() -> int:
                              "history_from": (date.today() - timedelta(days=365 * HISTORY_YEARS)).isoformat()}
         c.rollback()
     lo = start - timedelta(days=365)
+    store_hits: dict[str, list[dict]] = {}
+    if a.efts_store:
+        if a.efts:
+            ap.error("--efts and --efts-store are exclusive")
+        store_hits = _store_meta(meta, Path(a.efts_store), ciks, start, end, lo)
     if a.efts:
         from app.discovery.risks import TEXT_RISKS
         meta["efts_scan"] = {"done": True, "from": lo.isoformat(), "to": end.isoformat(), "truncated": False,
@@ -141,6 +190,14 @@ def main() -> int:
             c.execute(text("SET TRANSACTION READ ONLY"))
             recs = _batch_rows(c, part, pit)
             c.rollback()
+        if a.efts_store:
+            from app.discovery.risks import TEXT_RISKS
+            with eng.connect() as c:
+                c.execute(text("SET TRANSACTION READ ONLY"))
+                attach_store_hits(c, recs, part, store_hits, lo, pit)
+                c.rollback()
+            for key in TEXT_RISKS:
+                efts_batches[key] = efts_batches.get(key, 0) + 1
         if a.efts:
             from app.discovery.risks import TEXT_RISKS
             from app.discovery.sec_data import efts_search
@@ -160,7 +217,7 @@ def main() -> int:
         del recs
     from app.replay.risk_history import TRAILER, scope_key
     print(json.dumps({TRAILER: {"issuers": len(ciks), "ciks_digest": scope_key(ciks), "batches": batches,
-                                "efts_batches": efts_batches if a.efts else {}}}))
+                                "efts_batches": efts_batches if (a.efts or a.efts_store) else {}}}))
     return 0
 
 

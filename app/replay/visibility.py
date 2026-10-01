@@ -138,12 +138,21 @@ class Stager:
     observation moving forward, a registry entry that changed owner, a delisting that became public, a dated corporate
     action) - the result equals a full rebuild at that date (tested)."""
 
-    def __init__(self, src: SourceData, guards: Guards, index: PriceIndex | None = None, thesis_proxy: bool = False):
+    def __init__(self, src: SourceData, guards: Guards, index: PriceIndex | None = None, thesis_proxy: bool = False,
+                 gc_proxy: bool = False):
         self.src, self.guards = src, guards
         # stage the SEC-only THESIS_INVALIDATION proxy (risk_history.THESIS_PROXY) as thesis_changes rows - only when the
         # run asks for it (ReplayConfig.thesis_proxy), so the same snapshot replays with and without it
         self.thesis_proxy = thesis_proxy
         self._theses: set[str] = set()
+        # stage the full-text going-concern proxy (risk_history.GC_PROXY) as GOING_CONCERN risks - only on request
+        self.gc_proxy = gc_proxy
+        self._labels = list(src.risk_labels)
+        if gc_proxy:
+            from dataclasses import replace
+
+            from app.replay.risk_history import GC_PROXY
+            self._labels = [replace(x, risk_type="GOING_CONCERN") if x.risk_type == GC_PROXY else x for x in self._labels]
         self.index = index or PriceIndex(src)
         self.staged: set[int] = set()
         self.by_time = sorted(src.events, key=lambda e: (e["available_at"], e["id"]))
@@ -180,7 +189,7 @@ class Stager:
         if self.thesis_proxy:
             self._stage_thesis_proxy(conn, now)
         for cik in sorted(self.issuers):
-            rows = active_risks(self.src.risk_labels, cik, now)
+            rows = active_risks(self._labels, cik, now)
             fin = self._financing(conn, cik, rows, now)
             if fin:
                 rows["HIGH_FINANCING_RISK"] = fin

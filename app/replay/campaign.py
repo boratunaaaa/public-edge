@@ -135,8 +135,10 @@ def proxy_pairs(conn) -> list[dict]:
         key = (prov.get("comparison_key"), r["data_snapshot"])
         if key[0] is None:
             continue
-        side = "with_proxy" if (prov.get("config") or {}).get("thesis_proxy") else "without_proxy"
+        conf = prov.get("config") or {}
+        on = [f for f, k in (("THESIS_INVALIDATION", "thesis_proxy"), ("GOING_CONCERN", "gc_proxy")) if conf.get(k)]
+        side = "with_proxy:" + "+".join(on) if on else "without_proxy"
         groups.setdefault(key, {})[side] = {"replay_id": r["replay_id"], "comparability": r["comparability"],
                                             "metrics": (r["result"] or {}).get("metrics")}
     return [{"comparison_key": k[0], "data_snapshot": k[1], **v} for k, v in sorted(groups.items())
-            if "with_proxy" in v and "without_proxy" in v]
+            if "without_proxy" in v and any(s.startswith("with_proxy") for s in v)]

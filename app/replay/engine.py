@@ -58,7 +58,7 @@ def risk_history(cfg: ReplayConfig, src: SourceData) -> dict:
         # the reconstruction vouches for the SEC history, but this snapshot stages production's (recent-block) table
         cov.families["FINANCING_ACTIONS"] = {**fa, "status": PARTIAL,
                                              "why": f"snapshot actions from {src.actions_source}, not the SEC history"}
-    pol = coverage_policy(cov, s, e, allow_proxy=cfg.thesis_proxy)
+    pol = coverage_policy(cov, s, e, allow_proxy=cfg.proxies)
     pol["gates_not_applied"] = sorted({g for fam in pol["not_complete"] for g in FAMILY_CONSUMERS.get(fam, ())})
     pol["gates_on_proxy"] = sorted({g for fam in pol["proxy"] for g in FAMILY_CONSUMERS.get(fam, ())})
     pol["labels"] = len(src.risk_labels)
@@ -122,7 +122,7 @@ class ReplayRun:
         self.guards = Guards()
         self.vis = Visibility()
         self.index = PriceIndex(source)
-        self.stager = Stager(source, self.guards, self.index, thesis_proxy=config.thesis_proxy)
+        self.stager = Stager(source, self.guards, self.index, thesis_proxy=config.thesis_proxy, gc_proxy=config.gc_proxy)
         self.provider = ReplayPriceProvider(source, self.vis, self.guards, self.index)
         self.risk = risk_history(config, source)
         self.clock = ReplayClock(_at(config.start.astimezone(NY).date(), PRE_OPEN) - timedelta(minutes=1))

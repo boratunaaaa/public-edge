@@ -33,6 +33,9 @@ class ReplayConfig:
     # stage the SEC-only THESIS_INVALIDATION proxy (risk_history.THESIS_PROXY) as thesis_changes: the run's best
     # comparability is then FULL_WITH_PROXY, never FULL. Off by default; the same snapshot replays both ways
     thesis_proxy: bool = False
+    # stage the full-text going-concern proxy (risk_history.GC_PROXY) for annual reports no current-classifier profile
+    # decides - every 20-F / 40-F and unprofiled 10-Ks: GOING_CONCERN is then reported under proxy (FULL_WITH_PROXY)
+    gc_proxy: bool = False
     notes: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -62,13 +65,19 @@ class ReplayConfig:
     def config_hash(self) -> str:
         """Hash of everything that can change a result (the replay_id / notes only name the run)."""
         d = {k: v for k, v in self.as_dict().items() if k not in ("replay_id", "notes")}
-        if not d.get("thesis_proxy"):
-            d.pop("thesis_proxy", None)  # runs configured before the option keep their hash
+        for k in ("thesis_proxy", "gc_proxy"):
+            if not d.get(k):
+                d.pop(k, None)  # runs configured before the option keep their hash
         return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:16]
 
+    @property
+    def proxies(self) -> frozenset:
+        """The risk families whose SEC-only proxy this run stages."""
+        return frozenset(f for f, on in (("THESIS_INVALIDATION", self.thesis_proxy), ("GOING_CONCERN", self.gc_proxy)) if on)
+
     def comparison_key(self) -> str:
-        """Equal for two runs that differ ONLY in thesis_proxy: the with / without-proxy pair (campaign.proxy_pairs)."""
-        d = {k: v for k, v in self.as_dict().items() if k not in ("replay_id", "notes", "thesis_proxy")}
+        """Equal for runs that differ ONLY in their proxy options: the with / without-proxy pairs (campaign.proxy_pairs)."""
+        d = {k: v for k, v in self.as_dict().items() if k not in ("replay_id", "notes", "thesis_proxy", "gc_proxy")}
         return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:16]
 
 
