@@ -272,7 +272,10 @@ def test_tiingo_quota_stops_at_the_free_tier_and_other_providers_continue(engine
     with engine.begin() as c:
         now = datetime.now(timezone.utc)
         for i in range(475):  # 95% of 500 unique symbols this month already used
-            quota.record(c, "tiingo", "prices", 200, f"S{i}", now=now - timedelta(days=2))
+            quota.record(c, "tiingo", "prices", 200, f"S{i}", now=now)
+        # age the requests out of the hour/day windows WITHOUT moving them into the previous calendar
+        # month (a plain `now - 2 days` crosses the month boundary on the 1st-2nd of every month)
+        c.execute(text("UPDATE provider_requests SET at = at - interval '2 days' WHERE provider = 'tiingo'"))
         assert quota.can_request(c, "tiingo", "NEWSYM")[1] == "MONTHLY_SYMBOL_LIMIT"
         assert quota.can_request(c, "tiingo", "S1")[0] is True  # an already-used symbol costs no new slot
         for _ in range(47):
