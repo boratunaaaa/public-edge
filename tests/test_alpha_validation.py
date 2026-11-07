@@ -1,6 +1,8 @@
 """Alpha-validation work: 10-K text changes, insider person profiles, paper ledger, proposals, gate."""
 from datetime import date, datetime, timedelta, timezone
 
+import sys
+
 import pytest
 from sqlalchemy import select, text
 
@@ -1181,6 +1183,7 @@ def test_tenk_extraction_runs_isolated_and_matches_inprocess():
     assert bad.items == {} and bad.failed is None  # a broken document yields no sections, never an exception
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is not enforced on macOS; the cap only exists on the Linux production container")
 def test_tenk_extraction_memory_blowup_is_contained(monkeypatch):
     """A child that exceeds its address-space cap fails alone and is reported, never silently 'no_sections'."""
     from app.tenk import engine as te

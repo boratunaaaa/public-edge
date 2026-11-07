@@ -241,7 +241,7 @@ def gather(conn, f: dict, campaign_index: dict | None = None) -> dict:
                 else:
                     prior_other += 1
     elif key:
-        rows = conn.execute(text("""SELECT issuer_cik FROM thirteen_d_classification c JOIN activist_filings a ON a.accession = c.accession
+        rows = conn.execute(text("""SELECT a.issuer_cik FROM thirteen_d_classification c JOIN activist_filings a ON a.accession = c.accession
                                     WHERE c.investor_key = :k AND a.filed_date < :d AND c.filing_class = 'ACTIVIST_13D'
                                       AND c.confidence IN ('HIGH', 'MEDIUM') AND (c.flags->>'stated_strong')::int > 0"""),
                             {"k": key, "d": filed}).scalars().all()
